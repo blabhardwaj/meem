@@ -23,6 +23,7 @@ ALLOWED_EXTENSIONS: set[str] = {".pdf", ".docx", ".txt", ".md"}
 SESSION_TOKEN_SECRET: str = os.getenv("SESSION_TOKEN_SECRET", "")
 SESSION_TOKEN_TTL_SECONDS: int = int(os.getenv("SESSION_TOKEN_TTL_SECONDS", 8 * 60 * 60))
 PASSWORD_HASH_ITERATIONS: int = int(os.getenv("PASSWORD_HASH_ITERATIONS", 310_000))
+DEFAULT_NEW_USER_PASSWORD: str = os.getenv("DEFAULT_NEW_USER_PASSWORD", "DemoPassword123!")
 
 # Google OAuth2 — leave blank to disable Google sign-in (endpoints then 503).
 GOOGLE_CLIENT_ID: str = os.getenv("GOOGLE_CLIENT_ID", "")

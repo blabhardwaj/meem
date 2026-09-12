@@ -387,8 +387,9 @@ const UsersTab = ({ currentUser, initialProjectId = '' }) => {
     if (!email.trim()) return;
     setBusy(true); setError(''); setNotice('');
     try {
-      await adminApi.createUser({ email: email.trim(), full_name: newUserName.trim() });
-      setNotice(`${email.trim()} was added. Use "Assign Roles" to give them access.`);
+      const res = await adminApi.createUser({ email: email.trim(), full_name: newUserName.trim() });
+      const pwd = res?.default_password || 'DemoPassword123!';
+      setNotice(`${email.trim()} was added with default password "${pwd}". Use "Assign Roles" to give them access.`);
       setNewUserName('');
       await load();
     } catch (err) {
@@ -718,7 +719,7 @@ const UsersTab = ({ currentUser, initialProjectId = '' }) => {
       </Modal>
 
       {isOrgAdmin ? (
-        <Card title="Add organization user" description="Create the login first (email + full name), then assign roles.">
+        <Card title="Add organization user" description="Create the login first (email + full name; default password: DemoPassword123!), then assign roles.">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
             <Input label="Email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="new.user@company.com" />
             <Input label="Full name" value={newUserName} onChange={(e) => setNewUserName(e.target.value)} placeholder="New user" />

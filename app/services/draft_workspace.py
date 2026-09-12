@@ -18,13 +18,25 @@ no stage / team / project.
 """
 
 import hashlib
+import json
 import re
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.services.draft_export import DRAFTS_DIR, save_draft
 from app.services.scan_score import ScoringError, score_document
 
 WIP_DIR = DRAFTS_DIR / ".wip"
+FINALIZED_DIR = DRAFTS_DIR / ".finalized"
+
+
+class DraftNotFoundError(Exception):
+    pass
+
+
+class DraftPermissionError(Exception):
+    pass
 
 # Hidden marker embedded at the top of a chat-finalized file (see
 # embed_scan_marker / check_scan_marker below) — lets the upload flow
@@ -104,7 +116,7 @@ def check_scan_marker(content: str) -> dict | None:
     return {"score": score, "content_without_marker": remainder}
 
 
-def finalize(session_id: str) -> dict:
+def finalize(session_id: str, *, user_id: uuid.UUID | str | None = None) -> dict:
     """
     Finalize this session's draft:
       1. read the working file (the real, final draft — nothing the LLM could
@@ -114,11 +126,11 @@ def finalize(session_id: str) -> dict:
          embed_scan_marker) — lets a later re-upload of this exact file skip
          re-scanning (see check_scan_marker / document_upload_review.py),
       4. save it into drafts/ with draft_export's slug+timestamp name,
-      5. delete the working file.
+      5. record finalized metadata under drafts/.finalized/<draft_id>.json,
+      6. delete the working file.
 
-    Returns {"scan", "scan_error", "path", "content"} — "content" is the
-    EXACT bytes written to disk (marker included when a score exists), since
-    that's what's scanned, shown to the user, and downloaded.
+    Returns {"scan", "scan_error", "path", "content", "draft_id", "filename"} — "content"
+    is the EXACT bytes written to disk (marker included when a score exists).
     """
     path = _wip_path(session_id)
     if not path.exists():
@@ -138,4 +150,64 @@ def finalize(session_id: str) -> dict:
     final_path = save_draft(content_to_save)
     delete_working_draft(session_id)
 
-    return {"scan": scan, "scan_error": scan_error, "path": final_path, "content": content_to_save}
+    draft_id = str(uuid.uuid4())
+    FINALIZED_DIR.mkdir(parents=True, exist_ok=True)
+    filename = Path(final_path).name
+    meta = {
+        "draft_id": draft_id,
+        "user_id": str(user_id) if user_id else None,
+        "session_id": str(session_id),
+        "filename": filename,
+        "path": str(final_path),
+        "score": scan["overall_score"] if scan else None,
+        "scan": scan,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    meta_path = FINALIZED_DIR / f"{draft_id}.json"
+    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+    return {
+        "scan": scan,
+        "scan_error": scan_error,
+        "path": final_path,
+        "content": content_to_save,
+        "draft_id": draft_id,
+        "filename": filename,
+    }
+
+
+def get_finalized_draft(draft_id: str, *, user_id: uuid.UUID | str) -> dict:
+    """
+    Look up a finalized draft by its opaque draft_id and verify that the acting user
+    owns it. Returns a dict with {draft_id, user_id, filename, path, score, content_bytes, content_str}.
+    Raises DraftNotFoundError if missing/invalid, or DraftPermissionError if owned by another user.
+    """
+    if not draft_id:
+        raise DraftNotFoundError("draft_id is required")
+    safe_name = Path(str(draft_id)).name
+    if safe_name != str(draft_id) or not safe_name:
+        raise DraftNotFoundError(f"Invalid draft_id: {draft_id!r}")
+
+    meta_path = FINALIZED_DIR / f"{safe_name}.json"
+    if not meta_path.is_file():
+        raise DraftNotFoundError(f"Finalized draft {draft_id} not found")
+
+    try:
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise DraftNotFoundError(f"Could not read finalized draft metadata: {exc}") from exc
+
+    # Enforce ownership: user_id must match if set
+    expected_user = str(user_id) if user_id else None
+    if data.get("user_id") and expected_user and data["user_id"] != expected_user:
+        raise DraftPermissionError("You do not have access to this draft")
+
+    # Resolve actual draft file
+    file_path = Path(data.get("path") or (DRAFTS_DIR / data["filename"]))
+    if not file_path.is_file():
+        raise DraftNotFoundError(f"Draft file {data.get('filename')} not found on disk")
+
+    file_bytes = file_path.read_bytes()
+    data["content_bytes"] = file_bytes
+    data["content_str"] = file_bytes.decode("utf-8")
+    return data

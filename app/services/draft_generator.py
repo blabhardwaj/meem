@@ -32,18 +32,28 @@ def draft_document(document_type: str, user_input: str) -> str:
 
     messages = build_draft_messages(document_type, user_input)
 
-    response = _client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=messages,
-        temperature=0.4,
-        max_tokens=4000,
-    )
+    create_kwargs = {
+        "model": GROQ_MODEL,
+        "messages": messages,
+        "temperature": 0.4,
+        "max_tokens": 2500,
+    }
+    if "qwen" in GROQ_MODEL.lower():
+        create_kwargs["reasoning_effort"] = "none"
+    else:
+        create_kwargs["reasoning_effort"] = "low"
+
+    response = _client.chat.completions.create(**create_kwargs)
 
     content = response.choices[0].message.content
 
     if not content or not content.strip():
         raise DraftGenerationError("Groq returned an empty response")
 
+    import re
+    content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
+    if "</think>" in content:
+        content = content.split("</think>", 1)[1]
     content = content.strip()
 
     # Light sanity check — trim any stray preamble before the first heading,

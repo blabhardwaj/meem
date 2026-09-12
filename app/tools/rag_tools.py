@@ -255,9 +255,9 @@ def _run_search(query: str, stage_id: str | None = None) -> dict:
 # ---------------------------------------------------------------------------
 
 @tool
-def summarize_document(document_reference: str) -> dict:
+def summarize_document(document_reference: str, stage_reference: str | None = None) -> dict:
     """
-    Summarise ONE whole document, named by title or filename. Use this — NOT
+    Summarise ONE whole document, named by title, filename, or document ID. Use this — NOT
     search_documents — whenever the user asks to "summarise", "give me an
     overview of", or "tl;dr" a SPECIFIC named document.
 
@@ -267,8 +267,11 @@ def summarize_document(document_reference: str) -> dict:
     summarised — never fragments.
 
     Args:
-        document_reference: the document's title or filename, as the user
+        document_reference: the document's title, filename, or UUID, as the user
             said it (e.g. "the onboarding guide", "vacation-policy.md").
+        stage_reference: optional stage name or stage UUID (e.g. "Sign Off",
+            "Architecture & Design") to disambiguate when multiple stages contain
+            a document with the same name, or when the user specifies a stage.
 
     Returns a dict with "status":
         - "summarized": {"document", "summary"}
@@ -276,7 +279,7 @@ def summarize_document(document_reference: str) -> dict:
           (this also covers documents the user cannot see at all — do not
           speculate about whether such a document exists).
         - "ambiguous": {"matches": [...]} — several documents match; ask the
-          user which one.
+          user which one (specifying the stage).
         - "blocked_by_sensitivity": the document exists and is on the user's
           team but is confidential above their clearance. Carries
           "requestable_teams" — offer to request access.
@@ -290,17 +293,25 @@ def summarize_document(document_reference: str) -> dict:
         if not ref:
             return {"status": "not_found", "message": "No document reference was given."}
 
-        candidates = _match_documents(db, ctx.project_id, ref)
+        stage_id = None
+        if stage_reference:
+            stage_id = _resolve_stage(db, ctx.project_id, stage_reference)
+
+        candidates = _match_documents(db, ctx.project_id, ref, stage_id=stage_id)
         if not candidates:
             return {
                 "status": "not_found",
                 "message": f"No document matching '{ref}' was found in this project.",
             }
         if len(candidates) > 1:
+            stage_names = _stage_name_map(db, ctx.project_id, {d.stage_id for d in candidates})
             return {
                 "status": "ambiguous",
-                "matches": [d.original_filename for d in candidates],
-                "message": "Multiple documents match that reference.",
+                "matches": [
+                    f"{d.original_filename} (stage: '{stage_names.get(d.stage_id, 'Unknown')}')"
+                    for d in candidates
+                ],
+                "message": "Multiple documents match that reference across different stages. Please specify which stage.",
             }
 
         doc = candidates[0]

@@ -37,18 +37,29 @@ def reform_document(document_markdown: str, scan_result: dict) -> str:
     """
     messages = build_reformation_messages(document_markdown, scan_result)
 
-    response = _client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=messages,
-        temperature=0.2,  # low — this is a corrective/faithful task, not creative
-        max_tokens=4000,
-    )
+    import re
+
+    create_kwargs = {
+        "model": GROQ_MODEL,
+        "messages": messages,
+        "temperature": 0.2,  # low — this is a corrective/faithful task, not creative
+        "max_tokens": 2500,
+    }
+    if "qwen" in GROQ_MODEL.lower():
+        create_kwargs["reasoning_effort"] = "none"
+    else:
+        create_kwargs["reasoning_effort"] = "low"
+
+    response = _client.chat.completions.create(**create_kwargs)
 
     content = response.choices[0].message.content
 
     if not content or not content.strip():
         raise ReformationError("Groq returned an empty response")
 
+    content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
+    if "</think>" in content:
+        content = content.split("</think>", 1)[1]
     content = content.strip()
 
     # Same defensive preamble-strip as draft_generator.py

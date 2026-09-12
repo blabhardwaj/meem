@@ -49,7 +49,7 @@ const DocumentItem = ({ document, canReview, canDelete, onChanged }) => {
   const [versionError, setVersionError] = useState('');
   const versionInputRef = useRef(null);
 
-  const state = document.workflow_state || 'draft';
+  const state = document.workflow_state;
 
   const run = async (fn) => {
     setBusy(true);
@@ -129,12 +129,13 @@ const DocumentItem = ({ document, canReview, canDelete, onChanged }) => {
           {document.doc_type} &middot; {formatDate(document.created_at)} &middot; {sensitivityLabel(document.sensitivity_level)}
         </p>
         <div className="flex flex-wrap items-center gap-2 mt-2">
-          <Badge variant={stateVariant[state] || 'neutral'}>{state.replace('_', ' ')}</Badge>
-          <Button size="sm" variant="ghost" icon={History} className="h-6 px-2 text-xs" onClick={openVersions}>
-            Versions
-          </Button>
+          {state ? (
+            <Badge variant={stateVariant[state] || 'neutral'}>{state.replace('_', ' ')}</Badge>
+          ) : (
+            <Badge variant="success">approved</Badge>
+          )}
 
-          {(state === 'draft' || state === 'rejected') && (
+          {state && (state === 'draft' || state === 'rejected') && (
             <Button size="sm" variant="ghost" icon={Send} className="h-6 px-2 text-xs" loading={busy}
               onClick={() => run(() => documentsApi.submit(document.document_id))}>
               {state === 'rejected' ? 'Resubmit for review' : 'Submit for review'}

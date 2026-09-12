@@ -30,13 +30,14 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
+from app.config import DEFAULT_NEW_USER_PASSWORD
 from app.database import get_db
 from app.models.project import Project
 from app.models.team import ProjectAdmin, Team, TeamRole, UserTeamMembership
 from app.models.user import User
 from app.services.access_control import has_permission
 from app.services.audit import AuditAccessError, list_audit_log, record_audit
-from app.services.auth import ResolvedIdentity
+from app.services.auth import ResolvedIdentity, hash_password
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -181,9 +182,11 @@ def _get_or_create_target(db, identity, email, tenant_id, *, is_org_admin=False,
         # fill in a name if we were given one and the existing row has none
         if full_name and not target.full_name:
             target.full_name = full_name
+        if not target.password_hash:
+            target.password_hash = hash_password(DEFAULT_NEW_USER_PASSWORD)
         return target, False
     target = User(
-        email=email, tenant_id=tenant_id, password_hash=None,
+        email=email, tenant_id=tenant_id, password_hash=hash_password(DEFAULT_NEW_USER_PASSWORD),
         is_org_admin=is_org_admin, full_name=full_name,
     )
     db.add(target)
@@ -232,7 +235,7 @@ def create_org_user(
         raise HTTPException(status_code=409, detail="An account with that email already exists")
     full_name = _clean_name(body.full_name)
     user = User(
-        email=email, tenant_id=identity.tenant_id, password_hash=None,
+        email=email, tenant_id=identity.tenant_id, password_hash=hash_password(DEFAULT_NEW_USER_PASSWORD),
         is_org_admin=False, full_name=full_name,
     )
     db.add(user)
@@ -242,7 +245,7 @@ def create_org_user(
     db.commit()
     db.refresh(user)
     return {"status": "created", "user_id": str(user.user_id), "email": email,
-            "full_name": user.full_name}
+            "full_name": user.full_name, "default_password": DEFAULT_NEW_USER_PASSWORD}
 
 
 # --- add access ---------------------------------------------------------------

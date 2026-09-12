@@ -32,12 +32,17 @@ class ScoringError(Exception):
 
 def _strip_markdown_fences(text: str) -> str:
     """
-    Defensive cleanup: some models wrap JSON in ```json ... ``` even when
-    told not to. Strip fences if present, otherwise return text unchanged.
+    Defensive cleanup: strip think blocks, markdown fences, and isolate the JSON object.
     """
     text = text.strip()
-    match = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL)
-    return match.group(1) if match else text
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    if "</think>" in text:
+        text = text.split("</think>", 1)[1]
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        return match.group(0)
+    fence_match = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL)
+    return fence_match.group(1) if fence_match else text
 
 
 def _validate_and_normalize(parsed: dict) -> dict:
@@ -103,14 +108,20 @@ def score_document(document_markdown: str) -> dict:
     """
     messages = build_scoring_messages(document_markdown)
 
+    create_kwargs = {
+        "model": GROQ_MODEL,
+        "messages": messages,
+        "temperature": 0,  # deterministic scoring, not creative
+        "max_tokens": 1000,
+    }
+    if "qwen" in GROQ_MODEL.lower():
+        create_kwargs["reasoning_effort"] = "none"
+    else:
+        create_kwargs["reasoning_effort"] = "low"
+
     last_error = None
     for attempt in range(2):  # one retry on malformed output
-        response = _client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=messages,
-            temperature=0,  # deterministic scoring, not creative
-            max_tokens=1000,
-        )
+        response = _client.chat.completions.create(**create_kwargs)
         raw_text = response.choices[0].message.content
 
         try:

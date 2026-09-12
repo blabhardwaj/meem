@@ -21,6 +21,7 @@ their unit of work but never close the session.
 
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
@@ -146,10 +147,24 @@ def _persist_new_document(
 
     # Approval workflow (MERGE_DECISIONS §3/4): a WorkflowState row is created
     # ONLY if this document's stage requires sign-off. No row == not applicable.
+    # If the uploader already holds the 'approve' permission (e.g. team_lead or admin),
+    # their document is auto-approved upon upload.
     workflow_state: str | None = None
     if stage.requires_approval:
-        db.add(WorkflowState(document_id=document_id, state=WorkflowStatus.draft))
-        workflow_state = WorkflowStatus.draft.value
+        if has_permission(db, user_id, "approve", team_id, project_id):
+            now = datetime.now(timezone.utc)
+            db.add(
+                WorkflowState(
+                    document_id=document_id,
+                    state=WorkflowStatus.approved,
+                    approved_by=user_id,
+                    approval_timestamp=now,
+                )
+            )
+            workflow_state = WorkflowStatus.approved.value
+        else:
+            db.add(WorkflowState(document_id=document_id, state=WorkflowStatus.draft))
+            workflow_state = WorkflowStatus.draft.value
 
     record_audit(
         db, actor_id=user_id, action="UPLOAD_DOCUMENT", resource_type="document",
@@ -161,6 +176,15 @@ def _persist_new_document(
             "workflow_state": workflow_state or "none",
         },
     )
+    if workflow_state == WorkflowStatus.approved.value:
+        record_audit(
+            db,
+            actor_id=user_id,
+            action="APPROVE_DOCUMENT",
+            resource_type="document",
+            resource_id=document_id,
+            details={"state": "approved", "auto_approved": True},
+        )
     db.commit()
 
     return CreatedDocument(

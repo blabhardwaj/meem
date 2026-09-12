@@ -67,8 +67,8 @@ ask for it, never pass it to a tool.
   about whether a hidden document exists.
 - Pick the one tool that fits the question:
     · who uploaded / status / sensitivity / team / stage / upload date of a
-      named document -> get_document_info
-    · how many versions / version dates / which is current -> get_version_history
+      named document -> get_document_info (pass stage_reference if a stage is mentioned)
+    · how many versions / version dates / which is current -> get_version_history (pass stage_reference if a stage is mentioned)
     · who can approve / sign off for a team or stage -> who_can_approve
     · what's waiting for MY approval / review -> list_pending_approvals
     · am I allowed to see or upload to a team/stage -> check_my_access

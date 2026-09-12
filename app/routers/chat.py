@@ -41,7 +41,7 @@ _TITLE_MAX = 80
 
 # Frontend tab id -> stored ChatSession.mode. The Search tab historically sent
 # "search"; the stored discriminator is "rag".
-_MODE_ALIASES = {"search": "rag", "rag": "rag", "query": "query"}
+_MODE_ALIASES = {"search": "rag", "rag": "rag", "query": "query", "draft": "draft"}
 
 
 class ChatSessionOut(BaseModel):
@@ -174,7 +174,8 @@ def delete_session(
     # app/services/query_chat._agno_session_id) — 'query' sessions use the
     # 'query-' prefix, everything else the historical 'rag-' one.
     try:
-        agno_sid = f"{'query' if session.mode == 'query' else 'rag'}-{sid}"
+        agno_prefix = "query" if session.mode == "query" else ("draft" if session.mode == "draft" else "rag")
+        agno_sid = f"{agno_prefix}-{sid}"
         db.execute(
             text("DELETE FROM ai.agent_sessions_runs WHERE session_id = :s"),
             {"s": agno_sid},
@@ -183,6 +184,9 @@ def delete_session(
             text("DELETE FROM ai.agent_sessions WHERE session_id = :s"),
             {"s": agno_sid},
         )
+        if session.mode == "draft":
+            from app.services.draft_workspace import delete_working_draft
+            delete_working_draft(str(sid))
     except Exception:  # noqa: BLE001 — Agno schema is not our contract; never fail the delete on it
         pass
 

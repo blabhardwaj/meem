@@ -92,12 +92,16 @@ def _team_leads(db, team_id: uuid.UUID) -> list[str]:
     return sorted(e for e in (_email(db, r.user_id) for r in rows) if e)
 
 
-def _resolve_visible_document(db, project_id, user_id, ref: str):
+def _resolve_visible_document(db, project_id, user_id, ref: str, stage_ref: str | None = None):
     """
     (doc_or_None, error_dict_or_None). A document the caller cannot see comes
     back as ("not_found") with no existence hint — same as summarize_document.
     """
-    candidates = match_documents(db, project_id, ref)
+    stage_id = None
+    if stage_ref:
+        stage_id = resolve_stage(db, project_id, stage_ref)
+
+    candidates = match_documents(db, project_id, ref, stage_id=stage_id)
     visible = [d for d in candidates if can_view_document(db, user_id, d)]
     if not visible:
         return None, {
@@ -107,8 +111,11 @@ def _resolve_visible_document(db, project_id, user_id, ref: str):
     if len(visible) > 1:
         return None, {
             "status": "ambiguous",
-            "matches": [d.original_filename for d in visible],
-            "message": "Several documents match that reference — ask the user which one.",
+            "matches": [
+                f"{d.original_filename} (stage: '{_stage_name(db, d.stage_id)}')"
+                for d in visible
+            ],
+            "message": "Multiple documents match that reference across different stages — ask the user which stage they mean.",
         }
     return visible[0], None
 
@@ -125,16 +132,18 @@ def _teams_for_stage(db, stage_id: uuid.UUID) -> list[Team]:
 # ---------------------------------------------------------------------------
 
 @tool
-def get_document_info(document_reference: str) -> dict:
+def get_document_info(document_reference: str, stage_reference: str | None = None) -> dict:
     """Metadata for ONE named document: uploader, approval status, sensitivity,
-    team, stage, upload date. `document_reference` is the title/filename as the
-    user said it. Status "not_found" also covers a document the user may not
-    see — relay it as "can't find it", don't speculate. "ambiguous" -> ask which.
+    team, stage, upload date. `document_reference` is the title/filename/ID as the
+    user said it. `stage_reference` is an optional stage name or stage UUID to
+    disambiguate when identical filenames exist in different stages. Status "not_found"
+    also covers a document the user may not see — relay it as "can't find it", don't speculate.
+    "ambiguous" -> ask which.
     """
     ctx = get_query_context()
     db = SessionLocal()
     try:
-        doc, err = _resolve_visible_document(db, ctx.project_id, ctx.user_id, document_reference)
+        doc, err = _resolve_visible_document(db, ctx.project_id, ctx.user_id, document_reference, stage_reference)
         if err:
             return err
 
@@ -177,15 +186,16 @@ def get_document_info(document_reference: str) -> dict:
 # ---------------------------------------------------------------------------
 
 @tool
-def get_version_history(document_reference: str) -> dict:
+def get_version_history(document_reference: str, stage_reference: str | None = None) -> dict:
     """Version history of ONE named document: how many versions, each one's
     created_at and status, and which is current. `document_reference` is the
-    title/filename. "not_found" / "ambiguous" behave as in get_document_info.
+    title/filename. `stage_reference` is an optional stage name or stage UUID.
+    "not_found" / "ambiguous" behave as in get_document_info.
     """
     ctx = get_query_context()
     db = SessionLocal()
     try:
-        doc, err = _resolve_visible_document(db, ctx.project_id, ctx.user_id, document_reference)
+        doc, err = _resolve_visible_document(db, ctx.project_id, ctx.user_id, document_reference, stage_reference)
         if err:
             return err
 

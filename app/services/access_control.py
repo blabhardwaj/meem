@@ -233,14 +233,12 @@ def classify_document_visibility(db: Session, user_id: UUID, document: Document)
             select(DocumentTeamVisibility).where(DocumentTeamVisibility.document_id == document.document_id)
         ).scalars()
     }
-    membership = None
-    for team_id in visible_team_ids:
-        m = _get_team_membership(db, user_id, team_id)
-        if m is not None:
-            membership = m
-            break
+    memberships = [
+        m for m in (_get_team_membership(db, user_id, team_id) for team_id in visible_team_ids)
+        if m is not None
+    ]
 
-    if membership is None:
+    if not memberships:
         return DocumentVisibility.not_visible  # not on any team this document is visible to
 
     # Sensitivity clearance
@@ -248,13 +246,13 @@ def classify_document_visibility(db: Session, user_id: UUID, document: Document)
         return DocumentVisibility.fully_allowed  # viewer+ can always see these
 
     # confidential tier
-    if _TEAM_ROLE_RANK[membership.role] >= _TEAM_ROLE_RANK[TeamRole.team_lead]:
+    if any(_TEAM_ROLE_RANK[m.role] >= _TEAM_ROLE_RANK[TeamRole.team_lead] for m in memberships):
         return DocumentVisibility.fully_allowed  # team_lead+ sees confidential automatically
 
-    if membership.role == TeamRole.contributor and _has_active_confidential_grant(db, user_id, membership.team_id):
+    if any(_has_active_confidential_grant(db, user_id, m.team_id) for m in memberships):
         return DocumentVisibility.fully_allowed
 
-    return DocumentVisibility.blocked_by_sensitivity  # viewer, or contributor with no grant
+    return DocumentVisibility.blocked_by_sensitivity  # viewer or contributor with no grant
 
 
 def classify_documents_visibility(
@@ -335,11 +333,8 @@ def classify_documents_visibility(
                 out[doc_id] = DocumentVisibility.fully_allowed
                 continue
 
-            # Contributor with active approved grant
-            contributor_teams = {
-                tid for tid in overlapping_teams if auth_context.team_roles.get(tid) == TeamRole.contributor
-            }
-            if contributor_teams & auth_context.active_confidential_grant_team_ids:
+            # Active approved grant on any overlapping team (viewer or contributor)
+            if overlapping_teams & auth_context.active_confidential_grant_team_ids:
                 out[doc_id] = DocumentVisibility.fully_allowed
                 continue
 
