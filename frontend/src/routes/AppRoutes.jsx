@@ -5,6 +5,7 @@ import ProtectedRoute from './ProtectedRoute';
 import LoginPage from '../pages/LoginPage';
 import ProjectsPage from '../pages/ProjectsPage';
 import ProjectWorkspace from '../pages/ProjectWorkspace';
+import ProjectIntelligence from '../pages/ProjectIntelligence';
 import UploadDocumentPage from '../pages/UploadDocumentPage';
 import DraftingInterface from '../components/studio/DraftingInterface';
 import AdminPage from '../pages/AdminPage';
@@ -28,6 +29,7 @@ const AppRoutes = () => {
       >
         <Route path="/" element={<ProjectsPage />} />
         <Route path="/projects/:projectId" element={<ProjectWorkspace />} />
+        <Route path="/projects/:projectId/intelligence" element={<ProjectIntelligence />} />
         <Route path="/projects/:projectId/upload" element={<UploadDocumentPage />} />
         <Route path="/projects/:projectId/studio/scan" element={<ScannerInterface />} />
         <Route path="/projects/:projectId/studio/:templateId" element={<DraftingInterface />} />

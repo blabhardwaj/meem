@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { useParams, Link } from 'react-router-dom';
-import { ArrowLeft, Lock, PanelRight } from 'lucide-react';
+import { useParams, Link, useSearchParams } from 'react-router-dom';
+import { ArrowLeft, Lock, PanelRight, Activity, FolderKanban } from 'lucide-react';
 import SourcePanel from '../components/sources/SourcePanel';
 import ChatPanel from '../components/chat/ChatPanel';
 import ChatModeTabs from '../components/chat/ChatModeTabs';
@@ -16,6 +16,9 @@ import { useAuth } from '../context/AuthContext';
 
 const ProjectWorkspace = () => {
   const { projectId } = useParams();
+  const [searchParams] = useSearchParams();
+  const urlTab = searchParams.get('tab');
+  const urlQuery = searchParams.get('q');
   const { user } = useAuth();
   const [project, setProject] = useState(null);
   const [documents, setDocuments] = useState([]);
@@ -30,7 +33,15 @@ const ProjectWorkspace = () => {
 
   // Chat Interface mode — deterministic tab selection (Draft | Scan | Search |
   // Query). An active reviewSession overrides this (upload -> review flow).
-  const [chatTab, setChatTab] = useState('draft');
+  const [chatTab, setChatTab] = useState(
+    urlTab && ['draft', 'scan', 'rag', 'query'].includes(urlTab) ? urlTab : 'draft'
+  );
+
+  useEffect(() => {
+    if (urlTab && ['draft', 'scan', 'rag', 'query'].includes(urlTab)) {
+      setChatTab(urlTab);
+    }
+  }, [urlTab]);
 
   // Studio side panel (Part 2) — hidden by default, opened from the toolbar.
   const [studioOpen, setStudioOpen] = useState(false);
@@ -210,6 +221,22 @@ const ProjectWorkspace = () => {
             {teamNames.length ? teamNames.join(', ') : '—'}
           </span>
         </button>
+
+        {/* Section Switcher: Workspace vs Intelligence */}
+        <div className="flex items-center gap-1 rounded-lg border border-border bg-surface p-1 shrink-0 ml-2">
+          <div className="flex items-center gap-1.5 rounded-md bg-background px-3 py-1 text-xs font-medium text-gray-100 shadow-sm">
+            <FolderKanban size={13} className="text-primary" />
+            Workspace
+          </div>
+          <Link
+            to={`/projects/${encodeURIComponent(projectId)}/intelligence`}
+            className="flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium text-gray-400 hover:text-gray-200 hover:bg-surface-hover transition-colors"
+          >
+            <Activity size={13} />
+            Intelligence
+          </Link>
+        </div>
+
         <div className="flex-1" />
         {requestableTeams.length > 0 && (
           <Button
@@ -256,10 +283,11 @@ const ProjectWorkspace = () => {
         <div className="w-full lg:flex-1 shrink-0 flex flex-col h-[70vh] lg:h-full lg:min-h-0 overflow-hidden border-t border-border lg:border-t-0 lg:border-l">
           {!reviewSession && <ChatModeTabs active={chatTab} onChange={setChatTab} />}
           <ChatPanel
-            key={reviewSession ? 'review' : chatTab}
+            key={reviewSession ? 'review' : `${chatTab}-${urlQuery || ''}`}
             projectId={projectId}
             mode={reviewSession ? 'review' : chatTab}
             reviewSession={reviewSession}
+            initialQuery={urlQuery}
             onReviewFinalized={handleReviewFinalized}
             onReviewExit={() => setReviewSession(null)}
           />

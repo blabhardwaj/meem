@@ -66,7 +66,7 @@ const buildReviewSeedMessage = (reviewSession) => ({
   injectionFindings: reviewSession.injectionFindings || [],
 });
 
-const ChatPanel = ({ projectId, mode = 'rag', reviewSession = null, onReviewFinalized, onReviewExit }) => {
+const ChatPanel = ({ projectId, mode = 'rag', reviewSession = null, initialQuery = null, onReviewFinalized, onReviewExit }) => {
   const isDraft = mode === 'draft';
   const isReview = mode === 'review';
   const isScan = mode === 'scan';
@@ -94,6 +94,7 @@ const ChatPanel = ({ projectId, mode = 'rag', reviewSession = null, onReviewFina
   });
   const [notice, setNotice] = useState('');
   const messagesEndRef = useRef(null);
+  const initialQuerySentRef = useRef(false);
 
   const handleUploadSuccess = (res) => {
     setNotice(`"${res.original_filename || 'Draft'}" was uploaded to ${res.stageName}.`);
@@ -382,6 +383,14 @@ const ChatPanel = ({ projectId, mode = 'rag', reviewSession = null, onReviewFina
       setIsTyping(false);
     }
   };
+
+  useEffect(() => {
+    if (initialQuery && !historyLoading && !isTyping && !initialQuerySentRef.current) {
+      initialQuerySentRef.current = true;
+      handleSend(initialQuery);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialQuery, historyLoading, isTyping]);
 
   const handleDownload = async (url, name) => {
     try {

@@ -460,4 +460,42 @@ export const studioApi = stub('Studio');
 export const notesApi = stub('Notes');
 export const notificationsApi = stub('Notifications');
 
+// ---------- Project Intelligence (real backend) ----------
+export const intelligenceApi = {
+  metrics: (projectId) =>
+    request(`/projects/${encodeURIComponent(projectId)}/intelligence/metrics`),
+  gaps: (projectId, stageId) => {
+    const q = stageId ? `?stage_id=${encodeURIComponent(stageId)}` : '';
+    return request(`/projects/${encodeURIComponent(projectId)}/intelligence/gaps${q}`);
+  },
+  findings: (projectId, { severity, ruleCode, isBlocker, stageId } = {}) => {
+    const params = new URLSearchParams();
+    if (severity) params.append('severity', severity);
+    if (ruleCode) params.append('rule_code', ruleCode);
+    if (isBlocker !== undefined && isBlocker !== null) params.append('is_blocker', isBlocker);
+    if (stageId) params.append('stage_id', stageId);
+    const qs = params.toString();
+    return request(`/projects/${encodeURIComponent(projectId)}/intelligence/findings${qs ? `?${qs}` : ''}`);
+  },
+  neighborhood: (projectId, { nodeId, sourceTable, sourceId, depth = 1 } = {}) => {
+    const params = new URLSearchParams();
+    if (nodeId) params.append('node_id', nodeId);
+    if (sourceTable) params.append('source_table', sourceTable);
+    if (sourceId) params.append('source_id', sourceId);
+    if (depth) params.append('depth', depth);
+    const qs = params.toString();
+    return request(`/projects/${encodeURIComponent(projectId)}/intelligence/neighborhood${qs ? `?${qs}` : ''}`);
+  },
+  progressHistory: (projectId, limit = 50) =>
+    request(`/projects/${encodeURIComponent(projectId)}/intelligence/progress-history?limit=${encodeURIComponent(limit)}`),
+  timeline: (projectId, limit = 100) =>
+    request(`/projects/${encodeURIComponent(projectId)}/intelligence/timeline?limit=${encodeURIComponent(limit)}`),
+  triggerAudit: (projectId, targetStageId = null) =>
+    request(`/projects/${encodeURIComponent(projectId)}/intelligence/audit`, {
+      method: 'POST',
+      body: { target_stage_id: targetStageId || null },
+    }),
+};
+
 export { ApiError };
+
