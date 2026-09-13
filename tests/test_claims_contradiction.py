@@ -227,6 +227,136 @@ class TestClaimsContradiction(unittest.TestCase):
         self.assertEqual(audit_run.readiness_status, "NOT_READY")
         self.assertIn("R009", [f.rule_code for f in audit_run.findings])
 
+    def test_generic_performance_sla_claims_and_contradictions(self):
+        """
+        Verify generic performance/SLA claims extraction and cross-document contradiction
+        using arbitrary values (e.g. 450 ms vs 520 ms) independent of any specific seed.
+        """
+        # Document Alpha: SLA specification with target response time = 450 ms
+        doc_alpha = Document(
+            tenant_id=self.tenant.tenant_id,
+            project_id=self.project.project_id,
+            stage_id=self.stage_a.stage_id,
+            uploaded_by=self.user.user_id,
+            uploaded_as_team_id=self.team.team_id,
+            original_filename="Service_SLA_Spec.md",
+            mime_type="text/markdown",
+        )
+        self.db.add(doc_alpha)
+        self.db.commit()
+
+        v_alpha = DocumentVersion(
+            document_id=doc_alpha.document_id,
+            version_number=1,
+            file_data=b"sla alpha",
+            file_size_bytes=9,
+            uploaded_by=self.user.user_id,
+            status=DocumentStatus.indexed,
+        )
+        self.db.add(v_alpha)
+        self.db.commit()
+        doc_alpha.current_version_id = v_alpha.version_id
+        self.db.commit()
+
+        text_alpha = (
+            "Service SLA Specifications.\n"
+            "Requirement SLA-PERF-01: API P95 latency target must not exceed 450 ms under sustained load.\n"
+        )
+        claims_alpha = extract_claims_from_text(
+            text=text_alpha,
+            tenant_id=self.tenant.tenant_id,
+            project_id=self.project.project_id,
+            document_id=doc_alpha.document_id,
+            version_id=v_alpha.version_id,
+        )
+        self.assertEqual(len(claims_alpha), 1)
+        self.assertEqual(claims_alpha[0]["subject"], "p95 latency")
+        self.assertEqual(claims_alpha[0]["object"], "450 ms")
+        self.assertEqual(claims_alpha[0]["source_locator"].get("requirement_context"), "SLA-PERF-01")
+
+        persist_claims(
+            self.db,
+            self.tenant.tenant_id,
+            self.project.project_id,
+            doc_alpha.document_id,
+            v_alpha.version_id,
+            claims_alpha,
+        )
+
+        # Document Beta: Performance benchmark results with measured P95 latency = 520 ms
+        doc_beta = Document(
+            tenant_id=self.tenant.tenant_id,
+            project_id=self.project.project_id,
+            stage_id=self.stage_b.stage_id,
+            uploaded_by=self.user.user_id,
+            uploaded_as_team_id=self.team.team_id,
+            original_filename="Benchmark_Results.md",
+            mime_type="text/markdown",
+        )
+        self.db.add(doc_beta)
+        self.db.commit()
+
+        v_beta = DocumentVersion(
+            document_id=doc_beta.document_id,
+            version_number=1,
+            file_data=b"benchmark beta",
+            file_size_bytes=14,
+            uploaded_by=self.user.user_id,
+            status=DocumentStatus.indexed,
+        )
+        self.db.add(v_beta)
+        self.db.commit()
+        doc_beta.current_version_id = v_beta.version_id
+        self.db.commit()
+
+        text_beta = (
+            "Load Test Execution Results.\n"
+            "Observed metric: Measured P95 Latency under peak load is 520 ms.\n"
+        )
+        claims_beta = extract_claims_from_text(
+            text=text_beta,
+            tenant_id=self.tenant.tenant_id,
+            project_id=self.project.project_id,
+            document_id=doc_beta.document_id,
+            version_id=v_beta.version_id,
+        )
+        self.assertEqual(len(claims_beta), 1)
+        self.assertEqual(claims_beta[0]["subject"], "p95 latency")
+        self.assertEqual(claims_beta[0]["object"], "520 ms")
+
+        persist_claims(
+            self.db,
+            self.tenant.tenant_id,
+            self.project.project_id,
+            doc_beta.document_id,
+            v_beta.version_id,
+            claims_beta,
+        )
+
+        # Sync graph nodes
+        sync_project_graph(self.db, self.project.project_id)
+
+        # Detect contradictions between Alpha and Beta
+        contradictions = detect_project_contradictions(
+            self.db, self.tenant.tenant_id, self.project.project_id
+        )
+        r009_perf = [f for f in contradictions if f.rule_code == "R009" and "p95 latency" in f.description]
+        self.assertEqual(len(r009_perf), 1)
+        self.assertTrue(r009_perf[0].is_blocker)
+        self.assertIn("450 ms", r009_perf[0].description)
+        self.assertIn("520 ms", r009_perf[0].description)
+
+        # Verify CONFLICTS_WITH edge exists in graph
+        edge = (
+            self.db.query(Edge)
+            .filter(Edge.project_id == self.project.project_id, Edge.edge_type == "CONFLICTS_WITH")
+            .first()
+        )
+        self.assertIsNotNone(edge)
+        self.assertEqual(edge.properties.get("subject"), "p95 latency")
+        self.assertEqual(edge.properties.get("value1"), "450 ms")
+        self.assertEqual(edge.properties.get("value2"), "520 ms")
+
 
 if __name__ == "__main__":
     unittest.main()

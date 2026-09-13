@@ -56,6 +56,20 @@ CLAIM_PATTERNS = [
         "predicate": "requirement_status",
         "regex": re.compile(r"(?:two-factor\s+authentication|2fa|mfa)\s+(?:is\s+|:\s*)(mandatory|required|optional|disabled|not\s+required)(?:\.|\n|$)", re.IGNORECASE),
     },
+    # 5. Performance / Latency SLAs
+    {
+        "type": "performance",
+        "subject": "p95 latency",
+        "predicate": "latency_threshold",
+        "regex": re.compile(
+            r"(?:p95\s+latency|target\s+latency|latency\s+target|response\s+time|p95\s+response\s+time)"
+            r"(?:[^\n.:;=]*?)"
+            r"(?::|=|is|below|exceed|\*|\s)"
+            r"[^0-9\n]*?"
+            r"([0-9]+(?:\.[0-9]+)?\s*ms)",
+            re.IGNORECASE,
+        ),
+    },
 ]
 
 
@@ -73,6 +87,8 @@ def extract_claims_from_text(
     if not text:
         return claims_data
 
+    req_pat = re.compile(r"\b([A-Z0-9]{2,}(?:-[A-Z0-9]+)+)\b")
+
     for pattern in CLAIM_PATTERNS:
         matches = pattern["regex"].finditer(text)
         for match in matches:
@@ -83,6 +99,51 @@ def extract_claims_from_text(
                 polarity = False
 
             snippet = match.group(0).strip()
+
+            # Contextual requirement identification:
+            # 1. Check current line (from preceding newline to following newline)
+            req_code = None
+
+            line_start = text.rfind("\n", 0, match.start())
+            line_start = 0 if line_start == -1 else line_start + 1
+            line_end = text.find("\n", match.end())
+            line_end = len(text) if line_end == -1 else line_end
+            current_line = text[line_start:line_end]
+
+            line_matches = list(req_pat.finditer(current_line))
+            if line_matches:
+                # Prefer match preceding match.start() on this line (e.g. bullet label)
+                rel_pos = match.start() - line_start
+                preceding = [m for m in line_matches if m.start() <= rel_pos]
+                if preceding:
+                    req_code = preceding[-1].group(1)
+                else:
+                    req_code = min(line_matches, key=lambda m: abs(m.start() - rel_pos)).group(1)
+            else:
+                # 2. Check surrounding window (+/- 250 chars)
+                w_start = max(0, match.start() - 250)
+                w_end = min(len(text), match.end() + 250)
+                w_text = text[w_start:w_end]
+                cands = list(req_pat.finditer(w_text))
+                if cands:
+                    # Prefer formal requirement identifiers over ticket numbers, then proximity
+                    def cand_rank(m):
+                        val_code = m.group(1)
+                        is_req = bool(re.search(r"(?:REQ|CHK|SLA|SPEC|NFR|BR|CR|PERF|SEC|SYS)", val_code, re.I)) or len(val_code.split("-")) >= 3
+                        dist = abs((w_start + m.start()) - match.start())
+                        return (0 if is_req else 1, dist)
+
+                    best = min(cands, key=cand_rank)
+                    req_code = best.group(1)
+
+            source_loc = {
+                "start": match.start(),
+                "end": match.end(),
+                "claim_type": pattern["type"],
+            }
+            if req_code:
+                source_loc["requirement_context"] = req_code
+
             claims_data.append({
                 "tenant_id": tenant_id,
                 "project_id": project_id,
@@ -93,11 +154,7 @@ def extract_claims_from_text(
                 "object": val,
                 "polarity": polarity,
                 "snippet": snippet,
-                "source_locator": {
-                    "start": match.start(),
-                    "end": match.end(),
-                    "claim_type": pattern["type"],
-                },
+                "source_locator": source_loc,
                 "confidence": 0.95,
             })
 
@@ -160,6 +217,7 @@ def detect_project_contradictions(
         db.query(Claim, Document)
         .join(Document, Claim.document_id == Document.document_id)
         .filter(Claim.tenant_id == tenant_id, Claim.project_id == project_id)
+        .order_by(Document.created_at.asc(), Claim.created_at.asc())
     )
 
     if evaluated_stage_ids is not None:
@@ -189,12 +247,31 @@ def detect_project_contradictions(
     )
     node_map = {n.source_id: n for n in doc_nodes}
 
-    seen_pairs = set()
+    def is_formal_req(code: Optional[str]) -> bool:
+        if not code:
+            return False
+        return bool(re.search(r"(?:REQ|CHK|SLA|SPEC|NFR|BR|CR|PERF|SEC|SYS)", code, re.I)) or len(code.split("-")) >= 3
+
+    def pair_rank(c_a: Claim, c_b: Claim) -> tuple[int, int]:
+        loc_a = c_a.source_locator or {}
+        loc_b = c_b.source_locator or {}
+        req_a = loc_a.get("requirement_context")
+        req_b = loc_b.get("requirement_context")
+        if req_a and req_b and req_a == req_b:
+            return (0, 0 if is_formal_req(req_a) else 1)
+        if is_formal_req(req_a) or is_formal_req(req_b):
+            return (1, 0)
+        if req_a or req_b:
+            return (2, 0)
+        return (3, 0)
+
+    seen_doc_pairs: set = set()
 
     for (subj, pred), claim_tuples in groups.items():
         if len(claim_tuples) < 2:
             continue
 
+        candidate_pairs = []
         for i in range(len(claim_tuples)):
             for j in range(i + 1, len(claim_tuples)):
                 c1, doc1 = claim_tuples[i]
@@ -204,9 +281,9 @@ def detect_project_contradictions(
                 if doc1.document_id == doc2.document_id:
                     continue
 
-                pair_key = tuple(sorted([str(c1.claim_id), str(c2.claim_id)]))
-                if pair_key in seen_pairs:
-                    continue
+                # Ensure upstream/earlier created document is doc1
+                if doc1.created_at and doc2.created_at and doc1.created_at > doc2.created_at:
+                    c1, doc1, c2, doc2 = c2, doc2, c1, doc1
 
                 # Contradiction criteria:
                 # 1. Different polarities (e.g. mandatory vs optional)
@@ -221,84 +298,129 @@ def detect_project_contradictions(
                     is_contradiction = True
 
                 if is_contradiction:
-                    seen_pairs.add(pair_key)
+                    candidate_pairs.append((c1, doc1, c2, doc2))
 
-                    # Upsert CONFLICTS_WITH edge in graph
-                    node1 = node_map.get(doc1.document_id)
-                    node2 = node_map.get(doc2.document_id)
-                    if node1 and node2:
-                        existing_edge = (
-                            db.query(Edge)
-                            .filter(
-                                Edge.source_node_id == node1.node_id,
-                                Edge.target_node_id == node2.node_id,
-                                Edge.edge_type == "CONFLICTS_WITH",
-                            )
-                            .first()
-                        )
-                        conflict_props = {
-                            "claim1_id": str(c1.claim_id),
-                            "claim2_id": str(c2.claim_id),
-                            "subject": c1.subject,
-                            "predicate": c1.predicate,
-                            "value1": c1.object,
-                            "value2": c2.object,
-                            "snippet1": c1.snippet,
-                            "snippet2": c2.snippet,
-                        }
-                        if existing_edge:
-                            existing_edge.properties = conflict_props
-                        else:
-                            db.add(
-                                Edge(
-                                    tenant_id=tenant_id,
-                                    project_id=project_id,
-                                    source_node_id=node1.node_id,
-                                    target_node_id=node2.node_id,
-                                    edge_type="CONFLICTS_WITH",
-                                    confidence=1.0,
-                                    properties=conflict_props,
-                                )
-                            )
-                        db.flush()
+        # Sort so highest-fidelity requirement matches are processed first
+        candidate_pairs.sort(key=lambda item: pair_rank(item[0], item[2]))
 
-                    # Emit R009 blocker finding
-                    findings.append(
-                        FindingSpec(
-                            rule_code="R009",
-                            severity="HIGH",
-                            is_blocker=True,
-                            title="Document Contradiction Detected",
-                            description=(
-                                f"Direct contradiction detected between '{doc1.original_filename}' and '{doc2.original_filename}' "
-                                f"regarding '{c1.subject}': '{c1.object}' vs '{c2.object}'."
-                            ),
-                            affected_entity_type="document",
-                            affected_entity_id=doc1.document_id,
-                            target_stage_id=doc1.stage_id,
-                            evidence_sources=[
-                                {
-                                    "document_id": str(doc1.document_id),
-                                    "version_id": str(c1.version_id),
-                                    "snippet": c1.snippet,
-                                },
-                                {
-                                    "document_id": str(doc2.document_id),
-                                    "version_id": str(c2.version_id),
-                                    "snippet": c2.snippet,
-                                },
-                            ],
-                            details={
-                                "conflicting_document_id": str(doc2.document_id),
-                                "conflicting_document_name": doc2.original_filename,
-                                "subject": c1.subject,
-                                "predicate": c1.predicate,
-                                "value_a": c1.object,
-                                "value_b": c2.object,
-                                "snippet_a": c1.snippet,
-                                "snippet_b": c2.snippet,
-                            },
+        for c1, doc1, c2, doc2 in candidate_pairs:
+            doc_pair_key = (tuple(sorted([str(doc1.document_id), str(doc2.document_id)])), subj, pred)
+            if doc_pair_key in seen_doc_pairs:
+                continue
+            seen_doc_pairs.add(doc_pair_key)
+
+            loc1 = c1.source_locator or {}
+            loc2 = c2.source_locator or {}
+            req_ctx1 = loc1.get("requirement_context")
+            req_ctx2 = loc2.get("requirement_context")
+
+            if req_ctx1 and req_ctx2:
+                if req_ctx1 == req_ctx2:
+                    resolved_req = req_ctx1
+                elif is_formal_req(req_ctx1) and not is_formal_req(req_ctx2):
+                    resolved_req = req_ctx1
+                elif is_formal_req(req_ctx2) and not is_formal_req(req_ctx1):
+                    resolved_req = req_ctx2
+                else:
+                    resolved_req = req_ctx1
+            elif req_ctx1:
+                resolved_req = req_ctx1
+            else:
+                resolved_req = req_ctx2
+
+            # Upsert CONFLICTS_WITH edge in graph
+            node1 = node_map.get(doc1.document_id)
+            node2 = node_map.get(doc2.document_id)
+            if node1 and node2:
+                existing_edge = (
+                    db.query(Edge)
+                    .filter(
+                        Edge.source_node_id == node1.node_id,
+                        Edge.target_node_id == node2.node_id,
+                        Edge.edge_type == "CONFLICTS_WITH",
+                    )
+                    .first()
+                )
+                conflict_props = {
+                    "claim1_id": str(c1.claim_id),
+                    "claim2_id": str(c2.claim_id),
+                    "subject": c1.subject,
+                    "predicate": c1.predicate,
+                    "value1": c1.object,
+                    "value2": c2.object,
+                    "snippet1": c1.snippet,
+                    "snippet2": c2.snippet,
+                }
+                if resolved_req:
+                    conflict_props["requirement_context"] = resolved_req
+
+                if existing_edge:
+                    existing_edge.properties = conflict_props
+                else:
+                    db.add(
+                        Edge(
+                            tenant_id=tenant_id,
+                            project_id=project_id,
+                            source_node_id=node1.node_id,
+                            target_node_id=node2.node_id,
+                            edge_type="CONFLICTS_WITH",
+                            confidence=1.0,
+                            properties=conflict_props,
                         )
                     )
+                db.flush()
+
+            # Emit R009 blocker finding
+            finding_details = {
+                "conflicting_document_id": str(doc2.document_id),
+                "conflicting_document_name": doc2.original_filename,
+                "subject": c1.subject,
+                "predicate": c1.predicate,
+                "value_a": c1.object,
+                "value_b": c2.object,
+                "snippet_a": c1.snippet,
+                "snippet_b": c2.snippet,
+                "claim1_id": str(c1.claim_id),
+                "claim2_id": str(c2.claim_id),
+            }
+            if resolved_req:
+                finding_details["requirement_context"] = resolved_req
+                desc = (
+                    f"Direct contradiction detected between '{doc1.original_filename}' and '{doc2.original_filename}' "
+                    f"regarding '{c1.subject}' ({resolved_req}): '{c1.object}' vs '{c2.object}'."
+                )
+            else:
+                desc = (
+                    f"Direct contradiction detected between '{doc1.original_filename}' and '{doc2.original_filename}' "
+                    f"regarding '{c1.subject}': '{c1.object}' vs '{c2.object}'."
+                )
+
+            findings.append(
+                FindingSpec(
+                    rule_code="R009",
+                    severity="HIGH",
+                    is_blocker=True,
+                    title="Document Contradiction Detected",
+                    description=desc,
+                    affected_entity_type="document",
+                    affected_entity_id=doc1.document_id,
+                    target_stage_id=doc1.stage_id,
+                    evidence_sources=[
+                        {
+                            "document_id": str(doc1.document_id),
+                            "version_id": str(c1.version_id),
+                            "snippet": c1.snippet,
+                            "claim_id": str(c1.claim_id),
+                        },
+                        {
+                            "document_id": str(doc2.document_id),
+                            "version_id": str(c2.version_id),
+                            "snippet": c2.snippet,
+                            "claim_id": str(c2.claim_id),
+                        },
+                    ],
+                    details=finding_details,
+                )
+            )
 
     return findings
