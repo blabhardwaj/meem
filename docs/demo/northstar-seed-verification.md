@@ -1,6 +1,6 @@
 # Northstar Commerce Demo Seed — Evidence-Grade Verification Report
 
-**Date**: 2026-09-13 11:03:40Z
+**Date**: 2026-09-13 12:36:06Z
 **Target**: Northstar Commerce (`20000000-0000-0000-0000-000000000001`)
 **Project**: Holiday Checkout Modernization
 
@@ -32,8 +32,8 @@
 | `S13` | **`PASS`** | Qdrant points exist for approved docs, zero points for unapproved Doc 06 | Doc 06 points = 0; Approved doc points: {'01-holiday-checkout-business-requir... |
 | `S14` | **`PASS`** | Exact graph topology PRECEDES chain for 5 stages | Exact 4 PRECEDES edges: [('Discovery', 'UX Design'), ('Engineering', 'Validat... |
 | `S15` | **`PASS`** | NC-CHK-103 performance contradiction detected through normal claims pipeline | Contradiction detected: Claim A (750 ms target from Doc 01, NC-CHK-103) vs Cl... |
-| `S16` | **`PASS`** | Project audit produces NOT_READY and flags unapproved gate & contradiction blockers | AuditRun ID=2c1b769e-3364-41cf-aa61-904f63598957, status=NOT_READY, blockers=... |
-| `S17` | **`PASS`** | Persisted ProjectMetricSnapshot and StageMetricSnapshot for all 5 stages | ProjectSnapshot ID=47c3692f-f77b-4f7f-8785-7deb9fcf6311, readiness=NOT_READY,... |
+| `S16` | **`PASS`** | Project audit produces NOT_READY and flags unapproved gate & contradiction blockers | AuditRun ID=044a8f67-d866-4b96-8c64-18c99860f111, status=NOT_READY, blockers=... |
+| `S17` | **`PASS`** | Persisted ProjectMetricSnapshot and StageMetricSnapshot for all 5 stages | ProjectSnapshot ID=191265a9-c101-4451-b166-33fffbacf3b2, readiness=NOT_READY,... |
 | `S18` | **`PASS`** | ABAC Test A: Ananya uploading to Launch stage is DENIED | HTTP 403 Forbidden: Team does not have access to upload to the 'Launch' stage. |
 | `S19` | **`PASS`** | ABAC Test B: Ananya approving Validation document (Doc 06) is ALLOWED | ALLOWED: has_permission(ananya.user_id, 'approve', Engineering) == True |
 | `S20` | **`PASS`** | ABAC Test C: Unauthorized user (Ananya) accessing confidential Doc 03 is DENIED | DENIED: Visibility classified as not_visible |
@@ -47,14 +47,14 @@
 | `S28` | **`PASS`** | Query Agent Q11: Can Ananya approve Doc 06 / Validation? | Validation approvers verified: ['ananya.mehta@northstarcommerce.com', 'ishita... |
 | `S29` | **`PASS`** | Query Agent Q6: Confidential strategy access check (Doc 03) | ABAC verified: Ananya=not_found, Dev=found |
 | `S30` | **`PASS`** | Query Agent Q7: Summarize Validation Plan (Doc 05) | Doc 05 info: Author=nikhil.joshi@northstarcommerce.com, Stage=Validation |
-| `S31` | **`PASS`** | Query Agent Q3: Scan project health across all accessible documents | Project health scanned: Status=NOT_READY, Blockers=10 |
+| `S31` | **`PASS`** | Query Agent Q3: Scan project health across all accessible documents | Project health scanned: Status=NOT_READY, Blockers=5 |
 | `S32` | **`PASS`** | Query Agent Q12: Why isn't the project READY? | Gaps identified: Unapproved Gate Doc 06, Contradiction on NC-CHK-103 |
 | `S33` | **`PASS`** | Query Agent Q5: Launch readiness inspection | Launch stage status: Doc 07 present in ['07-holiday-launch-readiness-checklis... |
 | `S34` | **`PASS`** | Query Agent Q2: Trace requirement NC-CHK-103 across stages | NC-CHK-103 traced across 3 stages: Doc 01 (750 ms) -> Doc 04 (750 ms) -> Doc ... |
 | `S35` | **`PASS`** | Query Agent Q13: Find the shared blocker issue (NS-1842) | Shared blocker NS-1842 confirmed in 4 documents: ['04-checkout-payment-servic... |
-| `S36` | **`PASS`** | Query Agent Q14: Find conflicting evidence on latency | Conflicting evidence detected: 750 ms vs 812 ms on NC-CHK-103 |
+| `S36` | **`PASS`** | Query Agent Q14: Find conflicting evidence on latency | Conflicting evidence detected: 812 ms vs 750 ms on NC-CHK-103 |
 | `S37` | **`PASS`** | Query Agent Q15: Trace mobile checkout requirement across stages | Mobile checkout requirement traced across lifecycle: Discovery (Doc 01) -> UX... |
-| `S38` | **`PASS`** | Draft Agent (Q1): Requirements drafting & structural quality scan | Draft generated (4586 chars, score=52) |
+| `S38` | **`PASS`** | Draft Agent (Q1): Requirements drafting & structural quality scan | Draft generated (5325 chars, score=60) |
 | `S39` | **`PASS`** | Lumen Retail isolation proof (Before == After) | Lumen baseline matches 100%: {'tenant_id': '10000000-0000-0000-0000-000000000... |
 
 ## Detailed Evidence-Grade Test Records
@@ -417,7 +417,7 @@ Contradiction detected: Claim A (750 ms target from Doc 01, NC-CHK-103) vs Claim
 ```json
 {
   "claim_750ms": {
-    "claim_id": "cf917be6-bb97-4f48-8f10-011dfc950da0",
+    "claim_id": "bb65cee7-a788-4496-82d2-0b7d0526ab28",
     "document_id": "5d864d8e-afad-4c4d-97e8-3e5ee27a7b9a",
     "subject": "p95 latency",
     "predicate": "latency_threshold",
@@ -426,7 +426,7 @@ Contradiction detected: Claim A (750 ms target from Doc 01, NC-CHK-103) vs Claim
     "snippet": "P95 latency target must not exceed **750 ms"
   },
   "claim_812ms": {
-    "claim_id": "96cd961b-170b-42c6-a5c1-cd96fdfba9b1",
+    "claim_id": "deb7d75e-677b-484e-ba63-1dd6e0d4aecd",
     "document_id": "2fa6580c-1a64-4c77-9959-817be7c6f7ed",
     "subject": "p95 latency",
     "predicate": "latency_threshold",
@@ -445,8 +445,8 @@ Contradiction detected: Claim A (750 ms target from Doc 01, NC-CHK-103) vs Claim
       "subject": "p95 latency",
       "snippet1": "P95 latency target must not exceed **750 ms",
       "snippet2": "P95 Latency Under Load (4,000 Concurrent Sessions):** **812 ms",
-      "claim1_id": "cf917be6-bb97-4f48-8f10-011dfc950da0",
-      "claim2_id": "96cd961b-170b-42c6-a5c1-cd96fdfba9b1",
+      "claim1_id": "bb65cee7-a788-4496-82d2-0b7d0526ab28",
+      "claim2_id": "deb7d75e-677b-484e-ba63-1dd6e0d4aecd",
       "predicate": "latency_threshold",
       "requirement_context": "NC-CHK-103"
     }
@@ -496,7 +496,7 @@ readiness_status='NOT_READY', blockers > 0, findings contain R002/R010 and R009
 
 **ACTUAL**:
 ```
-AuditRun ID=2c1b769e-3364-41cf-aa61-904f63598957, status=NOT_READY, blockers=10, rule_codes=['R002', 'R007', 'R007', 'R007', 'R007', 'R007', 'R009', 'R009', 'R009', 'R010']
+AuditRun ID=044a8f67-d866-4b96-8c64-18c99860f111, status=NOT_READY, blockers=5, rule_codes=['R002', 'R009', 'R009', 'R009', 'R010']
 ```
 
 **EXIT CODE**: `0`
@@ -520,7 +520,7 @@ db.query(ProjectMetricSnapshot) and db.query(StageMetricSnapshot)
 
 **ACTUAL**:
 ```
-ProjectSnapshot ID=47c3692f-f77b-4f7f-8785-7deb9fcf6311, readiness=NOT_READY, completeness=100.0%, stage_snapshots=5
+ProjectSnapshot ID=191265a9-c101-4451-b166-33fffbacf3b2, readiness=NOT_READY, completeness=100.0%, stage_snapshots=5
 ```
 
 **EXIT CODE**: `0`
@@ -856,7 +856,7 @@ Readiness NOT_READY, total blockers reported with rule codes
 
 **ACTUAL**:
 ```
-Project health scanned: Status=NOT_READY, Blockers=10
+Project health scanned: Status=NOT_READY, Blockers=5
 ```
 
 **EXIT CODE**: `0`
@@ -976,7 +976,7 @@ Identifies 750 ms target (Doc 01) vs 812 ms observed result (Doc 06)
 
 **ACTUAL**:
 ```
-Conflicting evidence detected: 750 ms vs 812 ms on NC-CHK-103
+Conflicting evidence detected: 812 ms vs 750 ms on NC-CHK-103
 ```
 
 **EXIT CODE**: `0`
@@ -1024,7 +1024,7 @@ Generates comprehensive Markdown draft meeting structural quality thresholds
 
 **ACTUAL**:
 ```
-Draft generated (4586 chars, score=52)
+Draft generated (5325 chars, score=60)
 ```
 
 **EXIT CODE**: `0`

@@ -32,7 +32,7 @@ from app.database import SessionLocal
 from app.models.tenant import Tenant
 from app.models.project import Project
 from app.models.team import Team, TeamRole, UserTeamMembership, ProjectAdmin
-from app.models.stage import Stage, TeamStageAccess
+from app.models.stage import Stage, StageReference, TeamStageAccess
 from app.models.user import User
 from app.models.document import (
     Document,
@@ -113,6 +113,14 @@ STAGE_ACCESS = {
     "Engineering": ["Engineering", "Product", "QA", "Leadership"],
     "Validation": ["Engineering", "QA", "Product", "Leadership"],
     "Launch": [],  # Project admin only
+}
+
+# Permitted Stage References (Life Cycle Traceability)
+STAGE_REFERENCES = {
+    "UX Design": ["Discovery"],
+    "Engineering": ["Discovery", "UX Design"],
+    "Validation": ["Discovery", "UX Design", "Engineering"],
+    "Launch": ["Validation", "Engineering", "Discovery", "UX Design"],
 }
 
 USERS = [
@@ -382,6 +390,12 @@ def reset_northstar_data(db: Session):
             )
         ).delete(synchronize_session=False)
 
+        db.query(StageReference).filter(
+            StageReference.stage_id.in_(
+                select(Stage.stage_id).where(Stage.project_id.in_(project_ids))
+            )
+        ).delete(synchronize_session=False)
+
         db.query(Stage).filter(Stage.project_id.in_(project_ids)).delete(synchronize_session=False)
         db.query(UserTeamMembership).filter(UserTeamMembership.project_id.in_(project_ids)).delete(synchronize_session=False)
         db.query(ProjectAdmin).filter(ProjectAdmin.project_id.in_(project_ids)).delete(synchronize_session=False)
@@ -480,7 +494,23 @@ def seed_structure_and_users(db: Session) -> tuple[Tenant, Project, dict[str, Te
             if not existing:
                 db.add(TeamStageAccess(team_id=t.team_id, stage_id=stage.stage_id))
                 db.flush()
-                print(f"  [+] Granted Stage Access: Team '{t_name}' -> Stage '{stage_name}'")
+                print(f"  [+] Granted access: Stage '{stage_name}' to Team '{t_name}'")
+
+    # 6. StageReference permitted references
+    for consumer_name, referenced_names in STAGE_REFERENCES.items():
+        consumer_stage = stages[consumer_name]
+        for ref_name in referenced_names:
+            ref_stage = stages[ref_name]
+            existing_ref = db.execute(
+                select(StageReference).where(
+                    StageReference.stage_id == consumer_stage.stage_id,
+                    StageReference.references_stage_id == ref_stage.stage_id,
+                )
+            ).scalar_one_or_none()
+            if not existing_ref:
+                db.add(StageReference(stage_id=consumer_stage.stage_id, references_stage_id=ref_stage.stage_id))
+                db.flush()
+                print(f"  [+] Permitted Reference: {consumer_name} -> {ref_name}")
 
     # 6. Users & Memberships (Strict Tenant Scoping)
     print("\n[*] Seeding Users and Roles...")
