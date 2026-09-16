@@ -57,21 +57,6 @@ def is_expired(r: AccessRequest) -> bool:
     return bool(r.expires_at and r.expires_at < datetime.now(timezone.utc))
 
 
-def live_request(db: Session, user_id: uuid.UUID, team_id: uuid.UUID) -> AccessRequest | None:
-    """The caller's current pending — or approved-and-still-valid — request for a team."""
-    rows = db.execute(
-        select(AccessRequest)
-        .where(AccessRequest.user_id == user_id, AccessRequest.team_id == team_id)
-        .order_by(AccessRequest.requested_at.desc())
-    ).scalars().all()
-    for r in rows:
-        if r.status == AccessRequestStatus.pending:
-            return r
-        if r.status == AccessRequestStatus.approved and not is_expired(r):
-            return r
-    return None
-
-
 def pending_requests_for_reviewer(
     db: Session,
     *,
@@ -113,24 +98,83 @@ def pending_requests_for_reviewer(
     return out
 
 
+def _derive_document_team(db: Session, document_id: uuid.UUID) -> uuid.UUID | None:
+    from app.models.document import Document
+    document = db.get(Document, document_id)
+    return document.uploaded_as_team_id if document else None
+
+
+def _derive_stage_team(db: Session, user_id: uuid.UUID, stage_id: uuid.UUID) -> uuid.UUID | None:
+    """
+    The team responsible for approving a stage-scoped request: among the
+    teams with TeamStageAccess to this stage, the one the requester
+    themselves already belongs to (viewer/contributor), earliest grant
+    first if more than one qualifies. team_id here is approval-routing
+    metadata only — it is never part of the stage request's own identity
+    (that's stage_id alone; dedup/effective-state resolution is keyed by
+    stage_id, not by this derived team_id).
+    """
+    from app.models.stage import TeamStageAccess
+
+    access_rows = db.execute(
+        select(TeamStageAccess)
+        .where(TeamStageAccess.stage_id == stage_id)
+        .order_by(TeamStageAccess.created_at.asc())
+    ).scalars().all()
+    for row in access_rows:
+        if _get_team_membership(db, user_id, row.team_id) is not None:
+            return row.team_id
+    return None
+
+
 def request_confidential_access(
     db: Session,
     *,
     user_id: uuid.UUID,
-    team_id: uuid.UUID,
+    team_id: uuid.UUID | None = None,
+    document_id: uuid.UUID | None = None,
+    stage_id: uuid.UUID | None = None,
     expected_tenant_id: uuid.UUID | None = None,
 ) -> AccessRequest:
     """
-    Create a pending confidential-access request for `user_id` on `team_id`.
+    Create a pending confidential-access request for `user_id`, scoped to
+    exactly one of team_id/document_id/stage_id (the caller passes exactly
+    one; this is the same shape app/tools/rag_tools.py's existing tool call
+    already uses for team_id, so that call site needs no changes).
+
+    For document/stage scope, `team_id` is NEVER accepted from the caller —
+    it is derived server-side from the target, per the spec's trust
+    boundary (a client can request access to a target, never nominate which
+    team approves it).
 
     Commits on success and returns the fresh AccessRequest row.
 
     Raises:
-        AccessRequestError — team unknown / cross-tenant (404), not a member
-        of the team (403), already cleared or a live request already exists
-        (409).
+        AccessRequestError — team/target unknown or cross-tenant (404), not
+        a member of the resolved team (403), already cleared or a live
+        request already exists for this exact target (409).
     """
-    team = db.get(Team, team_id)
+    from app.models.team import AccessRequestScope
+
+    provided = [x for x in (team_id, document_id, stage_id) if x is not None]
+    if len(provided) != 1:
+        raise ValueError("Exactly one of team_id, document_id, stage_id must be given")
+
+    if document_id is not None:
+        scope = AccessRequestScope.document
+        resolved_team_id = _derive_document_team(db, document_id)
+        if resolved_team_id is None:
+            raise AccessRequestError("Document not found", status_code=404)
+    elif stage_id is not None:
+        scope = AccessRequestScope.stage
+        resolved_team_id = _derive_stage_team(db, user_id, stage_id)
+        if resolved_team_id is None:
+            raise AccessRequestError("You are not a member of any team with access to this stage", status_code=403)
+    else:
+        scope = AccessRequestScope.team
+        resolved_team_id = team_id
+
+    team = db.get(Team, resolved_team_id)
     project = db.get(Project, team.project_id) if team else None
     if team is None or project is None:
         raise AccessRequestError("Team not found", status_code=404)
@@ -139,12 +183,11 @@ def request_confidential_access(
 
     is_org_admin = _is_org_admin(db, user_id)
     is_proj_admin = _is_project_admin(db, user_id, project.project_id)
-    membership: UserTeamMembership | None = _get_team_membership(db, user_id, team_id)
+    membership: UserTeamMembership | None = _get_team_membership(db, user_id, resolved_team_id)
 
     if membership is None and not is_proj_admin and not is_org_admin:
         raise AccessRequestError("You are not a member of this team", status_code=403)
 
-    # team_lead / project_admin / org_admin already see confidential automatically.
     if is_org_admin or is_proj_admin or (
         membership is not None and membership.role == TeamRole.team_lead
     ):
@@ -152,16 +195,23 @@ def request_confidential_access(
             "You already have confidential access on this team.", status_code=409
         )
 
-    existing = live_request(db, user_id, team_id)
-    if existing is not None:
+    from app.services.access_control import resolve_effective_access
+    effective = resolve_effective_access(
+        db, user_id,
+        document_id=document_id if scope == AccessRequestScope.document else None,
+        stage_id=stage_id if scope == AccessRequestScope.stage else None,
+        team_id=resolved_team_id if scope == AccessRequestScope.team else None,
+    )
+    if effective.status in ("granted", "pending"):
         raise AccessRequestError(
-            f"You already have a {existing.status.value} confidential-access "
-            f"request for this team.",
+            f"You already have a {effective.status} confidential-access request for this target.",
             status_code=409,
         )
 
     req = AccessRequest(
-        user_id=user_id, team_id=team_id, status=AccessRequestStatus.pending
+        user_id=user_id, team_id=resolved_team_id, scope=scope,
+        document_id=document_id, stage_id=stage_id,
+        status=AccessRequestStatus.pending,
     )
     db.add(req)
     db.flush()
@@ -171,7 +221,7 @@ def request_confidential_access(
         action="REQUEST_CONFIDENTIAL_ACCESS",
         resource_type="team",
         resource_id=team.team_id,
-        details={"team": team.name, "project": project.name},
+        details={"team": team.name, "project": project.name, "scope": scope.value},
     )
     notify_access_request_created(
         db, team_id=team.team_id, team_name=team.name, project_id=project.project_id,
