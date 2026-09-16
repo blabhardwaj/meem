@@ -29,7 +29,7 @@ import uuid
 from qdrant_client import models as qm
 from sqlalchemy.orm import Session
 
-from app.models.document import Document, DocumentStatus, DocumentVersion
+from app.models.document import Document, DocumentStatus, DocumentVersion, VersionApprovalOutcome
 from app.models.project import Project
 from app.models.stage import Stage
 from app.models.workflow import WorkflowState, WorkflowStatus
@@ -81,6 +81,63 @@ def should_index(db: Session, document_id: uuid.UUID) -> bool:
     return True
 
 
+def resolve_grounding_version(db: Session, document_id: uuid.UUID) -> DocumentVersion | None:
+    """
+    The version whose content is safe to hand an LLM as "this document's real
+    content" — the same version that would currently be sitting in Qdrant, if
+    the document has ever been indexed. NOT necessarily
+    document.current_version_id: a document's current version can be a newer
+    revision that failed the Scanner (needs_attention) or is still awaiting
+    human approval, sitting on top of an older version that DID pass and is
+    still the one actually indexed. Reviewers/uploaders are meant to see that
+    newer, not-yet-good version (document_version_review.py's edit flow does,
+    correctly) — but nothing that grounds an answer/summary should.
+
+    Walks this document's versions newest-first and returns the first one
+    that would satisfy should_index() were it the current version (Scanner-
+    indexed AND, if the stage requires it, human-approved) — this is
+    intentionally the same two-axis check should_index() applies to the
+    actual current version, just evaluated version-by-version instead of
+    only against document.current_version_id. Returns None if no version of
+    this document has ever cleared that bar (nothing has ever been
+    genuinely indexed for it).
+    """
+    document = db.get(Document, document_id)
+    if document is None:
+        return None
+
+    stage = db.get(Stage, document.stage_id)
+    requires_approval = stage is not None and stage.requires_approval
+    if requires_approval:
+        workflow = (
+            db.query(WorkflowState)
+            .filter(WorkflowState.document_id == document_id)
+            .one_or_none()
+        )
+        if workflow is None or workflow.state != WorkflowStatus.approved:
+            # Approval is per-document, not per-version — if the document
+            # isn't currently approved, no version of it can be grounded in,
+            # even an old one that once passed the scan (reset_to_draft_if_approved
+            # already un-indexes Qdrant in exactly this situation).
+            return None
+
+    # Ordered by created_at, not version_number: version_number is now only
+    # assigned on approval (None until then), so it no longer reflects
+    # chronological order — and NULLs would sort ahead of real numbers in
+    # a naive DESC order, walking unresolved versions before ever reaching
+    # an approved one.
+    versions = (
+        db.query(DocumentVersion)
+        .filter(DocumentVersion.document_id == document_id)
+        .order_by(DocumentVersion.created_at.desc())
+        .all()
+    )
+    for version in versions:
+        if version.status == DocumentStatus.indexed and version.approval_outcome == VersionApprovalOutcome.approved:
+            return version
+    return None
+
+
 def _delete_existing_points(client, collection: str, document_id: uuid.UUID) -> None:
     """
     Remove every existing point for this document_id, unconditionally — runs
@@ -97,6 +154,31 @@ def _delete_existing_points(client, collection: str, document_id: uuid.UUID) -> 
             )
         ),
     )
+
+
+def unindex_document(db: Session, document_id: uuid.UUID) -> None:
+    """
+    Removes this document's points from its tenant's Qdrant collection, if
+    any exist — the missing counterpart to index_document(). Call this
+    whenever a document that may have been indexed becomes NOT should_index()
+    again: specifically, when a prior approval is reset (a new version
+    finalized on a previously-approved document — see
+    workflow.reset_to_draft_if_approved()). Without this, a document's OLD,
+    now-superseded and no-longer-approved content stays fully searchable via
+    RAG, silently, with nothing in the search result to indicate it's stale.
+
+    A no-op if the document was never indexed (Qdrant delete-by-filter on a
+    document_id with no points is harmless), so this is safe to call
+    unconditionally rather than trying to first determine whether an index
+    entry actually exists.
+    """
+    document = db.get(Document, document_id)
+    if document is None:
+        return
+    client = get_qdrant_client()
+    collection = ensure_tenant_collection(client, document.tenant_id)
+    _delete_existing_points(client, collection, document_id)
+    logger.info("unindex_document(%s): removed any existing points from %s", document_id, collection)
 
 
 def index_document(db: Session, document_id: uuid.UUID) -> dict:
