@@ -13,8 +13,10 @@ from app.services.access_control import (
     resolve_effective_access,
     is_grant_only_confidential_access,
     classify_document_visibility,
+    classify_documents_visibility,
     DocumentVisibility,
 )
+from app.services.authorization_context import build_authorization_context
 
 
 class TestResolveEffectiveAccess(unittest.TestCase):
@@ -278,6 +280,92 @@ class TestIsGrantOnlyConfidentialAccess(TestResolveEffectiveAccess):
             classify_document_visibility(self.db, self.viewer.user_id, self.document),
             DocumentVisibility.fully_allowed,
         )
+
+
+class TestBatchVisibilityGrants(TestResolveEffectiveAccess):
+    def test_document_scoped_grant_is_honored_in_batch_path(self):
+        grant = AccessRequest(
+            user_id=self.viewer.user_id, team_id=self.team.team_id,
+            scope=AccessRequestScope.document, document_id=self.document.document_id,
+            status=AccessRequestStatus.approved,
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=72),
+        )
+        self.db.add(grant)
+        self.db.commit()
+        ctx = build_authorization_context(self.db, self.viewer.user_id, self.project.project_id)
+        result = classify_documents_visibility(self.db, ctx, [self.document.document_id])
+        self.assertEqual(result[self.document.document_id], DocumentVisibility.fully_allowed)
+
+    def test_stage_scoped_grant_is_honored_in_batch_path(self):
+        grant = AccessRequest(
+            user_id=self.viewer.user_id, team_id=self.team.team_id,
+            scope=AccessRequestScope.stage, stage_id=self.stage.stage_id,
+            status=AccessRequestStatus.approved,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=90),
+        )
+        self.db.add(grant)
+        self.db.commit()
+        ctx = build_authorization_context(self.db, self.viewer.user_id, self.project.project_id)
+        result = classify_documents_visibility(self.db, ctx, [self.document.document_id])
+        self.assertEqual(result[self.document.document_id], DocumentVisibility.fully_allowed)
+
+    def test_no_grant_is_blocked_in_batch_path(self):
+        ctx = build_authorization_context(self.db, self.viewer.user_id, self.project.project_id)
+        result = classify_documents_visibility(self.db, ctx, [self.document.document_id])
+        self.assertEqual(result[self.document.document_id], DocumentVisibility.blocked_by_sensitivity)
+
+    def test_document_scoped_grant_on_other_document_does_not_leak_in_batch_path(self):
+        """
+        Regression, Task-3-bug-class check for the BULK precompute: two
+        documents share a native team (self.team). A document-scope grant
+        exists for `other_document` only. Resolving `self.document`'s batch
+        visibility must NOT come back fully_allowed just because the grant's
+        mandatory routing team_id happens to equal a team self.document is
+        also visible through. AuthorizationContext.active_confidential_grant_
+        team_ids must never be populated from a non-team-scoped grant row
+        (that was the pre-existing bug this task's Step 3 query closes: the
+        prior team-only query added g.team_id for ANY approved grant
+        regardless of scope), and active_confidential_grant_document_ids
+        must only ever match the exact document_id it was issued for.
+        """
+        other_document = Document(
+            tenant_id=self.tenant.tenant_id, project_id=self.project.project_id, stage_id=self.stage.stage_id,
+            uploaded_by=self.team_lead.user_id, uploaded_as_team_id=self.team.team_id,
+            sensitivity_level=SensitivityLevel.confidential,
+            original_filename="other-secret-batch.md", mime_type="text/markdown",
+        )
+        self.db.add(other_document)
+        self.db.commit()
+        self.db.add(DocumentTeamVisibility(document_id=other_document.document_id, team_id=self.team.team_id))
+        self.db.commit()
+
+        try:
+            leak_grant = AccessRequest(
+                user_id=self.viewer.user_id, team_id=self.team.team_id,
+                scope=AccessRequestScope.document, document_id=other_document.document_id,
+                status=AccessRequestStatus.approved,
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=72),
+            )
+            self.db.add(leak_grant)
+            self.db.commit()
+
+            ctx = build_authorization_context(self.db, self.viewer.user_id, self.project.project_id)
+            # The grant must not have leaked into the team-scope set at all.
+            self.assertNotIn(self.team.team_id, ctx.active_confidential_grant_team_ids)
+            self.assertIn(other_document.document_id, ctx.active_confidential_grant_document_ids)
+            self.assertNotIn(self.document.document_id, ctx.active_confidential_grant_document_ids)
+
+            result = classify_documents_visibility(
+                self.db, ctx, [self.document.document_id, other_document.document_id]
+            )
+            self.assertEqual(result[self.document.document_id], DocumentVisibility.blocked_by_sensitivity)
+            self.assertEqual(result[other_document.document_id], DocumentVisibility.fully_allowed)
+        finally:
+            self.db.query(AccessRequest).filter(AccessRequest.document_id == other_document.document_id).delete()
+            self.db.query(DocumentTeamVisibility).filter(DocumentTeamVisibility.document_id == other_document.document_id).delete()
+            self.db.query(Document).filter(Document.document_id == other_document.document_id).update({"current_version_id": None})
+            self.db.query(Document).filter(Document.document_id == other_document.document_id).delete()
+            self.db.commit()
 
 
 if __name__ == "__main__":

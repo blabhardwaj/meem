@@ -547,8 +547,12 @@ def classify_documents_visibility(
                 out[doc_id] = DocumentVisibility.fully_allowed
                 continue
 
-            # Active approved grant on any overlapping team (viewer or contributor)
-            if overlapping_teams & auth_context.active_confidential_grant_team_ids:
+            # Active approved grant of ANY scope — document, stage, or team.
+            if (
+                doc_id in auth_context.active_confidential_grant_document_ids
+                or document.stage_id in auth_context.active_confidential_grant_stage_ids
+                or overlapping_teams & auth_context.active_confidential_grant_team_ids
+            ):
                 out[doc_id] = DocumentVisibility.fully_allowed
                 continue
 
