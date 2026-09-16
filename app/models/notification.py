@@ -27,6 +27,17 @@ class NotificationType(str, enum.Enum):
     role_changed = "role_changed"
 
 
+class NotificationAudience(str, enum.Enum):
+    """
+    Which side of an event's lifecycle this notification is for — drives
+    frontend click-through routing deterministically, never inferred from
+    title text. Nullable: only access-request notifications set this today;
+    other notification types have no two-sided lifecycle to distinguish.
+    """
+    approver = "approver"
+    requester = "requester"
+
+
 class Notification(Base):
     """
     One row per (event, recipient) — the same event fans out to multiple
@@ -46,6 +57,9 @@ class Notification(Base):
     )
     notification_type: Mapped[NotificationType] = mapped_column(
         Enum(NotificationType, name="notification_type"), nullable=False
+    )
+    audience: Mapped[NotificationAudience | None] = mapped_column(
+        Enum(NotificationAudience, name="notification_audience"), nullable=True
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     body: Mapped[str | None] = mapped_column(Text, nullable=True)
