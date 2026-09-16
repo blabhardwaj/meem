@@ -7,7 +7,8 @@ const Modal = ({
   title,
   description,
   children,
-  footer
+  footer,
+  scrollable = false,
 }) => {
   useEffect(() => {
     const handleEscape = (e) => {
@@ -28,7 +29,7 @@ const Modal = ({
       />
       
       {/* Modal Content */}
-      <div className="relative z-50 w-full max-w-lg bg-surface border border-border rounded-xl shadow-xl overflow-visible">
+      <div className={`relative z-50 w-full max-w-lg bg-surface border border-border rounded-xl shadow-xl ${scrollable ? 'overflow-y-auto scrollbar-thin max-h-[75vh]' : 'overflow-visible'}`}>
         <div className="flex items-center justify-between p-5 border-b border-border/50">
           <div>
             <h2 className="text-lg font-semibold text-gray-100">{title}</h2>

@@ -3,7 +3,8 @@ import React from 'react';
 const Badge = ({
   children,
   variant = 'neutral',
-  className = ''
+  className = '',
+  title,
 }) => {
   const variants = {
     active: "bg-primary/10 text-primary border-primary/20",
@@ -15,7 +16,7 @@ const Badge = ({
   };
 
   return (
-    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${variants[variant]} ${className}`}>
+    <span title={title} className={`inline-flex items-center leading-none px-2.5 pt-[3px] pb-[5px] rounded-full text-xs font-medium border ${variants[variant]} ${className}`}>
       {children}
     </span>
   );

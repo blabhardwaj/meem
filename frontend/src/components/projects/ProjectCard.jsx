@@ -27,11 +27,11 @@ const ProjectCard = ({ project, accessLevel = 'member', myTeams = [] }) => {
 
   const accessLabel = ACCESS_LABEL[accessLevel];
   const seesAllTeams = accessLevel === 'org_admin' || accessLevel === 'project_admin';
-  const assignedTeams = seesAllTeams
-    ? 'All teams'
+  const teamChips = seesAllTeams
+    ? ['All teams']
     : myTeams.length
-      ? myTeams.map((t) => t.team).join(', ')
-      : 'No team assigned';
+      ? myTeams.map((t) => t.team)
+      : ['No team assigned'];
   const isTeamLeadHere = myTeams.some((t) => t.role === 'team_lead');
   const canManage = seesAllTeams || isTeamLeadHere;
 
@@ -51,45 +51,48 @@ const ProjectCard = ({ project, accessLevel = 'member', myTeams = [] }) => {
         )}
         description={project.description || 'No description yet.'}
         icon={Folder}
-        className="h-full min-h-[220px]"
+        className="h-full min-h-[220px] flex flex-col"
         hoverable
         onClick={() => navigate(`/projects/${project.project_id}`)}
         footer={
-          <div className="space-y-2 text-sm">
-            <div className="flex items-center justify-end">
-              <button
-                type="button"
-                onClick={(event) => { stop(event); setScopeOpen(true); }}
-                className="rounded-full focus:outline-none focus:ring-2 focus:ring-primary/50"
-                title="View your access in this project"
+          <div className="flex items-center justify-between gap-3">
+            <button
+              type="button"
+              onClick={(event) => { stop(event); setScopeOpen(true); }}
+              className="rounded-full focus:outline-none focus:ring-2 focus:ring-primary/50"
+              title="View your access in this project"
+            >
+              <Badge variant="neutral" className="cursor-pointer hover:border-primary/50">
+                {accessLabel}
+              </Badge>
+            </button>
+            {canManage && (
+              <Link
+                to={`/admin?project_id=${encodeURIComponent(project.project_id)}`}
+                onClick={stop}
+                className="text-sm text-primary-light hover:text-primary underline underline-offset-2"
               >
-                <Badge variant="neutral" className="cursor-pointer hover:border-primary/50">
-                  {accessLabel}
-                </Badge>
-              </button>
-            </div>
-            <div className="space-y-1 text-xs text-gray-500">
-              <p>Assigned teams: <span className="text-gray-300">{assignedTeams}</span></p>
-              {canManage && (
-                <Link
-                  to={`/admin?project_id=${encodeURIComponent(project.project_id)}`}
-                  onClick={stop}
-                  className="inline-flex pt-1 text-primary-light hover:text-primary underline underline-offset-2"
-                >
-                  {seesAllTeams ? 'Manage project access' : 'Manage team access'}
-                </Link>
-              )}
-            </div>
+                {seesAllTeams ? 'Manage project access' : 'Manage team access'}
+              </Link>
+            )}
           </div>
         }
-      />
+      >
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-2">Assigned teams</p>
+          <div className="flex flex-wrap gap-1.5">
+            {teamChips.map((team) => (
+              <Badge key={team} variant="neutral">{team}</Badge>
+            ))}
+          </div>
+        </div>
+      </Card>
 
       <Modal
         open={scopeOpen}
         onClose={() => setScopeOpen(false)}
         title="Your access in this project"
         description={project.project_name}
-        footer={<button type="button" onClick={() => setScopeOpen(false)} className="text-sm text-gray-400 hover:text-gray-200">Close</button>}
       >
         <div className="space-y-4 text-sm">
           <div className="flex items-center gap-2">

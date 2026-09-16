@@ -32,7 +32,7 @@ _DOC_EXT_RE = re.compile(r"(\.|\s+)(md|pdf|docx|doc|txt)$", re.IGNORECASE)
 
 def normalize_ref(s: str) -> str:
     s = s.lower()
-    for ch in "-_./\\'\"":
+    for ch in "-_./\\'\"?!,:;()[]{}":
         s = s.replace(ch, " ")
     return " ".join(s.split())
 
@@ -148,8 +148,21 @@ def match_documents(db, project_id: uuid.UUID, ref: str, stage_id: uuid.UUID | N
             strong.append(d)
             continue
         fn_tokens = {t for t in stem.split() if t not in _REF_STOPWORDS and len(t) > 2}
-        if fn_tokens and fn_tokens <= ref_tokens:
+        # Auto-generated suffixes (e.g. a "-20260911-120310" timestamp appended
+        # on upload) are never something a user types when naming a document —
+        # don't require them to appear in ref_tokens for a match.
+        fn_tokens_required = {t for t in fn_tokens if not t.isdigit()}
+        if fn_tokens_required and fn_tokens_required <= ref_tokens:
             weak.append(d)
+            continue
+        # Otherwise, a strong majority overlap of the filename's significant
+        # words (ignoring stopwords/noise the user added, e.g. "who uploaded
+        # the ... ?") is still a confident enough match.
+        if fn_tokens:
+            overlap = fn_tokens_required & ref_tokens if fn_tokens_required else fn_tokens & ref_tokens
+            denom = fn_tokens_required or fn_tokens
+            if len(denom) >= 2 and len(overlap) / len(denom) >= 0.6:
+                weak.append(d)
 
     chosen = strong or weak
     seen, unique = set(), []

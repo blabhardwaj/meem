@@ -6,8 +6,10 @@ required_documents checklist item (that link is used only for gap-detection/
 coverage in Phase 5, not for scan quality). Every document, regardless of
 type, is scored against the same 3 structural-quality criteria.
 
-Threshold is PERCENTAGE-BASED (60% of max possible score) so it auto-scales
-if the criteria list changes again — no manual recalculation needed.
+Threshold is PERCENTAGE-BASED (65% of max possible score, raised from 60% in
+Master Plan v2 item 6 now that scan_score.py's PER_CRITERION_MINIMUM floor
+exists to catch single-axis failure) so it auto-scales if the criteria list
+changes again — no manual recalculation needed.
 """
 
 RUBRIC_CRITERIA = [
@@ -41,8 +43,8 @@ RUBRIC_CRITERIA = [
 ]
 
 MAX_POSSIBLE_SCORE = sum(c["max_score"] for c in RUBRIC_CRITERIA)  # 60
-REFORMATION_THRESHOLD_PERCENTAGE = 0.60
-REFORMATION_THRESHOLD = round(MAX_POSSIBLE_SCORE * REFORMATION_THRESHOLD_PERCENTAGE)  # 36
+REFORMATION_THRESHOLD_PERCENTAGE = 0.65
+REFORMATION_THRESHOLD = round(MAX_POSSIBLE_SCORE * REFORMATION_THRESHOLD_PERCENTAGE)  # 39
 
 SYSTEM_PROMPT = f"""You are a document structure quality scanner for a project management system. Your job is to evaluate ONE uploaded document against 3 universal structural-quality criteria and return a numeric score for each.
 

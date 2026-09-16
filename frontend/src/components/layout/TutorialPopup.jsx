@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { ArrowLeft, ArrowRight, CheckCircle2, Sparkles, Bell, FolderKanban, ShieldCheck, UserRound, Upload, NotebookPen } from 'lucide-react';
+import { ArrowLeft, ArrowRight, CheckCircle2, Sparkles, Bell, FolderKanban, ShieldCheck, UserRound, Upload } from 'lucide-react';
 import Button from '../ui/Button';
 import Modal from '../ui/Modal';
 import { useAuth } from '../../context/AuthContext';
@@ -7,16 +7,15 @@ import { useAuth } from '../../context/AuthContext';
 const memberSteps = [
   { title: 'Welcome to your workspace', element: 'Projects', description: 'Your project cards are the starting point for documents, team work, and project progress.', icon: FolderKanban },
   { title: 'Open a project', element: 'Project cards', description: 'Select a project to view its documents and stages. Use the project search field to find work quickly.', icon: FolderKanban },
-  { title: 'Add and improve documents', element: 'Studio and Upload', description: 'Use Studio for drafting, scanning, and AI questions. Upload project documents when you are ready to share work.', icon: Upload },
-  { title: 'Keep personal notes', element: 'Notes', description: 'Use Notes for private follow-ups and working ideas that do not belong in a project document.', icon: NotebookPen },
+  { title: 'Add and improve documents', element: 'Studio and Upload', description: 'Use Studio to jump into a project’s Draft and Search agents or run a gap analysis. Upload project documents when you are ready to share work.', icon: Upload },
   { title: 'Stay informed', element: 'Notifications', description: 'The bell shows organization activity, assignments, and other recent updates. Your profile menu contains the role-access FAQ.', icon: Bell },
 ];
 
 const adminSteps = [
   { title: 'Welcome to admin workspace', element: 'Projects', description: 'Projects gives you the overall workspace view. Open a project to inspect its documents, stages, and ownership.', icon: FolderKanban },
-  { title: 'Manage people and access', element: 'Admin → Users & Access', description: 'Assign project roles and teams, search organization members, open a member name to view access, and remove project access when needed.', icon: ShieldCheck },
-  { title: 'Review governance', element: 'Admin → Approvals and Activity', description: 'Use Approvals for pending decisions, Project Activity for project history, and Audit Log for organization events.', icon: ShieldCheck },
-  { title: 'Use the AI workspace', element: 'Studio', description: 'Draft deliverables, scan documents line by line, identify gaps, and ask general questions from one place.', icon: Sparkles },
+  { title: 'Manage people and access', element: 'Access & Governance → Users & Access', description: 'Assign project roles and teams, search organization members, open a member name to view access, and remove project access when needed.', icon: ShieldCheck },
+  { title: 'Review governance', element: 'Access & Governance → Approvals and Activity', description: 'Use Approvals for pending decisions, Project Activity for project history, and Audit Log for organization events.', icon: ShieldCheck },
+  { title: 'Use the AI workspace', element: 'Studio', description: 'Jump into any project’s Draft or Search agent, or run a gap analysis to see what a project is missing.', icon: Sparkles },
   { title: 'Monitor every update', element: 'Notifications', description: 'The notification badge highlights new organization activity. The profile menu also includes the role-access FAQ.', icon: Bell },
 ];
 
@@ -42,7 +41,7 @@ const TutorialPopup = ({ open, onClose }) => {
     <Modal
       open={open}
       onClose={finish}
-      title={`${user?.is_org_admin ? 'Admin' : 'Team member'} quick tour`}
+      title="Quick Tour"
       description={`Step ${stepIndex + 1} of ${steps.length}`}
       footer={(
         <div className="flex w-full items-center justify-between gap-3">
