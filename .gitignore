@@ -24,6 +24,9 @@ draft generation/
 frontend/*.log
 scratch/
 
+# Subagent-driven-development scratch workspace (ledgers, briefs, review packages)
+.superpowers/
+
 # Qdrant embedded local-mode storage (on-disk vector DB, not source code)
 qdrant_storage/
 
