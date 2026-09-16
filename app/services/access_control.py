@@ -23,7 +23,9 @@ work (e.g. a Qdrant call in retrieval.py).
 """
 
 from collections import defaultdict
+from dataclasses import dataclass
 import enum
+import uuid
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -31,7 +33,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.user import User
-from app.models.team import UserTeamMembership, ProjectAdmin, TeamRole, AccessRequest, AccessRequestStatus
+from app.models.team import (
+    UserTeamMembership,
+    ProjectAdmin,
+    Team,
+    TeamRole,
+    AccessRequest,
+    AccessRequestScope,
+    AccessRequestStatus,
+)
 from app.models.document import Document, DocumentTeamVisibility, SensitivityLevel
 from app.models.stage import Stage, TeamStageAccess
 from app.services.authorization_context import AuthorizationContext
@@ -210,6 +220,175 @@ def _has_active_confidential_grant(db: Session, user_id: UUID, team_id: UUID) ->
     if grant.expires_at and grant.expires_at < datetime.now(timezone.utc):
         return False  # expired — treated as no grant
     return True
+
+
+@dataclass
+class EffectiveAccessResult:
+    """
+    The resolved answer to "how, if at all, does this user currently have
+    access to this specific target" — the single shared verdict consumed by
+    both is_grant_only_confidential_access() (mutation enforcement) and
+    GET /access-requests/status (UI state). Neither re-derives this
+    precedence independently.
+    """
+    status: str  # "granted" | "pending" | "denied" | "none"
+    via_grant: bool = False  # only meaningful when status == "granted"
+    expires_at: datetime | None = None
+    request_id: UUID | None = None
+
+
+def resolve_effective_access(
+    db: Session,
+    user_id: UUID,
+    *,
+    document_id: UUID | None = None,
+    stage_id: UUID | None = None,
+    team_id: UUID | None = None,
+) -> EffectiveAccessResult:
+    """
+    Exactly one of document_id/stage_id/team_id is provided — the caller is
+    asking about one specific target. Resolution order (deliberate, and the
+    only place this precedence is decided):
+
+      1. Native role access (org admin / project admin / team-lead+ on an
+         applicable team) -> granted, via_grant=False. Checked FIRST so a
+         user with both native access and an active grant is never treated
+         as grant-only (the grant does not downgrade an existing role).
+      2. An active (approved, unexpired) grant covering this target ->
+         granted, via_grant=True. Checked document-scope, then stage-scope,
+         then team-scope — narrowest scope wins when more than one grant
+         could apply (e.g. a document covered by both a document grant and
+         an overlapping stage grant).
+      3. A live pending request for this exact target -> pending.
+      4. The latest denied request for this exact target -> denied.
+      5. Nothing found (including an approved grant that has since expired,
+         with no live denial on record) -> none.
+
+    A stale denied request never suppresses a currently-active grant or a
+    currently-pending request — steps 1-2 are checked before request
+    history is ever consulted. Likewise, a lapsed (expired) grant is not
+    surfaced as a distinct status — it is indistinguishable from having
+    never requested at all, unless a denial is also on record.
+    """
+    if sum(x is not None for x in (document_id, stage_id, team_id)) != 1:
+        raise ValueError("Exactly one of document_id, stage_id, team_id must be given")
+
+    if _is_org_admin(db, user_id):
+        return EffectiveAccessResult(status="granted", via_grant=False)
+
+    # Resolve the project_id needed for the project_admin check, and the set
+    # of teams this target is "native-visible" through (team-lead+ on any of
+    # these means native access), per target kind.
+    if document_id is not None:
+        document = db.get(Document, document_id)
+        if document is None:
+            return EffectiveAccessResult(status="none")
+        if _is_project_admin(db, user_id, document.project_id):
+            return EffectiveAccessResult(status="granted", via_grant=False)
+        native_team_ids = {
+            row.team_id for row in db.execute(
+                select(DocumentTeamVisibility).where(DocumentTeamVisibility.document_id == document_id)
+            ).scalars()
+        }
+    elif stage_id is not None:
+        stage = db.get(Stage, stage_id)
+        if stage is None:
+            return EffectiveAccessResult(status="none")
+        if _is_project_admin(db, user_id, stage.project_id):
+            return EffectiveAccessResult(status="granted", via_grant=False)
+        native_team_ids = {
+            row.team_id for row in db.execute(
+                select(TeamStageAccess).where(TeamStageAccess.stage_id == stage_id)
+            ).scalars()
+        }
+    else:
+        team = db.get(Team, team_id)
+        if team is None:
+            return EffectiveAccessResult(status="none")
+        if _is_project_admin(db, user_id, team.project_id):
+            return EffectiveAccessResult(status="granted", via_grant=False)
+        native_team_ids = {team_id}
+
+    memberships = [
+        m for m in (_get_team_membership(db, user_id, tid) for tid in native_team_ids) if m is not None
+    ]
+    if any(_TEAM_ROLE_RANK[m.role] >= _TEAM_ROLE_RANK[TeamRole.team_lead] for m in memberships):
+        return EffectiveAccessResult(status="granted", via_grant=False)
+
+    now = datetime.now(timezone.utc)
+
+    # A target can be covered by a grant of ANY of the three scopes — a
+    # document by its own document_id, its stage_id, or any of its native
+    # team_ids; a stage by its own stage_id or any of its native team_ids;
+    # a team only by its own team_id. Fetch every row that could possibly
+    # cover this target in one query rather than one round trip per scope.
+    if document_id is not None:
+        candidate_team_ids = list(native_team_ids) or [uuid.UUID(int=0)]  # never-matching sentinel if empty
+        rows = db.execute(
+            select(AccessRequest).where(
+                AccessRequest.user_id == user_id,
+                (AccessRequest.document_id == document_id)
+                | (AccessRequest.stage_id == document.stage_id)
+                | (AccessRequest.team_id.in_(candidate_team_ids)),
+            )
+        ).scalars().all()
+    elif stage_id is not None:
+        candidate_team_ids = list(native_team_ids) or [uuid.UUID(int=0)]
+        rows = db.execute(
+            select(AccessRequest).where(
+                AccessRequest.user_id == user_id,
+                (AccessRequest.stage_id == stage_id) | (AccessRequest.team_id.in_(candidate_team_ids)),
+            )
+        ).scalars().all()
+    else:
+        rows = db.execute(
+            select(AccessRequest).where(
+                AccessRequest.user_id == user_id, AccessRequest.team_id == team_id,
+                AccessRequest.scope == AccessRequestScope.team,
+            )
+        ).scalars().all()
+
+    def _is_active_grant(r: AccessRequest) -> bool:
+        if r.status != AccessRequestStatus.approved:
+            return False
+        if r.expires_at is None:
+            return True
+        exp = r.expires_at if r.expires_at.tzinfo else r.expires_at.replace(tzinfo=timezone.utc)
+        return exp >= now
+
+    active_grants = [r for r in rows if _is_active_grant(r)]
+    if active_grants:
+        # Narrowest-scope-wins tie-break (spec §4.0.2): document, then
+        # stage, then team. Only relevant when resolving a document target
+        # that could be covered by an overlapping stage/team grant too —
+        # a stage or team target query only ever matches its own scope.
+        by_scope = {AccessRequestScope.document: [], AccessRequestScope.stage: [], AccessRequestScope.team: []}
+        for r in active_grants:
+            by_scope[r.scope].append(r)
+        for scope in (AccessRequestScope.document, AccessRequestScope.stage, AccessRequestScope.team):
+            if by_scope[scope]:
+                winner = by_scope[scope][0]
+                return EffectiveAccessResult(
+                    status="granted", via_grant=True,
+                    expires_at=winner.expires_at, request_id=winner.request_id,
+                )
+
+    pending = [r for r in rows if r.status == AccessRequestStatus.pending]
+    if pending:
+        latest_pending = max(pending, key=lambda r: r.requested_at)
+        return EffectiveAccessResult(status="pending", request_id=latest_pending.request_id)
+
+    # NOTE: an approved-but-expired grant is deliberately NOT surfaced as a
+    # distinct "expired" status here — a lapsed grant with no live denial on
+    # record is treated the same as never having requested at all (falls
+    # through to "none"). Only an explicit denial is surfaced as terminal
+    # history; see resolve_effective_access()'s docstring.
+    denied = [r for r in rows if r.status == AccessRequestStatus.denied]
+    if denied:
+        latest = max(denied, key=lambda r: (r.decided_at or r.requested_at))
+        return EffectiveAccessResult(status="denied", request_id=latest.request_id)
+
+    return EffectiveAccessResult(status="none")
 
 
 class DocumentVisibility(str, enum.Enum):
