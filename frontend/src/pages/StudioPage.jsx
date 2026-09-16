@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowRight, Sparkles, Bot, ScanSearch, SearchCheck, MessageSquare, Users, Database } from 'lucide-react';
+import { ArrowRight, Sparkles, Bot, SearchCheck, Users, Database } from 'lucide-react';
 import { agentsApi, projectsApi } from '../lib/api';
 import Card from '../components/ui/Card';
 import Badge from '../components/ui/Badge';
@@ -52,12 +52,12 @@ const StudioPage = () => {
       </div>
 
       <h2 className="text-lg font-semibold text-gray-100 mb-3">AI Studio</h2>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8 items-stretch">
-        <Link to="/studio/draft/prd" className="h-full"><Card className="h-full min-h-[180px]" title="Drafting Agent" description="Generate structured project documents from instructions." icon={Bot} /></Link>
-        <Link to="/studio/scan" className="h-full"><Card className="h-full min-h-[180px]" title="Scanner Agent" description="Score and auto-revise generated drafts." icon={ScanSearch} /></Link>
-        <Link to="/studio/query" className="h-full"><Card className="h-full min-h-[180px]" title="General Query Agent" description="Ask grounded questions across your project sources." icon={SearchCheck} /></Link>
-        <Link to="/studio/query?agent=rag" className="h-full"><Card className="h-full min-h-[180px]" title="RAG Retrieval Agent" description="Search authorized chunks and inspect the exact source matches." icon={Database} /></Link>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8 items-stretch">
+        <Link to="/studio/query" className="h-full"><Card className="h-full min-h-[180px]" title="Search Agent" description="Ask grounded content questions or metadata questions across your project sources." icon={SearchCheck} /></Link>
       </div>
+      <p className="text-sm text-gray-500 -mt-5 mb-8">
+        Drafting and Search now live inside a project&rsquo;s workspace (Draft / Search tabs) — open a project below.
+      </p>
 
       <h2 className="text-lg font-semibold text-gray-100 mb-3">Project AI Studio</h2>
       {error && <p className="text-red-400 text-sm mb-4">{error}</p>}
@@ -89,14 +89,12 @@ const StudioPage = () => {
                 </button>
               </div>
               <p className="w-full text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">Project agents</p>
-                <Link to={`/projects/${project.project_id}/studio/prd`}><Button size="sm" variant="secondary" icon={Bot}>Draft</Button></Link>
-                <Link to={`/projects/${project.project_id}/studio/scan`}><Button size="sm" variant="secondary" icon={ScanSearch}>Scan</Button></Link>
-                <Link to={`/studio/query?project_id=${encodeURIComponent(project.project_id)}`}><Button size="sm" variant="secondary" icon={MessageSquare}>Query</Button></Link>
-                <Link to={`/studio/query?agent=rag&project_id=${encodeURIComponent(project.project_id)}`}><Button size="sm" variant="secondary" icon={Database}>RAG</Button></Link>
+                <Link to={`/projects/${project.project_id}?tab=draft`}><Button size="sm" variant="secondary" icon={Bot}>Draft</Button></Link>
+                <Link to={`/projects/${project.project_id}?tab=search`}><Button size="sm" variant="secondary" icon={Database}>Search</Button></Link>
                 <Button size="sm" variant="secondary" icon={SearchCheck} onClick={() => analyzeGaps(project.project_id)}>Gaps</Button>
                 <div className="w-full h-px bg-border my-1" />
                 {templates.map((template) => (
-                  <Link key={template.id} to={`/projects/${project.project_id}/studio/${template.id}`}>
+                  <Link key={template.id} to={`/projects/${project.project_id}?tab=draft`}>
                     <Badge className="hover:border-primary/50 hover:text-primary transition-colors cursor-pointer">{template.label}</Badge>
                   </Link>
                 ))}
@@ -110,7 +108,7 @@ const StudioPage = () => {
       )}
 
       <Modal open={!!gapProject} onClose={() => setGapProject('')} title="Documentation Gap Analysis" description={gapProject}>
-        {gapLoading ? <div className="flex justify-center py-8"><div className="w-6 h-6 border-4 border-primary/30 border-t-primary rounded-full animate-spin" /></div> : <div className="text-sm text-gray-300 whitespace-pre-wrap max-h-[50vh] overflow-y-auto">{gapReport?.gap_report}</div>}
+        {gapLoading ? <div className="flex justify-center py-8"><div className="w-6 h-6 border-4 border-primary/30 border-t-primary rounded-full animate-spin" /></div> : <div className="text-sm text-gray-300 whitespace-pre-wrap max-h-[50vh] overflow-y-auto scrollbar-thin">{gapReport?.gap_report}</div>}
       </Modal>
 
       <Modal

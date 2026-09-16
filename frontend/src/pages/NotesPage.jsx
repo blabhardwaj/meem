@@ -15,6 +15,12 @@ const formatDate = (isoString) => {
   return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 };
 
+const formatFileSize = (bytes) => {
+  if (!bytes || bytes <= 0) return '0 KB';
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+};
+
 const NotesPage = () => {
   const [notes, setNotes] = useState([]);
   const [projects, setProjects] = useState([]);
@@ -151,7 +157,7 @@ const NotesPage = () => {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
             {personalDocuments.map((document) => (
               <Card key={document.document_id} title={document.filename} description={formatDate(document.created_at)}>
-                <p className="text-xs text-gray-500">{(document.file_size_bytes / 1024 / 1024).toFixed(2)} MB · Private to you</p>
+                <p className="text-xs text-gray-500">{formatFileSize(document.file_size_bytes)} · Private to you</p>
               </Card>
             ))}
           </div>

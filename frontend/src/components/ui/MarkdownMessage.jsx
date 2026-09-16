@@ -91,6 +91,29 @@ function CodeBlock({ children, className, ...props }) {
   );
 }
 
+/**
+ * GFM table cells can't contain a real newline (it would end the row), so
+ * the LLM writes a literal `<br>`/`<br/>` tag to force a line break inside a
+ * cell — the standard, widely-supported convention for this. react-markdown
+ * doesn't render raw inline HTML by default (and we deliberately don't add
+ * rehype-raw + a broad allowlist just for this, since that widens the HTML
+ * surface for LLM-generated content well beyond what's needed here). This
+ * narrowly handles only literal <br> text within table cells, rendering a
+ * real <br/> element in its place — no HTML parsing, no injection surface.
+ */
+function renderCellWithBreaks(children) {
+  return React.Children.map(children, (child) => {
+    if (typeof child !== 'string' || !/<br\s*\/?>/i.test(child)) return child;
+    const parts = child.split(/<br\s*\/?>/i);
+    return parts.map((part, i) => (
+      <React.Fragment key={i}>
+        {i > 0 && <br />}
+        {part}
+      </React.Fragment>
+    ));
+  });
+}
+
 export default function MarkdownMessage({ content = '', className = '' }) {
   if (!content) return null;
 
@@ -224,12 +247,12 @@ export default function MarkdownMessage({ content = '', className = '' }) {
     th({ children }) {
       return (
         <th className="px-3 py-2 text-xs font-semibold text-gray-200 uppercase tracking-wider">
-          {children}
+          {renderCellWithBreaks(children)}
         </th>
       );
     },
     td({ children }) {
-      return <td className="px-3 py-2 text-xs sm:text-sm text-gray-300">{children}</td>;
+      return <td className="px-3 py-2 text-xs sm:text-sm text-gray-300">{renderCellWithBreaks(children)}</td>;
     },
 
     // Text formatting

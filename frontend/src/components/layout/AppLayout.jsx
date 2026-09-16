@@ -28,9 +28,9 @@ const AppLayout = () => {
   }, [user?.user_id, user?.is_org_admin]);
 
   return (
-    <div className="flex flex-col bg-background">
-      <TopNav onTutorialOpen={() => setTutorialOpen(true)} />
-      <main className="flex flex-col">
+    <div className="flex flex-col min-h-screen bg-background">
+      <TopNav />
+      <main className="flex flex-1 min-h-0 flex-col">
         <Outlet />
       </main>
       <TutorialPopup open={tutorialOpen} onClose={() => setTutorialOpen(false)} />

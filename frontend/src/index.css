@@ -1,11 +1,76 @@
 @import "tailwindcss";
 @config "../tailwind.config.js";
 
+/*
+ * Color tokens as real CSS custom properties (Tailwind v4 @theme), not
+ * static hex values baked into utility classes at build time. This is what
+ * makes light mode actually work: every utility that references
+ * --color-background/--color-surface/etc — including opacity-modified
+ * variants like bg-background/30, bg-surface/80 — derives from these same
+ * variables, so redefining them once under .light-theme below fixes every
+ * such class at once. The previous approach (a hand-maintained list of
+ * `body.light-theme .exact-class-name { ... !important }` overrides) could
+ * only ever cover classes someone remembered to list, and silently missed
+ * every opacity variant, status color, and badge/button variant.
+ */
+@theme {
+  --color-background: #0F1115;
+  --color-surface: #1E2028;
+  --color-surface-hover: #2A2C35;
+  --color-border: #2E323E;
+
+  --color-primary: #8B5CF6;
+  --color-primary-light: #A78BFA;
+  --color-primary-dark: #7C3AED;
+
+  --color-accent: #3B82F6;
+  --color-accent-light: #60A5FA;
+  --color-accent-dark: #2563EB;
+
+  /* Overrides Tailwind's built-in gray scale with this dark-first app's own
+     values (gray-100 is near-white text, meant for a dark background — the
+     opposite of Tailwind's default gray-100). Only the shades actually used
+     across the app are redefined; other gray-* steps fall back to Tailwind's
+     defaults if ever used. */
+  --color-gray-100: #f3f4f6;
+  --color-gray-200: #e5e7eb;
+  --color-gray-300: #d1d5db;
+  --color-gray-400: #9ca3af;
+  --color-gray-500: #6b7280;
+  --color-gray-600: #4b5563;
+
+  --background-image-gemini-gradient: linear-gradient(to right, #8B5CF6, #3B82F6);
+}
+
+/* Light mode: redefine the same tokens. Every class built from them
+   (bg-background, bg-background/30, text-primary, border-primary/50, ...)
+   picks this up automatically — nothing else in this file needs to know
+   about light mode at all. */
+.light-theme {
+  --color-background: #f5f7fb;
+  --color-surface: #ffffff;
+  --color-surface-hover: #e2e8f2;
+  --color-border: #d8dee9;
+
+  --color-primary: #7C3AED;
+  --color-primary-light: #6d28d9;
+  --color-primary-dark: #5b21b6;
+
+  --color-accent: #2563EB;
+  --color-accent-light: #1d4ed8;
+  --color-accent-dark: #1e40af;
+
+  --color-gray-100: #111827;
+  --color-gray-200: #1f2937;
+  --color-gray-300: #374151;
+  --color-gray-400: #4b5563;
+  --color-gray-500: #64748b;
+  --color-gray-600: #94a3b8;
+}
+
 @layer base {
   :root {
     font-family: 'Segoe UI', sans-serif;
-    color: #e5e7eb;
-    background: #0F1115;
   }
 
   html {
@@ -18,12 +83,12 @@
   }
 
   * {
-    border-color: #2E323E;
+    border-color: var(--color-border);
   }
 
   body {
     @apply bg-background text-gray-200 antialiased min-h-screen;
-    background-image: radial-gradient(circle at 12% 0%, rgba(139, 92, 246, 0.1), transparent 28rem), radial-gradient(circle at 92% 8%, rgba(59, 130, 246, 0.08), transparent 24rem);
+    background-image: radial-gradient(circle at 12% 0%, color-mix(in srgb, var(--color-primary) 10%, transparent), transparent 28rem), radial-gradient(circle at 92% 8%, color-mix(in srgb, var(--color-accent) 8%, transparent), transparent 24rem);
     scrollbar-width: none;
     -ms-overflow-style: none;
   }
@@ -41,75 +106,70 @@
     display: none;
   }
 
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border) transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: var(--color-border);
+    border-radius: 9999px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background-color: var(--color-surface-hover);
+  }
+
   button, input, textarea {
     font: inherit;
   }
 
-  .text-gray-100 { color: #f3f4f6; }
-  .text-gray-200 { color: #e5e7eb; }
-  .text-gray-300 { color: #d1d5db; }
-  .text-gray-400 { color: #9ca3af; }
-  .text-gray-500 { color: #6b7280; }
-  .text-gray-600 { color: #4b5563; }
-  .text-primary-light { color: #A78BFA; }
-
-  body.light-theme {
-    color: #1f2937;
-    background: #f5f7fb;
+  input, textarea, select {
+    color: var(--color-gray-200);
+    background-color: var(--color-surface);
   }
 
-  body.light-theme {
-    background: #f5f7fb;
-    background-image: radial-gradient(circle at 12% 0%, rgba(139, 92, 246, 0.08), transparent 28rem), radial-gradient(circle at 92% 8%, rgba(59, 130, 246, 0.06), transparent 24rem);
+  .card-footer {
+    background-color: color-mix(in srgb, var(--color-background) 50%, transparent);
   }
-
-  body.light-theme { background-color: #f5f7fb !important; }
-  body.light-theme .bg-background { background-color: #f5f7fb !important; }
-  body.light-theme .card-footer { background-color: transparent !important; }
-  body.light-theme .bg-surface { background-color: #ffffff !important; }
-  body.light-theme .bg-surface\/95 { background-color: rgba(255, 255, 255, 0.95) !important; }
-  body.light-theme .bg-surface-hover { background-color: #eef2f7 !important; }
-  body.light-theme .border-border { border-color: #d8dee9 !important; }
-  body.light-theme .text-gray-100 { color: #111827 !important; }
-  body.light-theme .text-gray-200 { color: #1f2937 !important; }
-  body.light-theme .text-gray-300 { color: #374151 !important; }
-  body.light-theme .text-gray-400 { color: #4b5563 !important; }
-  body.light-theme .text-gray-500 { color: #64748b !important; }
-  body.light-theme .text-gray-600 { color: #94a3b8 !important; }
-  body.light-theme input,
-  body.light-theme textarea,
-  body.light-theme select { color: #1f2937 !important; background-color: #ffffff !important; }
-  body.light-theme .text-primary-light { color: #6d28d9 !important; }
+  .light-theme .card-footer {
+    background-color: transparent;
+  }
 
   /* In-app Markdown viewer (MarkdownViewer.jsx) */
-  .markdown-body { color: #d1d5db; font-size: 0.9rem; line-height: 1.65; }
+  .markdown-body { color: var(--color-gray-300); font-size: 0.9rem; line-height: 1.65; }
   .markdown-body > :first-child { margin-top: 0; }
-  .markdown-body h1 { font-size: 1.4rem; font-weight: 700; color: #f3f4f6; margin: 1.4rem 0 0.7rem; }
-  .markdown-body h2 { font-size: 1.15rem; font-weight: 700; color: #f3f4f6; margin: 1.3rem 0 0.6rem; }
-  .markdown-body h3 { font-size: 1rem; font-weight: 600; color: #e5e7eb; margin: 1.1rem 0 0.5rem; }
-  .markdown-body h4, .markdown-body h5, .markdown-body h6 { font-size: 0.9rem; font-weight: 600; color: #e5e7eb; margin: 1rem 0 0.4rem; }
+  .markdown-body h1 { font-size: 1.4rem; font-weight: 700; color: var(--color-gray-100); margin: 1.4rem 0 0.7rem; }
+  .markdown-body h2 { font-size: 1.15rem; font-weight: 700; color: var(--color-gray-100); margin: 1.3rem 0 0.6rem; }
+  .markdown-body h3 { font-size: 1rem; font-weight: 600; color: var(--color-gray-200); margin: 1.1rem 0 0.5rem; }
+  .markdown-body h4, .markdown-body h5, .markdown-body h6 { font-size: 0.9rem; font-weight: 600; color: var(--color-gray-200); margin: 1rem 0 0.4rem; }
   .markdown-body p { margin: 0.6rem 0; }
   .markdown-body ul, .markdown-body ol { margin: 0.6rem 0; padding-left: 1.4rem; }
   .markdown-body ul { list-style: disc; }
   .markdown-body ol { list-style: decimal; }
   .markdown-body li { margin: 0.25rem 0; }
-  .markdown-body strong { color: #f3f4f6; font-weight: 600; }
+  .markdown-body strong { color: var(--color-gray-100); font-weight: 600; }
   .markdown-body em { font-style: italic; }
-  .markdown-body a { color: #A78BFA; text-decoration: underline; }
-  .markdown-body code { background: #2E323E; border-radius: 4px; padding: 0.1em 0.35em; font-size: 0.85em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .markdown-body pre { background: #14161c; border: 1px solid #2E323E; border-radius: 8px; padding: 0.85rem; overflow-x: auto; margin: 0.8rem 0; }
+  .markdown-body a { color: var(--color-primary-light); text-decoration: underline; }
+  .markdown-body code { background: var(--color-border); border-radius: 4px; padding: 0.1em 0.35em; font-size: 0.85em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .markdown-body pre { background: color-mix(in srgb, var(--color-background) 90%, var(--color-surface) 10%); border: 1px solid var(--color-border); border-radius: 8px; padding: 0.85rem; overflow-x: auto; margin: 0.8rem 0; }
   .markdown-body pre code { background: none; padding: 0; font-size: 0.82rem; }
-  .markdown-body blockquote { border-left: 3px solid #4b5563; padding-left: 0.9rem; color: #9ca3af; margin: 0.8rem 0; }
-  .markdown-body hr { border: 0; border-top: 1px solid #2E323E; margin: 1.2rem 0; }
-  body.light-theme .markdown-body { color: #374151; }
-  body.light-theme .markdown-body h1, body.light-theme .markdown-body h2,
-  body.light-theme .markdown-body h3, body.light-theme .markdown-body strong { color: #111827; }
-  body.light-theme .markdown-body code { background: #eef2f7; }
-  body.light-theme .markdown-body pre { background: #f8fafc; border-color: #d8dee9; }
+  .markdown-body blockquote { border-left: 3px solid var(--color-gray-400); padding-left: 0.9rem; color: var(--color-gray-400); margin: 0.8rem 0; }
+  .markdown-body hr { border: 0; border-top: 1px solid var(--color-border); margin: 1.2rem 0; }
+  .light-theme .markdown-body pre { background: color-mix(in srgb, var(--color-surface-hover) 60%, var(--color-surface) 40%); }
 
   /* Markdown Message & Document Styling */
   .markdown-message {
-    color: #e5e7eb;
+    color: var(--color-gray-200);
     line-height: 1.65;
   }
   .markdown-message table {
@@ -119,31 +179,17 @@
   .markdown-message th,
   .markdown-message td {
     padding: 0.5rem 0.75rem;
-    border-color: #2E323E;
+    border-color: var(--color-border);
   }
   .markdown-message th {
-    background-color: rgba(30, 33, 42, 0.8);
+    background-color: color-mix(in srgb, var(--color-surface) 80%, transparent);
     font-weight: 600;
   }
   .markdown-message tr:hover td {
-    background-color: rgba(255, 255, 255, 0.02);
+    background-color: color-mix(in srgb, var(--color-gray-100) 2%, transparent);
   }
   .markdown-message input[type="checkbox"] {
     margin-right: 0.5rem;
-    accent-color: #8b5cf6;
-  }
-  body.light-theme .markdown-message {
-    color: #374151;
-  }
-  body.light-theme .markdown-message th {
-    background-color: #f1f5f9;
-    color: #1e293b;
-  }
-  body.light-theme .markdown-message th,
-  body.light-theme .markdown-message td {
-    border-color: #e2e8f0;
-  }
-  body.light-theme .markdown-message tr:hover td {
-    background-color: #f8fafc;
+    accent-color: var(--color-primary);
   }
 }

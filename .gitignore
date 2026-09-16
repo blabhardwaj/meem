@@ -20,6 +20,10 @@ __pycache__/
 drafts/
 draft generation/
 
+# Dev-server logs and ad-hoc working scripts — not project source
+frontend/*.log
+scratch/
+
 # Qdrant embedded local-mode storage (on-disk vector DB, not source code)
 qdrant_storage/
 

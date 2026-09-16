@@ -3,10 +3,12 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { ArrowLeft } from 'lucide-react';
 import ChatPanel from '../components/chat/ChatPanel';
 
+// The former separate Query and RAG agents were merged into one Search agent
+// (see UI_FIXES_2026-09-15.md #5) — both ?agent= values now route here.
 const QueryAgentPage = () => {
   const [searchParams] = useSearchParams();
   const projectId = searchParams.get('project_id') || undefined;
-  const mode = searchParams.get('agent') === 'rag' ? 'rag' : 'query';
+  const mode = 'search';
 
   return (
     <div className="flex flex-col h-[calc(100vh-3.5rem)] overflow-hidden bg-background">

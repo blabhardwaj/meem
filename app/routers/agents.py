@@ -1,60 +1,78 @@
 """
-HTTP surface for the Drafting, RAG, and Scanner agents — the CLI's chat loop
-exposed over HTTP.
+HTTP surface for the Drafting and Search agents — the CLI's chat loop exposed
+over HTTP.
 
-  POST /agents/draft/message            one drafting turn { session_id, message }
+  GET  /agents/draft/layouts            built-in standard section layouts (item 14; kept for backward-compat, not surfaced in the UI — see UI_FIXES_2026-09-15.md #1)
+  POST /agents/draft/extract-outline    upload a reference doc -> content-stripped outline (item 14)
+  POST /agents/draft/message            one drafting turn { session_id, message, layout? }
   GET  /agents/draft/download/{filename} download a finalized draft
-  POST /agents/rag/message              one RAG turn { session_id?, project_id, message }
-  POST /agents/query/message            one Query turn { session_id?, project_id, message }
-  POST /agents/scan/message             one standalone-scan turn { session_id, message }
+  POST /agents/search/message           one Search turn { session_id?, project_id, message } — merged RAG + Query (see UI_FIXES_2026-09-15.md #5)
 
-DECOUPLED FROM PERSISTENCE (MERGE_DECISIONS §4): /draft and /scan never create a
-Document row, never touch has_permission(), and never ask about a stage/team/
-project — they only require authentication, and there is no ABAC because there
-is no project resource involved. /rag IS project-scoped: it checks project
-access and enforces per-(user, project) conversation ownership.
+DECOUPLED FROM PERSISTENCE (MERGE_DECISIONS §4): /draft never creates a
+Document row, never touches has_permission(), and never asks about a stage/
+team/project — it only requires authentication, and there is no ABAC because
+there is no project resource involved. /search IS project-scoped: it checks
+project access and enforces per-(user, project) conversation ownership.
+
+The standalone Scanner chat (/agents/scan/message) was removed
+(UI_FIXES_2026-09-15.md #4) — every real upload/finalize/new-version already
+runs the full scan automatically via app/services/document_finalize.py; the
+interactive "paste text, get it scored" tab was a redundant, disconnected
+surface for the same pipeline.
 """
 
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_current_user
-from app.database import get_db
+from app.api.dependencies import get_current_user, get_db_with_tenant
 from app.models.document import DocumentScan, ScanReviewStatus
 from app.models.project import Project
 from app.models.team import Team
 from app.services.access_control import has_any_project_access, resolve_sensitivity
 from app.services.auth import ResolvedIdentity
 from app.services.chat_history import SessionScopeError
+from app.services.document_parser import DocumentParseError, UnsupportedDocumentTypeError, parse_document_to_markdown
 from app.services.document_persistence import (
     PermissionDeniedError,
     StageNotFoundError,
     _check_upload_access,
     _persist_new_document,
+    read_upload_safely,
+    sanitize_filename,
+    validate_file_magic,
 )
 from app.services.draft_chat import run_draft_turn
 from app.services.draft_export import DRAFTS_DIR
+from app.services.draft_layouts import list_builtin_layouts
 from app.services.draft_workspace import (
     DraftNotFoundError,
     DraftPermissionError,
     get_finalized_draft,
 )
-from app.services.query_chat import QueryTurnError, run_query_turn
-from app.services.rag_chat import run_rag_turn
-from app.services.scan_chat import ScanTurnError, run_scan_turn
+from app.services.outline_extraction import OutlineExtractionError, extract_outline_from_reference
+from app.services.search_chat import SearchTurnError, run_search_turn
 
 router = APIRouter(prefix="/agents", tags=["agents"])
+
+
+class LayoutSection(BaseModel):
+    name: str
+    purpose: str
 
 
 class DraftMessageRequest(BaseModel):
     session_id: str = Field(min_length=1, max_length=200)
     message: str = Field(default="", max_length=20000)
     project_id: uuid.UUID | None = None
+    # Master Plan v2, item 14: a standard section layout (built-in or
+    # extracted from an uploaded reference doc) to fold into the FIRST
+    # drafting turn only. Ignored on later turns (see draft_chat.py).
+    layout: list[LayoutSection] | None = None
 
 
 class DraftMessageResponse(BaseModel):
@@ -88,6 +106,8 @@ def draft_message(
             body.message,
             user_id=identity.user_id,
             project_id=body.project_id,
+            tenant_id=identity.tenant_id,
+            layout=[s.model_dump() for s in body.layout] if body.layout else None,
         )
     except Exception as exc:  # noqa: BLE001 — Groq / rate-limit / parse failures
         raise HTTPException(
@@ -112,7 +132,75 @@ def draft_message(
     )
 
 
-class RagMessageRequest(BaseModel):
+class LayoutOut(BaseModel):
+    id: str
+    label: str
+    document_type: str
+    sections: list[LayoutSection]
+
+
+@router.get("/draft/layouts", response_model=list[LayoutOut])
+def list_draft_layouts(identity: ResolvedIdentity = Depends(get_current_user)):
+    """Master Plan v2, item 14: the built-in standard section layouts for the
+    chat-drafting template picker. No storage — authored once in draft_layouts.py."""
+    return list_builtin_layouts()
+
+
+class ExtractOutlineResponse(BaseModel):
+    sections: list[LayoutSection]
+
+
+@router.post("/draft/extract-outline", response_model=ExtractOutlineResponse)
+async def extract_outline(
+    file: UploadFile = File(...),
+    identity: ResolvedIdentity = Depends(get_current_user),
+):
+    """
+    Master Plan v2, item 14: "Upload template" — the user uploads a real
+    reference document (e.g. an old PRD), and this returns ONLY its section
+    structure, content stripped (see outline_extraction.py's system prompt
+    for the exact guarantee). Nothing is persisted; the caller holds onto
+    the returned sections and passes them back as `layout` on the first
+    /agents/draft/message call to apply them.
+    """
+    file_bytes = await read_upload_safely(file)
+    if not file_bytes:
+        raise HTTPException(status_code=422, detail="The uploaded file is empty")
+
+    try:
+        clean_filename = sanitize_filename(file.filename or "template")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if not validate_file_magic(file_bytes, clean_filename):
+        raise HTTPException(status_code=415, detail="File content does not match claimed file type")
+
+    try:
+        content = parse_document_to_markdown(
+            file_bytes, file.content_type or "application/octet-stream", clean_filename
+        )
+    except UnsupportedDocumentTypeError as exc:
+        raise HTTPException(status_code=415, detail=str(exc)) from exc
+    except DocumentParseError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    try:
+        sections = extract_outline_from_reference(content)
+    except OutlineExtractionError as exc:
+        raise HTTPException(status_code=502, detail=f"Could not extract a template from this file: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001 — Groq/network failures (rate limit, timeout, etc.)
+        raise HTTPException(status_code=502, detail=f"Could not extract a template from this file: {exc}") from exc
+
+    if not sections:
+        raise HTTPException(
+            status_code=422,
+            detail="This document doesn't have a clear section structure to use as a template.",
+        )
+
+    return ExtractOutlineResponse(sections=sections)
+
+
+class SearchMessageRequest(BaseModel):
     # Omit on the first turn; pass the session_id from the previous response
     # to continue the same conversation.
     session_id: str | None = Field(default=None, max_length=200)
@@ -120,19 +208,26 @@ class RagMessageRequest(BaseModel):
     message: str = Field(min_length=1, max_length=20000)
 
 
-class RagMessageResponse(BaseModel):
+class SearchMessageResponse(BaseModel):
     reply: str
     tools_called: list[str] = []
     session_id: str  # canonical id — echo it back on the next turn
     timing: dict = {}
 
 
-@router.post("/rag/message", response_model=RagMessageResponse)
-def rag_message(
-    body: RagMessageRequest,
+@router.post("/search/message", response_model=SearchMessageResponse)
+def search_message(
+    body: SearchMessageRequest,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
+    """
+    One turn of the merged Search tab — content questions (grounded in
+    indexed documents) and read-only metadata questions (status, versions,
+    approvals) in one conversation. Replaces the former separate /rag and
+    /query endpoints. Project-scoped: project access is checked, and
+    conversation ownership is enforced per (user, project).
+    """
     if body.session_id is not None and Path(body.session_id).name != body.session_id:
         raise HTTPException(status_code=422, detail="Invalid session_id")
 
@@ -143,132 +238,32 @@ def rag_message(
         raise HTTPException(status_code=403, detail="You don't have access to this project")
 
     try:
-        turn = run_rag_turn(
+        turn = run_search_turn(
             user_id=identity.user_id,
             project_id=body.project_id,
+            tenant_id=identity.tenant_id,
             session_id=body.session_id,
             message=body.message,
         )
     except SessionScopeError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except SearchTurnError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"The Search agent could not complete this turn: {exc}",
+        ) from exc
     except Exception as exc:  # noqa: BLE001 — Groq / rate-limit / retrieval failures
         raise HTTPException(
             status_code=502,
-            detail=f"The RAG agent could not complete this turn: {exc}",
+            detail=f"The Search agent could not complete this turn: {exc}",
         ) from exc
 
-    return RagMessageResponse(
+    return SearchMessageResponse(
         reply=turn["reply"],
         tools_called=turn["tools_called"],
         session_id=turn["session_id"],
         timing=turn.get("timing", {}),
     )
-
-
-class QueryMessageRequest(BaseModel):
-    # Omit on the first turn; pass the session_id from the previous response
-    # to continue the same conversation.
-    session_id: str | None = Field(default=None, max_length=200)
-    project_id: uuid.UUID
-    message: str = Field(min_length=1, max_length=20000)
-
-
-class QueryMessageResponse(BaseModel):
-    reply: str
-    tools_called: list[str] = []
-    session_id: str  # canonical id — echo it back on the next turn
-
-
-@router.post("/query/message", response_model=QueryMessageResponse)
-def query_message(
-    body: QueryMessageRequest,
-    identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """
-    One turn of the read-only metadata Q&A chat (the Query tab). Project-scoped
-    exactly like /rag/message: project access is checked, and conversation
-    ownership is enforced per (user, project).
-    """
-    if body.session_id is not None and Path(body.session_id).name != body.session_id:
-        raise HTTPException(status_code=422, detail="Invalid session_id")
-
-    project = db.get(Project, body.project_id)
-    if project is None or project.tenant_id != identity.tenant_id:
-        raise HTTPException(status_code=404, detail="Project not found")
-    if not has_any_project_access(db, identity.user_id, body.project_id):
-        raise HTTPException(status_code=403, detail="You don't have access to this project")
-
-    try:
-        turn = run_query_turn(
-            user_id=identity.user_id,
-            project_id=body.project_id,
-            session_id=body.session_id,
-            message=body.message,
-        )
-    except SessionScopeError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except QueryTurnError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"The Query agent could not complete this turn: {exc}",
-        ) from exc
-    except Exception as exc:  # noqa: BLE001 — Groq / rate-limit failures
-        raise HTTPException(
-            status_code=502,
-            detail=f"The Query agent could not complete this turn: {exc}",
-        ) from exc
-
-    return QueryMessageResponse(
-        reply=turn["reply"],
-        tools_called=turn["tools_called"],
-        session_id=turn["session_id"],
-    )
-
-
-class ScanMessageRequest(BaseModel):
-    session_id: str = Field(min_length=1, max_length=200)
-    message: str = Field(min_length=1, max_length=200000)
-
-
-class ScanMessageResponse(BaseModel):
-    reply: str
-    tools_called: list[str] = []
-
-
-@router.post("/scan/message", response_model=ScanMessageResponse)
-def scan_message(
-    body: ScanMessageRequest,
-    identity: ResolvedIdentity = Depends(get_current_user),
-):
-    """
-    One turn of the standalone Structure Scanner chat (DEFERRED_ITEMS.md #4):
-    paste content, get it scored / reformed / injection-checked independently
-    of any drafting or upload flow.
-
-    Like /draft/message this is decoupled from persistence — authentication
-    only, no project/stage/team, no ABAC (nothing is written anywhere).
-    session_id is the caller's own opaque conversation id; it only scopes the
-    Scanner Agent's in-context history.
-    """
-    safe_id = Path(body.session_id).name
-    if safe_id != body.session_id:
-        raise HTTPException(status_code=422, detail="Invalid session_id")
-
-    try:
-        turn = run_scan_turn(safe_id, body.message)
-    except ScanTurnError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"The scanner agent could not complete this turn: {exc}",
-        ) from exc
-    except Exception as exc:  # noqa: BLE001 — Groq / rate-limit / parse failures
-        raise HTTPException(
-            status_code=502,
-            detail=f"The scanner agent could not complete this turn: {exc}",
-        ) from exc
-
-    return ScanMessageResponse(reply=turn["reply"], tools_called=turn["tools_called"])
 
 
 @router.get("/draft/download/{filename}")
@@ -309,7 +304,7 @@ class UploadDraftToProjectResponse(BaseModel):
 def upload_draft_to_project(
     body: UploadDraftToProjectRequest,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     """
     Directly persist an already-finalized Drafting Agent artifact into a project

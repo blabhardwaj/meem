@@ -52,3 +52,9 @@ QDRANT_LOCAL_PATH: str = os.getenv("QDRANT_LOCAL_PATH", "qdrant_storage")
 
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL not set — check your .env file")
+
+if not SESSION_TOKEN_SECRET or len(SESSION_TOKEN_SECRET) < 32:
+    raise RuntimeError("SESSION_TOKEN_SECRET must be set and at least 32 characters")
+
+if not GROQ_API_KEY:
+    raise RuntimeError("GROQ_API_KEY must be set")

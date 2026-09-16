@@ -11,3 +11,6 @@ qdrant-client==1.19.0
 fastembed==0.8.0
 tokenizers==0.22.2  # explicit: used directly for untruncated token counts (chunking)
 reportlab==5.0.1  # test-only: generates a real PDF for scripts/verify_document_upload_review.py
+slowapi==0.1.9
+python-magic-bin==0.4.14
+

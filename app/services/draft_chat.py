@@ -15,16 +15,20 @@ Fully decoupled from persistence: no DB, no ABAC, no stage/team/project. The
 finalized output is a local file, identical to the CLI.
 """
 
+import logging
 import uuid
 from pathlib import Path
 
-from sqlalchemy import select
+from agno.run.base import RunStatus
+from sqlalchemy import select, text
 
 from app.agents.drafting_agent import drafting_agent
 from app.database import SessionLocal
 from app.models.chat import ChatMessage, ChatSession
 from app.services import draft_workspace
 from app.services.chat_history import append_message, resolve_chat_session
+
+logger = logging.getLogger(__name__)
 
 
 def _tool_called(response, name: str) -> bool:
@@ -33,11 +37,35 @@ def _tool_called(response, name: str) -> bool:
     )
 
 
-def build_context_prefix(session_id: str) -> str:
+def _format_layout_block(layout: list[dict]) -> str:
+    """
+    Master Plan v2, item 14: a standard section layout (built-in, from
+    draft_layouts.py, or extracted from an uploaded reference document via
+    outline_extraction.py — both share the same {name, purpose} shape) to
+    fold into user_input the first time draft_document is called this
+    session. Only ever injected on the session's first real drafting turn
+    (see run_draft_turn) — retrofitting a layout onto an in-progress draft
+    doesn't fit draft_document's one-shot "full current content" contract.
+    """
+    lines = "\n".join(f"- {s['name']}: {s['purpose']}" for s in layout if s.get("name"))
+    return (
+        "[The user has selected a standard section layout for this document. When you call "
+        "draft_document, pass this layout as part of user_input and instruct it to structure the "
+        "document using these sections IN THIS ORDER, adapting section content to what the user "
+        "actually describes — do not invent facts to fill a section the user said nothing about, "
+        "but do keep the section headings themselves.\n"
+        f"--- LAYOUT ---\n{lines}\n--- END LAYOUT ---]\n\n"
+    )
+
+
+def build_context_prefix(session_id: str, layout: list[dict] | None = None) -> str:
     """The per-turn context prefix — the working file on disk, verbatim."""
     current = draft_workspace.read_working_draft(session_id)
     if not current:
-        return "[No draft exists in this conversation yet.]\n\n"
+        base = "[No draft exists in this conversation yet.]\n\n"
+        if layout:
+            base += _format_layout_block(layout)
+        return base
 
     return (
         "[A draft currently exists — the exact working copy below is what is on "
@@ -57,9 +85,19 @@ def run_draft_turn(
     *,
     user_id: uuid.UUID | str | None = None,
     project_id: uuid.UUID | None = None,
+    tenant_id: uuid.UUID | str | None = None,
+    layout: list[dict] | None = None,
 ) -> dict:
     """
     Run one drafting turn for `session_id`.
+
+    Chat history (chat_sessions/chat_messages) is persisted only when
+    `user_id`, `project_id`, AND `tenant_id` are all given — the CLI (cli.py)
+    calls this with none of them, by design (no DB, no ABAC), and that stays
+    fully decoupled from persistence. `tenant_id` is required, not optional
+    for a caller that does pass user_id/project_id, because chat_sessions/
+    chat_messages FORCE ROW LEVEL SECURITY keyed on it — omitting it doesn't
+    raise, it just makes every write silently violate the RLS policy.
 
     Returns:
         {
@@ -86,8 +124,18 @@ def run_draft_turn(
         except (ValueError, TypeError):
             uid = None
 
-    if uid and project_id:
+    if uid and project_id and tenant_id:
         db = SessionLocal()
+        # RLS on chat_sessions/chat_messages (FORCE ROW LEVEL SECURITY) is
+        # keyed on this GUC via projects.tenant_id — every other internal
+        # SessionLocal() in this codebase sets it before the first query.
+        # Without it, every INSERT here silently violates the policy's
+        # implicit WITH CHECK and previously vanished into the bare except
+        # below with zero trace: chat history persistence looked like it
+        # worked (the API still returned 200 with a reply) but nothing was
+        # ever written, so GET /chat/sessions always came back empty.
+        db.info["tenant_id"] = str(tenant_id)
+        db.execute(text("SET LOCAL app.current_tenant_id = :tid"), {"tid": str(tenant_id)})
         try:
             chat_session = resolve_chat_session(
                 db, session_id=session_id, user_id=uid, project_id=project_id, mode="draft"
@@ -114,13 +162,29 @@ def run_draft_turn(
                         draft_workspace.write_working_draft(canonical, draft_body)
                         break
         except Exception:
+            logger.exception(
+                "run_draft_turn: failed to persist chat history for session_id=%s", session_id
+            )
             if db:
                 db.rollback()
 
     try:
-        prefix = build_context_prefix(canonical)
+        prefix = build_context_prefix(canonical, layout=layout)
         before = draft_workspace.read_working_draft(canonical)
         response = drafting_agent.run(prefix + (message or "continue"), session_id=canonical)
+
+        # A failed LLM call (rate limit, network, etc.) must never fall
+        # through to the confirm_draft check below: agno's RunResponse can
+        # still carry stale .tools metadata from an earlier successful turn
+        # in this same session on an error response, which could otherwise
+        # make _tool_called(response, "confirm_draft") return True on a turn
+        # that never actually ran — silently finalizing (a real, permanent
+        # file write) whatever draft is on disk at that moment instead of
+        # surfacing the failure. Same class of bug found and fixed today in
+        # app/services/document_version_review.py and document_review_chat.py.
+        if getattr(response, "status", None) == RunStatus.error:
+            raise RuntimeError(getattr(response, "content", "") or "drafting agent run failed")
+
         after = draft_workspace.read_working_draft(canonical)
         reply = getattr(response, "content", "") or ""
 
@@ -181,6 +245,9 @@ def run_draft_turn(
                 append_message(db, session_id=chat_session.session_id, role="assistant", content=assistant_content or "Draft updated.")
                 db.commit()
             except Exception:
+                logger.exception(
+                    "run_draft_turn: failed to persist assistant reply for session_id=%s", session_id
+                )
                 db.rollback()
 
         return base

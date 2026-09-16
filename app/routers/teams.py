@@ -20,8 +20,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_current_user
-from app.database import get_db
+from app.api.dependencies import get_current_user, get_db_with_tenant
 from app.models.project import Project
 from app.models.team import Team, UserTeamMembership
 from app.services.audit import record_audit
@@ -85,7 +84,7 @@ def _serialize(team: Team, member_count: int) -> TeamOut:
 def list_teams(
     project_id: uuid.UUID,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     _load_project(db, identity, project_id)
     if not _can_see_project(identity, project_id):
@@ -102,7 +101,7 @@ def create_team(
     project_id: uuid.UUID,
     body: CreateTeamRequest,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     _load_project(db, identity, project_id)
     _require_project_admin(identity, project_id)

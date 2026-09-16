@@ -1,16 +1,19 @@
 import React from 'react';
-import { PenLine, ScanSearch, Database, HelpCircle } from 'lucide-react';
+import { PenLine, Search } from 'lucide-react';
 
-// Deterministic mode selection for the Chat Interface panel — clickable tabs,
-// NOT LLM-judged routing (that approach was tried and dropped earlier in the
+// Deterministic mode selection for the chat panel — clickable tabs, NOT
+// LLM-judged routing (that approach was tried and dropped earlier in the
 // project). The active tab decides which backend a typed message hits.
 // Switching tabs remounts ChatPanel (see ProjectWorkspace `key=`), so each
 // mode starts a fresh session rather than carrying context across.
+//
+// The former separate Scan and Query tabs were removed/merged (see
+// UI_FIXES_2026-09-15.md #4b, #5): every real document already gets scanned
+// automatically on upload/finalize, and Search now answers both content and
+// metadata questions in one agent.
 const TABS = [
   { id: 'draft', label: 'Draft', icon: PenLine, hint: 'Draft a document with the AI (downloadable, not persisted)' },
-  { id: 'scan', label: 'Scan', icon: ScanSearch, hint: 'Score / reform / injection-check any pasted content' },
-  { id: 'rag', label: 'Search', icon: Database, hint: 'Grounded Q&A over this project’s indexed documents' },
-  { id: 'query', label: 'Query', icon: HelpCircle, hint: 'Read-only metadata questions (uploader, status, versions, approvals)' },
+  { id: 'search', label: 'Search', icon: Search, hint: 'Search this project’s documents, or ask a status/version/approval question' },
 ];
 
 const ChatModeTabs = ({ active, onChange }) => (

@@ -30,8 +30,7 @@ from pydantic import BaseModel
 from sqlalchemy import delete, select, text
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_current_user
-from app.database import get_db
+from app.api.dependencies import get_current_user, get_db_with_tenant
 from app.models.chat import ChatMessage, ChatSession
 from app.services.auth import ResolvedIdentity
 
@@ -75,7 +74,7 @@ def list_sessions(
     project_id: uuid.UUID,
     mode: str | None = Query(default=None, max_length=40),
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     conditions = [
         ChatSession.user_id == identity.user_id,
@@ -133,7 +132,7 @@ def list_sessions(
 def list_messages(
     session_id: str,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     session = _owned_session(db, session_id, identity.user_id)
     messages = (
@@ -161,7 +160,7 @@ def list_messages(
 def delete_session(
     session_id: str,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     session = _owned_session(db, session_id, identity.user_id)
     sid = session.session_id

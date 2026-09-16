@@ -21,7 +21,7 @@ import time
 import uuid
 
 from app.database import SessionLocal
-from app.models.document import Document, DocumentTeamVisibility, DocumentVersion
+from app.models.document import Document, DocumentTeamVisibility
 from app.models.stage import Stage
 from app.models.team import Team, UserTeamMembership
 from app.models.user import User
@@ -39,6 +39,7 @@ from app.services.document_lookup import (
     resolve_stage as _resolve_stage,
     resolve_team as _resolve_team,
 )
+from app.services.indexing import resolve_grounding_version
 from app.services.rag.generation import GenerationError, generate_answer, summarize_full_document
 from app.services.rag.retrieval import NoProjectAccessError, retrieve
 from app.services.rag_context import get_rag_context
@@ -336,19 +337,18 @@ def summarize_document(document_reference: str, stage_reference: str | None = No
                 "requestable_teams": teams,
             }
 
-        # fully_allowed
-        if doc.current_version_id is None:
-            return {
-                "status": "unavailable",
-                "document": doc.original_filename,
-                "message": "That document has no finalized content yet.",
-            }
-        version = db.get(DocumentVersion, doc.current_version_id)
+        # fully_allowed. Deliberately NOT doc.current_version_id — that's
+        # whichever version was finalized most recently, which can be a
+        # revision that failed the Scanner or is still awaiting approval,
+        # sitting on top of an older version that actually passed and is
+        # still what's indexed. resolve_grounding_version() finds that real,
+        # safe-to-summarize version instead (see its docstring).
+        version = resolve_grounding_version(db, doc.document_id)
         if version is None:
             return {
                 "status": "unavailable",
                 "document": doc.original_filename,
-                "message": "That document's current version is missing.",
+                "message": "That document has no approved, finalized content yet.",
             }
         try:
             content = version.file_data.decode("utf-8")
