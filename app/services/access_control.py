@@ -122,6 +122,21 @@ def can_edit_document(db: Session, user_id: UUID, document) -> bool:
     return has_permission(db, user_id, "manage_team_members", document.uploaded_as_team_id, document.project_id)
 
 
+def is_grant_only_confidential_access(db: Session, user_id: UUID, document) -> bool:
+    """
+    True iff `document` is confidential-tier AND user_id's access to it is
+    coming from an approved confidential-access grant rather than native
+    role-based access — i.e. this document must be READ-ONLY for this user
+    regardless of their normal team role. Thin wrapper over
+    resolve_effective_access() (the single shared resolver) — never
+    re-derives native-vs-grant precedence independently.
+    """
+    if document.sensitivity_level != SensitivityLevel.confidential:
+        return False
+    result = resolve_effective_access(db, user_id, document_id=document.document_id)
+    return result.status == "granted" and result.via_grant
+
+
 def has_any_project_access(db: Session, user_id: UUID, project_id: UUID) -> bool:
     """
     Coarse gate: does `user_id` have ANY relationship to `project_id` at all
@@ -206,20 +221,6 @@ def get_accessible_stages_for_user(db: Session, user_id: UUID, project_id: UUID)
         .where(TeamStageAccess.team_id.in_(team_ids), Stage.deleted_at.is_(None))
         .distinct()
     ).scalars())
-
-
-def _has_active_confidential_grant(db: Session, user_id: UUID, team_id: UUID) -> bool:
-    stmt = select(AccessRequest).where(
-        AccessRequest.user_id == user_id,
-        AccessRequest.team_id == team_id,
-        AccessRequest.status == AccessRequestStatus.approved,
-    )
-    grant = db.execute(stmt).scalar_one_or_none()
-    if grant is None:
-        return False
-    if grant.expires_at and grant.expires_at < datetime.now(timezone.utc):
-        return False  # expired — treated as no grant
-    return True
 
 
 @dataclass
@@ -456,14 +457,16 @@ def classify_document_visibility(db: Session, user_id: UUID, document: Document)
     if document.sensitivity_level in (SensitivityLevel.public, SensitivityLevel.internal):
         return DocumentVisibility.fully_allowed  # viewer+ can always see these
 
-    # confidential tier
-    if any(_TEAM_ROLE_RANK[m.role] >= _TEAM_ROLE_RANK[TeamRole.team_lead] for m in memberships):
-        return DocumentVisibility.fully_allowed  # team_lead+ sees confidential automatically
-
-    if any(_has_active_confidential_grant(db, user_id, m.team_id) for m in memberships):
+    # confidential tier — delegate to the single shared resolver rather than
+    # re-deriving native-vs-grant precedence here. (Team visibility above has
+    # already established the user belongs to a team this document is
+    # visible to, and org_admin/project_admin were already handled above, so
+    # the resolver's own admin short-circuits cannot fire spuriously here —
+    # by this point the caller is neither.)
+    result = resolve_effective_access(db, user_id, document_id=document.document_id)
+    if result.status == "granted":
         return DocumentVisibility.fully_allowed
-
-    return DocumentVisibility.blocked_by_sensitivity  # viewer or contributor with no grant
+    return DocumentVisibility.blocked_by_sensitivity
 
 
 def classify_documents_visibility(
