@@ -1,6 +1,7 @@
 import json
 import unittest
 import uuid
+from sqlalchemy import text
 from app.database import SessionLocal
 from app.models.document import Document, DocumentStatus, DocumentVersion
 from app.models.graph import AuditFinding, AuditRun, Edge, Node
@@ -27,6 +28,8 @@ class TestAgentToolsSecurity(unittest.TestCase):
         # Tenant A
         self.tenant_a = self.db.query(Tenant).first()
         self.assertIsNotNone(self.tenant_a)
+        self.db.info["tenant_id"] = str(self.tenant_a.tenant_id)
+        self.db.execute(text("SET LOCAL app.current_tenant_id = :tid"), {"tid": str(self.tenant_a.tenant_id)})
 
         # User A1 (Member of Team 1 in Project A)
         self.user_a1 = User(tenant_id=self.tenant_a.tenant_id, email=f"a1_{uuid.uuid4().hex[:6]}@example.com")
@@ -41,6 +44,8 @@ class TestAgentToolsSecurity(unittest.TestCase):
         self.project_b = Project(tenant_id=self.tenant_a.tenant_id, name="Security Project B")
         self.db.add_all([self.project_a, self.project_b])
         self.db.commit()
+        self.project_a_id = self.project_a.project_id
+        self.project_b_id = self.project_b.project_id
 
         # Teams in Project A
         self.team_1 = Team(project_id=self.project_a.project_id, name="Team Stage 1 Only")
@@ -101,26 +106,28 @@ class TestAgentToolsSecurity(unittest.TestCase):
 
     def tearDown(self):
         self.db.rollback()
-        for pid in [self.project_a.project_id, self.project_b.project_id]:
+        self.db.info["tenant_id"] = str(self.tenant_a.tenant_id)
+        self.db.execute(text("SET LOCAL app.current_tenant_id = :tid"), {"tid": str(self.tenant_a.tenant_id)})
+        for pid in [self.project_a_id, self.project_b_id]:
             self.db.query(AuditFinding).filter(AuditFinding.project_id == pid).delete()
             self.db.query(AuditRun).filter(AuditRun.project_id == pid).delete()
             self.db.query(Edge).filter(Edge.project_id == pid).delete()
             self.db.query(Node).filter(Node.project_id == pid).delete()
 
-        doc_ids = [d.document_id for d in self.db.query(Document).filter(Document.project_id.in_([self.project_a.project_id, self.project_b.project_id])).all()]
+        doc_ids = [d.document_id for d in self.db.query(Document).filter(Document.project_id.in_([self.project_a_id, self.project_b_id])).all()]
         if doc_ids:
             self.db.query(WorkflowState).filter(WorkflowState.document_id.in_(doc_ids)).delete(synchronize_session=False)
             self.db.query(DocumentVersion).filter(DocumentVersion.document_id.in_(doc_ids)).delete(synchronize_session=False)
             self.db.query(Document).filter(Document.document_id.in_(doc_ids)).delete(synchronize_session=False)
 
-        stage_ids = [s.stage_id for s in self.db.query(Stage).filter(Stage.project_id.in_([self.project_a.project_id, self.project_b.project_id])).all()]
+        stage_ids = [s.stage_id for s in self.db.query(Stage).filter(Stage.project_id.in_([self.project_a_id, self.project_b_id])).all()]
         if stage_ids:
             self.db.query(TeamStageAccess).filter(TeamStageAccess.stage_id.in_(stage_ids)).delete(synchronize_session=False)
             self.db.query(Stage).filter(Stage.stage_id.in_(stage_ids)).delete(synchronize_session=False)
 
-        self.db.query(UserTeamMembership).filter(UserTeamMembership.project_id.in_([self.project_a.project_id, self.project_b.project_id])).delete()
-        self.db.query(Team).filter(Team.project_id.in_([self.project_a.project_id, self.project_b.project_id])).delete()
-        self.db.query(Project).filter(Project.project_id.in_([self.project_a.project_id, self.project_b.project_id])).delete()
+        self.db.query(UserTeamMembership).filter(UserTeamMembership.project_id.in_([self.project_a_id, self.project_b_id])).delete()
+        self.db.query(Team).filter(Team.project_id.in_([self.project_a_id, self.project_b_id])).delete()
+        self.db.query(Project).filter(Project.project_id.in_([self.project_a_id, self.project_b_id])).delete()
         self.db.query(User).filter(User.user_id.in_([self.user_a1.user_id, self.user_outsider.user_id])).delete()
         self.db.commit()
         self.db.close()
@@ -220,21 +227,28 @@ class TestAgentToolsSecurity(unittest.TestCase):
         self.db.add(tenant_b)
         self.db.commit()
 
+        self.db.info["tenant_id"] = str(tenant_b.tenant_id)
+        self.db.execute(text("SET LOCAL app.current_tenant_id = :tid"), {"tid": str(tenant_b.tenant_id)})
         user_b = User(tenant_id=tenant_b.tenant_id, email=f"user_b_{uuid.uuid4().hex[:6]}@example.com")
         self.db.add(user_b)
         self.db.commit()
 
-        token = set_query_context(user_id=user_b.user_id, project_id=self.project_a.project_id)
+        token = set_query_context(user_id=user_b.user_id, project_id=self.project_a_id)
         try:
-            res = json.loads(query_project_readiness(str(self.project_a.project_id)))
+            res = json.loads(query_project_readiness(str(self.project_a_id)))
             self.assertIn("error", res)
             self.assertIn("Access denied", res["error"])
         finally:
             reset_query_context(token)
 
+        self.db.info["tenant_id"] = str(tenant_b.tenant_id)
+        self.db.execute(text("SET LOCAL app.current_tenant_id = :tid"), {"tid": str(tenant_b.tenant_id)})
         self.db.query(User).filter(User.user_id == user_b.user_id).delete()
         self.db.query(Tenant).filter(Tenant.tenant_id == tenant_b.tenant_id).delete()
         self.db.commit()
+
+        self.db.info["tenant_id"] = str(self.tenant_a.tenant_id)
+        self.db.execute(text("SET LOCAL app.current_tenant_id = :tid"), {"tid": str(self.tenant_a.tenant_id)})
 
     def test_llm_cannot_spoof_caller_identity(self):
         """
