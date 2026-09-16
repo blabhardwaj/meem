@@ -90,11 +90,17 @@ class AccessRequestStatus(str, enum.Enum):
     denied = "denied"
 
 
+class AccessRequestScope(str, enum.Enum):
+    document = "document"
+    stage = "stage"
+    team = "team"
+
+
 class AccessRequest(Base):
     """
-    Contributor's request for elevated (confidential-tier) access on a
-    specific team, approved/denied by that team's team_lead. Approval
-    sets expires_at (90 days out) — expired grants are treated as if
+    Contributor's request for elevated (confidential-tier) access with
+    document, stage, or team scope, approved/denied by that team's team_lead.
+    Approval sets expires_at (90 days out) — expired grants are treated as if
     no grant exists; the user must request again.
     """
     __tablename__ = "access_requests"
@@ -107,6 +113,17 @@ class AccessRequest(Base):
     )
     team_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("teams.team_id"), nullable=False
+    )
+    scope: Mapped[AccessRequestScope] = mapped_column(
+        Enum(AccessRequestScope, name="access_request_scope"),
+        default=AccessRequestScope.team,
+        nullable=False,
+    )
+    document_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.document_id", ondelete="CASCADE"), nullable=True
+    )
+    stage_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("stages.stage_id", ondelete="CASCADE"), nullable=True
     )
     status: Mapped[AccessRequestStatus] = mapped_column(
         Enum(AccessRequestStatus, name="access_request_status"),
