@@ -154,6 +154,74 @@ class TestResolveEffectiveAccess(unittest.TestCase):
         result = resolve_effective_access(self.db, self.viewer.user_id, document_id=self.document.document_id)
         self.assertEqual(result.status, "none")
 
+    def test_document_scope_grant_does_not_leak_via_shared_team_routing(self):
+        """
+        Regression: AccessRequest.team_id is mandatory ROUTING metadata (which
+        team's team_lead decides the request) — set on EVERY row regardless of
+        scope — not "which team this grant's coverage is limited to". The
+        candidate-row query for a document target must not treat "team_id is
+        one of this document's native teams" as sufficient to pull in a row;
+        without an explicit AccessRequestScope.team filter on that OR-clause,
+        a document-scope grant for a DIFFERENT document sharing the same
+        native team would leak in and be misread as covering this document.
+        """
+        other_document = Document(
+            tenant_id=self.tenant.tenant_id, project_id=self.project.project_id, stage_id=self.stage.stage_id,
+            uploaded_by=self.team_lead.user_id, uploaded_as_team_id=self.team.team_id,
+            sensitivity_level=SensitivityLevel.confidential,
+            original_filename="other-secret.md", mime_type="text/markdown",
+        )
+        self.db.add(other_document)
+        self.db.commit()
+        self.db.add(DocumentTeamVisibility(document_id=other_document.document_id, team_id=self.team.team_id))
+        self.db.commit()
+
+        try:
+            leak_grant = AccessRequest(
+                user_id=self.viewer.user_id, team_id=self.team.team_id,
+                scope=AccessRequestScope.document, document_id=other_document.document_id,
+                status=AccessRequestStatus.approved,
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=72),
+            )
+            self.db.add(leak_grant)
+            self.db.commit()
+
+            result = resolve_effective_access(self.db, self.viewer.user_id, document_id=self.document.document_id)
+            self.assertEqual(result.status, "none")
+        finally:
+            self.db.query(AccessRequest).filter(AccessRequest.document_id == other_document.document_id).delete()
+            self.db.query(DocumentTeamVisibility).filter(DocumentTeamVisibility.document_id == other_document.document_id).delete()
+            self.db.query(Document).filter(Document.document_id == other_document.document_id).update({"current_version_id": None})
+            self.db.query(Document).filter(Document.document_id == other_document.document_id).delete()
+            self.db.commit()
+
+    def test_old_denial_does_not_outrank_a_later_lapsed_grant(self):
+        """
+        Regression: terminal history must be ranked by (decided_at or
+        requested_at) across BOTH denied and expired-approved rows together,
+        not "any denial on record always wins". An old denial followed by a
+        LATER approval that has since lapsed (no further denial on record)
+        must read the same as a lone lapsed grant: "none" — the stale denial
+        must not outrank the more recent (but now-expired) grant.
+        """
+        old_denied = AccessRequest(
+            user_id=self.viewer.user_id, team_id=self.team.team_id,
+            scope=AccessRequestScope.document, document_id=self.document.document_id,
+            status=AccessRequestStatus.denied,
+            decided_at=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+        later_lapsed = AccessRequest(
+            user_id=self.viewer.user_id, team_id=self.team.team_id,
+            scope=AccessRequestScope.document, document_id=self.document.document_id,
+            status=AccessRequestStatus.approved,
+            decided_at=datetime.now(timezone.utc) - timedelta(days=5),
+            expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
+        )
+        self.db.add_all([old_denied, later_lapsed])
+        self.db.commit()
+        result = resolve_effective_access(self.db, self.viewer.user_id, document_id=self.document.document_id)
+        self.assertEqual(result.status, "none")
+
 
 if __name__ == "__main__":
     unittest.main()

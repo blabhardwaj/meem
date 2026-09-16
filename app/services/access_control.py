@@ -329,7 +329,10 @@ def resolve_effective_access(
                 AccessRequest.user_id == user_id,
                 (AccessRequest.document_id == document_id)
                 | (AccessRequest.stage_id == document.stage_id)
-                | (AccessRequest.team_id.in_(candidate_team_ids)),
+                | (
+                    (AccessRequest.team_id.in_(candidate_team_ids))
+                    & (AccessRequest.scope == AccessRequestScope.team)
+                ),
             )
         ).scalars().all()
     elif stage_id is not None:
@@ -337,7 +340,11 @@ def resolve_effective_access(
         rows = db.execute(
             select(AccessRequest).where(
                 AccessRequest.user_id == user_id,
-                (AccessRequest.stage_id == stage_id) | (AccessRequest.team_id.in_(candidate_team_ids)),
+                (AccessRequest.stage_id == stage_id)
+                | (
+                    (AccessRequest.team_id.in_(candidate_team_ids))
+                    & (AccessRequest.scope == AccessRequestScope.team)
+                ),
             )
         ).scalars().all()
     else:
@@ -379,14 +386,24 @@ def resolve_effective_access(
         return EffectiveAccessResult(status="pending", request_id=latest_pending.request_id)
 
     # NOTE: an approved-but-expired grant is deliberately NOT surfaced as a
-    # distinct "expired" status here — a lapsed grant with no live denial on
-    # record is treated the same as never having requested at all (falls
-    # through to "none"). Only an explicit denial is surfaced as terminal
-    # history; see resolve_effective_access()'s docstring.
-    denied = [r for r in rows if r.status == AccessRequestStatus.denied]
-    if denied:
-        latest = max(denied, key=lambda r: (r.decided_at or r.requested_at))
-        return EffectiveAccessResult(status="denied", request_id=latest.request_id)
+    # distinct "expired" status here — a lapsed grant with no MORE RECENT
+    # denial on record is treated the same as never having requested at all
+    # (falls through to "none"). Only an explicit denial is surfaced as
+    # terminal history, and only when it is the chronologically LATEST
+    # terminal event for this target — an old denial must not outrank a
+    # later grant that was subsequently approved and has since lapsed (that
+    # sequence reads as "none", same as a lone lapsed grant), so denied and
+    # expired-approved rows are ranked together by (decided_at or
+    # requested_at) before deciding which status to report.
+    terminal_candidates = [
+        r for r in rows
+        if r.status == AccessRequestStatus.denied
+        or (r.status == AccessRequestStatus.approved and not _is_active_grant(r))
+    ]
+    if terminal_candidates:
+        latest = max(terminal_candidates, key=lambda r: (r.decided_at or r.requested_at))
+        if latest.status == AccessRequestStatus.denied:
+            return EffectiveAccessResult(status="denied", request_id=latest.request_id)
 
     return EffectiveAccessResult(status="none")
 
