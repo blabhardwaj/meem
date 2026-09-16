@@ -24,6 +24,7 @@ from app.models.project import Project
 from app.models.stage import Stage, TeamStageAccess
 from app.models.team import (
     AccessRequest,
+    AccessRequestScope,
     AccessRequestStatus,
     ProjectAdmin,
     TeamRole,
@@ -47,6 +48,8 @@ class AuthorizationContext:
     accessible_stage_ids: set[uuid.UUID] = field(default_factory=set)
     clearance_level: SensitivityLevel | str | None = None
     active_confidential_grant_team_ids: set[uuid.UUID] = field(default_factory=set)
+    active_confidential_grant_document_ids: set[uuid.UUID] = field(default_factory=set)
+    active_confidential_grant_stage_ids: set[uuid.UUID] = field(default_factory=set)
 
     @property
     def is_admin(self) -> bool:
@@ -112,27 +115,43 @@ def build_authorization_context(
     else:
         accessible_stage_ids = set()
 
-    # 4. Active non-expired confidential grants for the user's teams
+    # 4. Active non-expired confidential grants of ANY scope for this user —
+    # one query, partitioned in memory by scope, mirroring
+    # resolve_effective_access()'s single-target query shape but as a bulk
+    # precompute for the N-document batch case (classify_documents_visibility
+    # below) so this stays the "no N+1 queries" path its own docstring
+    # promises. Team-scope grants are still narrowed to this project's teams;
+    # document/stage-scope grants are fetched unfiltered by team since a
+    # grant's own document_id/stage_id is the only thing that needs to match
+    # later, per-document, in classify_documents_visibility.
     active_confidential_grant_team_ids = set()
-    if team_ids and not (is_org_admin or is_project_admin):
+    active_confidential_grant_document_ids = set()
+    active_confidential_grant_stage_ids = set()
+    if not (is_org_admin or is_project_admin):
         grants = db.execute(
             select(AccessRequest).where(
                 AccessRequest.user_id == user_id,
-                AccessRequest.team_id.in_(team_ids),
                 AccessRequest.status == AccessRequestStatus.approved,
             )
         ).scalars().all()
 
         now = datetime.now(timezone.utc)
-        for g in grants:
+
+        def _is_active(g: AccessRequest) -> bool:
             if g.expires_at is None:
+                return True
+            exp = g.expires_at if g.expires_at.tzinfo else g.expires_at.replace(tzinfo=timezone.utc)
+            return exp >= now
+
+        for g in grants:
+            if not _is_active(g):
+                continue
+            if g.scope == AccessRequestScope.team and g.team_id in team_ids:
                 active_confidential_grant_team_ids.add(g.team_id)
-            else:
-                exp = g.expires_at
-                if exp.tzinfo is None:
-                    exp = exp.replace(tzinfo=timezone.utc)
-                if exp >= now:
-                    active_confidential_grant_team_ids.add(g.team_id)
+            elif g.scope == AccessRequestScope.document and g.document_id is not None:
+                active_confidential_grant_document_ids.add(g.document_id)
+            elif g.scope == AccessRequestScope.stage and g.stage_id is not None:
+                active_confidential_grant_stage_ids.add(g.stage_id)
 
     return AuthorizationContext(
         user_id=user_id,
@@ -145,4 +164,6 @@ def build_authorization_context(
         accessible_stage_ids=accessible_stage_ids,
         clearance_level=clearance,
         active_confidential_grant_team_ids=active_confidential_grant_team_ids,
+        active_confidential_grant_document_ids=active_confidential_grant_document_ids,
+        active_confidential_grant_stage_ids=active_confidential_grant_stage_ids,
     )
