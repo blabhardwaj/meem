@@ -27,12 +27,34 @@ class StageMetricDTO(BaseModel):
     mandatory_requirements_satisfied: int
     mandatory_requirements_missing: int
     blockers_count: int
+    # Master Plan v2, item 8: needed to render the stage pipeline in real
+    # project order and compute "Stage N of M" — None if the live Stage row
+    # was since hard-deleted (StageMetricSnapshot.stage_id is deliberately
+    # not FK'd, to preserve history past a stage's deletion).
+    order_index: Optional[int] = None
+    requires_approval: Optional[bool] = None
+
+
+class CompletionDTO(BaseModel):
+    """
+    Layer 4 (AUDIT_RULE_TAXONOMY_MATRIX.md): a persisted human decision, not
+    a computed detector. is_complete mirrors Project.completed_at != None.
+    """
+    is_complete: bool
+    completed_at: Optional[str] = None
+    completed_by: Optional[str] = None
 
 
 class ProjectMetricsResponse(BaseModel):
     project_id: str
     project_metric: Optional[ProjectMetricDTO] = None
     stages: List[StageMetricDTO] = Field(default_factory=list)
+    # True when no audit has ever run for this project and one was just
+    # scheduled in the background (Master Plan v2, item 5) — metrics/stages
+    # are empty, not necessarily "clean". Frontend should poll rather than
+    # treat this as "no issues found".
+    audit_pending: bool = False
+    completion: CompletionDTO = Field(default_factory=lambda: CompletionDTO(is_complete=False))
 
 
 class FindingDTO(BaseModel):

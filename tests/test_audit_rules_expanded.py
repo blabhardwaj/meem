@@ -24,11 +24,26 @@ from app.services.graph.sync import _upsert_edge, _upsert_node, sync_project_gra
 
 class TestAuditRulesExpanded(unittest.TestCase):
     def setUp(self):
+        # after_begin (app/database.py) only re-applies db.info["tenant_id"]
+        # when a NEW transaction begins — setting it after this session's
+        # first query has no effect on the transaction that query already
+        # opened. tenants carries no RLS policy (root of the hierarchy,
+        # nothing to scope it by), so look the tenant up on its own
+        # short-lived session first, close it (ending that transaction), then
+        # open self.db with tenant_id already known so its very first
+        # transaction picks it up.
+        with SessionLocal() as lookup_db:
+            self.tenant = lookup_db.query(Tenant).first()
+            self.assertIsNotNone(self.tenant, "Tenant required")
+            tenant_id = self.tenant.tenant_id
+            user = lookup_db.query(User).filter(User.tenant_id == tenant_id).first()
+            self.assertIsNotNone(user, "User required")
+            user_id = user.user_id
+
         self.db = SessionLocal()
-        self.tenant = self.db.query(Tenant).first()
-        self.assertIsNotNone(self.tenant, "Tenant required")
-        self.user = self.db.query(User).filter(User.tenant_id == self.tenant.tenant_id).first()
-        self.assertIsNotNone(self.user, "User required")
+        self.db.info["tenant_id"] = str(tenant_id)
+        self.tenant = self.db.get(Tenant, tenant_id)
+        self.user = self.db.get(User, user_id)
 
         self.project = Project(
             tenant_id=self.tenant.tenant_id,
@@ -83,6 +98,18 @@ class TestAuditRulesExpanded(unittest.TestCase):
         2. reference to old version while newer finalized version exists -> R004
         3. old version with no newer finalized version -> no R004
         4. version relationship remains deterministic across repeated audits
+
+        NOTE (Master Plan v2, item 13): this test manually calls _upsert_edge
+        with properties={"referenced_version_number": 1} — R004's logic
+        requires that exact edge property, but neither real extraction path
+        (relationship_extractor.py's regex pass, nor llm_extraction.py's LLM
+        pass) ever writes it; every real REFERENCES/DEPENDS_ON edge only
+        names a target document, never a pinned version. So this test proves
+        the rule's LOGIC is correct given that input, not that the rule ever
+        fires against real application data — see evaluate_r004_stale_
+        document_references's docstring for the full verification. Kept
+        (not deleted, unlike the old R006 test) because R004 stays
+        registered as a placeholder the extractor could genuinely feed later.
         """
         stage = Stage(project_id=self.project.project_id, name="Design Stage", order_index=1, requires_approval=False)
         self.db.add(stage)
@@ -195,7 +222,9 @@ class TestAuditRulesExpanded(unittest.TestCase):
         self.assertIn("Design Stage", finding.details["stage_name"])
         self.assertIn("v2", finding.description)
         self.assertFalse(finding.is_blocker)
-        self.assertEqual(finding.severity, "MEDIUM")
+        # Master Plan v2, item 13: downgraded MEDIUM -> LOW (policy call —
+        # staleness is informational, not actionable, even when real).
+        self.assertEqual(finding.severity, "LOW")
 
         # 4. Deterministic across repeated audits
         audit4 = execute_project_audit(self.db, self.project.project_id)
@@ -204,141 +233,18 @@ class TestAuditRulesExpanded(unittest.TestCase):
         self.assertEqual(r004_f4[0].details["referenced_version"], 1)
         self.assertEqual(r004_f4[0].details["newer_available_version"], 2)
 
-    def test_r006_true_orphan_entity(self):
-        """
-        R006: True Orphan Entity
-        1. valid fully-associated document -> no R006
-        2. missing stage -> R006
-        3. missing owner where ownership is required -> R006
-        4. invalid project association -> R006
-        5. legitimate tenant-level user/team node is not incorrectly reported as an orphan
-        6. archived/deleted stage preserves historical references without R006
-        """
-        stage = Stage(project_id=self.project.project_id, name="Production", order_index=1, requires_approval=False)
-        self.db.add(stage)
-        self.db.commit()
-
-        # 1. Valid fully-associated document
-        valid_doc = Document(
-            tenant_id=self.tenant.tenant_id,
-            project_id=self.project.project_id,
-            stage_id=stage.stage_id,
-            uploaded_by=self.user.user_id,
-            uploaded_as_team_id=self.team.team_id,
-            original_filename="ValidProductionDoc.md",
-            mime_type="text/markdown",
-        )
-        self.db.add(valid_doc)
-        self.db.commit()
-
-        sync_project_graph(self.db, self.project.project_id)
-        audit_valid = execute_project_audit(self.db, self.project.project_id)
-        r006_valid = [f for f in audit_valid.findings if f.rule_code == "R006"]
-        self.assertEqual(len(r006_valid), 0)
-
-        # 2. Missing owner team where ownership is required (use a team from another project to respect DB FK)
-        foreign_project = Project(tenant_id=self.tenant.tenant_id, name=f"Foreign Project {uuid.uuid4().hex[:6]}")
-        self.db.add(foreign_project)
-        self.db.commit()
-
-        foreign_team = Team(project_id=foreign_project.project_id, name="Foreign Project Team")
-        foreign_stage = Stage(project_id=foreign_project.project_id, name="Foreign Project Stage", order_index=1, requires_approval=False)
-        self.db.add_all([foreign_team, foreign_stage])
-        self.db.commit()
-
-        missing_owner_doc = Document(
-            tenant_id=self.tenant.tenant_id,
-            project_id=self.project.project_id,
-            stage_id=stage.stage_id,
-            uploaded_by=self.user.user_id,
-            uploaded_as_team_id=foreign_team.team_id,
-            original_filename="UnownedDoc.md",
-            mime_type="text/markdown",
-        )
-        self.db.add(missing_owner_doc)
-        self.db.commit()
-
-        audit_missing_owner = execute_project_audit(self.db, self.project.project_id)
-        r006_missing_owner = [
-            f for f in audit_missing_owner.findings
-            if f.rule_code == "R006" and f.affected_entity_id == missing_owner_doc.document_id
-        ]
-        self.assertEqual(len(r006_missing_owner), 1)
-        self.assertEqual(r006_missing_owner[0].details["orphan_reason"], "missing_owner_team")
-        self.assertTrue(r006_missing_owner[0].is_blocker)
-
-        # 3. Invalid stage assignment (stage belongs to foreign project)
-        invalid_stage_doc = Document(
-            tenant_id=self.tenant.tenant_id,
-            project_id=self.project.project_id,
-            stage_id=foreign_stage.stage_id,
-            uploaded_by=self.user.user_id,
-            uploaded_as_team_id=self.team.team_id,
-            original_filename="InvalidStageDoc.md",
-            mime_type="text/markdown",
-        )
-        self.db.add(invalid_stage_doc)
-        self.db.commit()
-
-        audit_invalid_stage = execute_project_audit(self.db, self.project.project_id)
-        r006_invalid_stage = [
-            f for f in audit_invalid_stage.findings
-            if f.rule_code == "R006" and f.affected_entity_id == invalid_stage_doc.document_id
-        ]
-        self.assertEqual(len(r006_invalid_stage), 1)
-        self.assertEqual(r006_invalid_stage[0].details["orphan_reason"], "missing_or_invalid_stage")
-
-        # Clean up test documents and foreign entities in FK order
-        self.db.delete(missing_owner_doc)
-        self.db.delete(invalid_stage_doc)
-        self.db.commit()
-
-        self.db.delete(foreign_stage)
-        self.db.delete(foreign_team)
-        self.db.commit()
-
-        self.db.delete(foreign_project)
-        self.db.commit()
-
-
-
-        # 3. Soft-deleted / archived stage preserves historical references without R006
-        from datetime import datetime, timezone
-        archived_stage = Stage(
-            project_id=self.project.project_id,
-            name="Archived Phase",
-            order_index=99,
-            deleted_at=datetime.now(timezone.utc),
-        )
-        self.db.add(archived_stage)
-        self.db.commit()
-
-        historical_doc = Document(
-            tenant_id=self.tenant.tenant_id,
-            project_id=self.project.project_id,
-            stage_id=archived_stage.stage_id,
-            uploaded_by=self.user.user_id,
-            uploaded_as_team_id=self.team.team_id,
-            original_filename="HistoricalSpec.md",
-            mime_type="text/markdown",
-        )
-        self.db.add(historical_doc)
-        self.db.commit()
-
-        audit_hist = execute_project_audit(self.db, self.project.project_id)
-        r006_hist = [
-            f for f in audit_hist.findings
-            if f.rule_code == "R006" and f.affected_entity_id == historical_doc.document_id
-        ]
-        self.assertEqual(len(r006_hist), 0)
-
-        # 4. User and Team nodes are not flagged as orphans
-        user_node = self.db.query(Node).filter(Node.project_id == self.project.project_id, Node.source_table == "users").first()
-        team_node = self.db.query(Node).filter(Node.project_id == self.project.project_id, Node.source_table == "teams").first()
-        if user_node:
-            self.assertNotIn(user_node.source_id, [f.affected_entity_id for f in audit_hist.findings if f.rule_code == "R006"])
-        if team_node:
-            self.assertNotIn(team_node.source_id, [f.affected_entity_id for f in audit_hist.findings if f.rule_code == "R006"])
+    # test_r006_true_orphan_entity removed — Master Plan v2, item 13. R006
+    # was deleted from the rule engine after verifying it could never fire
+    # against any state the real application can produce: Document.project_id
+    # / stage_id / uploaded_as_team_id are all non-nullable FK columns set
+    # together, once, at creation from the same validated team/stage context
+    # (app/services/document_persistence.py::_check_upload_access rejects a
+    # cross-project stage before any row is written). This test's own
+    # "missing owner"/"invalid stage" cases only ever existed by constructing
+    # Document rows directly via the ORM with a foreign-project team/stage —
+    # a state no upload endpoint, or any other real code path, can create.
+    # Confirms the rule was defensible only against a synthetic test fixture,
+    # never against real usage.
 
     def test_r010_pending_workflow_blocker(self):
         """
@@ -381,6 +287,13 @@ class TestAuditRulesExpanded(unittest.TestCase):
         self.assertEqual(r010_findings[0].details["workflow_state"], "pending_review")
         self.assertTrue(r010_findings[0].details["blocks_stage_exit"])
         self.assertEqual(audit1.readiness_status, "NOT_READY")
+
+        # Master Plan v2, item 13: R002 previously checked `state != "approved"`,
+        # which also matched pending_review — producing a duplicate R002
+        # finding for the exact same document/fact R010 above already
+        # covers. Confirms the fix: R002 must NOT also fire here.
+        r002_on_pending = [f for f in audit1.findings if f.rule_code == "R002" and f.affected_entity_id == pending_doc.document_id]
+        self.assertEqual(len(r002_on_pending), 0)
 
         # Case 2: Approved document in gate stage -> NO R010
         wf_pending.state = WorkflowStatus.approved
@@ -554,10 +467,13 @@ class TestAuditRulesExpanded(unittest.TestCase):
         ]
         self.assertEqual(len(arch_resolved), 0)
 
-    def test_all_ten_rules_wired_into_engine(self):
+    def test_all_rules_wired_into_engine(self):
         """
-        Verify all 10 deterministic audit rules are registered and executed:
-        R001, R002, R003, R004, R005, R006, R007, R008, R009, R010.
+        Verify every deterministic audit rule is registered and executed.
+        R006 (orphan entity) deliberately excluded — removed in Master Plan
+        v2, item 13 as structurally unreachable (see the deleted
+        test_r006_true_orphan_entity's replacement comment above). R011
+        (document coherence, item 10) included.
         """
         stage = Stage(project_id=self.project.project_id, name="Initial Stage", order_index=1, requires_approval=False)
         self.db.add(stage)
@@ -565,7 +481,7 @@ class TestAuditRulesExpanded(unittest.TestCase):
 
         # Check RULE_REGISTRY completeness
         rule_codes = [code for code, fn in RULE_REGISTRY]
-        expected_rules = ["R001", "R002", "R003", "R004", "R005", "R006", "R007", "R008", "R009", "R010"]
+        expected_rules = ["R001", "R002", "R003", "R004", "R005", "R007", "R008", "R009", "R010", "R011"]
         self.assertEqual(rule_codes, expected_rules)
         self.assertEqual(len(RULE_REGISTRY), 10)
 

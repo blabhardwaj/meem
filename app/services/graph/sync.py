@@ -114,6 +114,18 @@ def sync_project_graph(db: Session, project_id: uuid.UUID) -> SyncResult:
     """
     Synchronizes all authoritative relational entities and dynamic stage topology
     for a given project into the 'knowledge.*' graph tables.
+
+    Master Plan v2, item 5: also removes STALE derived facts, not just
+    upserting current ones. Previously only PRECEDES edges were cleaned up;
+    every other edge type (ALLOWED_REFERENCE, REQUIRES/ORIGINATED_IN/
+    APPLIES_TO, ASSIGNED_TEAM, MANAGES_PROJECT, MEMBER_OF, BELONGS_TO_STAGE,
+    OWNED_BY) could accumulate forever once its underlying row was removed
+    or reassigned. Node.source_table in (required_documents, teams, users)
+    is cleaned up too — Edge rows have ON DELETE CASCADE to Node, so deleting
+    a stale node also removes every edge touching it for free; the explicit
+    edge cleanup below only covers edges where BOTH endpoint nodes still
+    exist but the relationship between them (e.g. a revoked team_stage_access
+    grant) does not.
     """
     result = SyncResult(project_id)
     project = db.query(Project).filter(Project.project_id == project_id).first()
@@ -123,6 +135,27 @@ def sync_project_graph(db: Session, project_id: uuid.UUID) -> SyncResult:
 
     tenant_id = project.tenant_id
     node_map: Dict[Tuple[str, uuid.UUID], Node] = {}
+
+    # Active (source_node_id, target_node_id) pairs per edge type, populated
+    # as the sync below creates/refreshes each edge — used for the stale-edge
+    # cleanup pass at the end. PRECEDES already tracked its own pairs inline;
+    # kept that variable name for the rest.
+    active_allowed_reference_pairs: Set[Tuple[uuid.UUID, uuid.UUID]] = set()
+    active_requires_pairs: Set[Tuple[uuid.UUID, uuid.UUID]] = set()
+    active_originated_in_pairs: Set[Tuple[uuid.UUID, uuid.UUID]] = set()
+    active_applies_to_pairs: Set[Tuple[uuid.UUID, uuid.UUID]] = set()
+    active_assigned_team_pairs: Set[Tuple[uuid.UUID, uuid.UUID]] = set()
+    active_manages_project_pairs: Set[Tuple[uuid.UUID, uuid.UUID]] = set()
+    active_member_of_pairs: Set[Tuple[uuid.UUID, uuid.UUID]] = set()
+    active_belongs_to_stage_pairs: Set[Tuple[uuid.UUID, uuid.UUID]] = set()
+    active_owned_by_pairs: Set[Tuple[uuid.UUID, uuid.UUID]] = set()
+
+    # Active source_ids per node source_table that can genuinely disappear
+    # from this project (documents are never hard-deleted today, so their
+    # node type is excluded — see docstring above).
+    active_requirement_ids: Set[uuid.UUID] = set()
+    active_team_ids: Set[uuid.UUID] = set()
+    active_user_ids: Set[uuid.UUID] = set()
 
     # 1. Sync Project Node
     proj_node = _upsert_node(
@@ -218,6 +251,7 @@ def sync_project_graph(db: Session, project_id: uuid.UUID) -> SyncResult:
             source_node = node_map.get(("stages", sref.stage_id))
             target_node = node_map.get(("stages", sref.references_stage_id))
             if source_node and target_node:
+                active_allowed_reference_pairs.add((source_node.node_id, target_node.node_id))
                 _upsert_edge(
                     db=db,
                     tenant_id=tenant_id,
@@ -251,10 +285,12 @@ def sync_project_graph(db: Session, project_id: uuid.UUID) -> SyncResult:
         )
         node_map[("required_documents", req.requirement_id)] = r_node
         result.nodes_synced += 1
+        active_requirement_ids.add(req.requirement_id)
 
         # Stage -> REQUIRES -> Requirement
         stage_node = node_map.get(("stages", req.stage_id))
         if stage_node:
+            active_requires_pairs.add((stage_node.node_id, r_node.node_id))
             _upsert_edge(
                 db=db,
                 tenant_id=tenant_id,
@@ -267,6 +303,7 @@ def sync_project_graph(db: Session, project_id: uuid.UUID) -> SyncResult:
             result.edges_synced += 1
 
             # Requirement -> ORIGINATED_IN -> Stage
+            active_originated_in_pairs.add((r_node.node_id, stage_node.node_id))
             _upsert_edge(
                 db=db,
                 tenant_id=tenant_id,
@@ -278,6 +315,7 @@ def sync_project_graph(db: Session, project_id: uuid.UUID) -> SyncResult:
             result.edges_synced += 1
 
             # Deterministic default: Requirement -> APPLIES_TO -> Stage (originating stage)
+            active_applies_to_pairs.add((r_node.node_id, stage_node.node_id))
             _upsert_edge(
                 db=db,
                 tenant_id=tenant_id,
@@ -303,6 +341,7 @@ def sync_project_graph(db: Session, project_id: uuid.UUID) -> SyncResult:
         )
         node_map[("teams", team.team_id)] = t_node
         result.nodes_synced += 1
+        active_team_ids.add(team.team_id)
 
     # Team -> ASSIGNED_TEAM -> Stage
     team_stage_accesses = (
@@ -314,6 +353,7 @@ def sync_project_graph(db: Session, project_id: uuid.UUID) -> SyncResult:
         t_node = node_map.get(("teams", tsa.team_id))
         s_node = node_map.get(("stages", tsa.stage_id))
         if t_node and s_node:
+            active_assigned_team_pairs.add((t_node.node_id, s_node.node_id))
             _upsert_edge(
                 db=db,
                 tenant_id=tenant_id,
@@ -341,7 +381,9 @@ def sync_project_graph(db: Session, project_id: uuid.UUID) -> SyncResult:
             )
             node_map[("users", user.user_id)] = u_node
             result.nodes_synced += 1
+            active_user_ids.add(user.user_id)
 
+            active_manages_project_pairs.add((u_node.node_id, proj_node.node_id))
             _upsert_edge(
                 db=db,
                 tenant_id=tenant_id,
@@ -369,9 +411,11 @@ def sync_project_graph(db: Session, project_id: uuid.UUID) -> SyncResult:
             )
             node_map[("users", user.user_id)] = u_node
             result.nodes_synced += 1
+            active_user_ids.add(user.user_id)
 
             t_node = node_map.get(("teams", m.team_id))
             if t_node:
+                active_member_of_pairs.add((u_node.node_id, t_node.node_id))
                 _upsert_edge(
                     db=db,
                     tenant_id=tenant_id,
@@ -403,6 +447,11 @@ def sync_project_graph(db: Session, project_id: uuid.UUID) -> SyncResult:
                 "current_version_id": str(doc.current_version_id) if doc.current_version_id else None,
                 "sensitivity": getattr(doc, "sensitivity_level", None),
                 "original_filename": doc.original_filename,
+                # project_intelligence.py's get_neighborhood() redacts document
+                # nodes by checking properties["stage_id"] against the caller's
+                # accessible stages — it was never actually set here, silently
+                # weakening that redaction for every document node. Fixed.
+                "stage_id": str(doc.stage_id) if doc.stage_id else None,
             },
         )
         node_map[("documents", doc.document_id)] = d_node
@@ -412,6 +461,7 @@ def sync_project_graph(db: Session, project_id: uuid.UUID) -> SyncResult:
         if doc.stage_id:
             s_node = node_map.get(("stages", doc.stage_id))
             if s_node:
+                active_belongs_to_stage_pairs.add((d_node.node_id, s_node.node_id))
                 _upsert_edge(
                     db=db,
                     tenant_id=tenant_id,
@@ -426,6 +476,7 @@ def sync_project_graph(db: Session, project_id: uuid.UUID) -> SyncResult:
         if doc.uploaded_as_team_id:
             t_node = node_map.get(("teams", doc.uploaded_as_team_id))
             if t_node:
+                active_owned_by_pairs.add((d_node.node_id, t_node.node_id))
                 _upsert_edge(
                     db=db,
                     tenant_id=tenant_id,
@@ -435,6 +486,52 @@ def sync_project_graph(db: Session, project_id: uuid.UUID) -> SyncResult:
                     edge_type="OWNED_BY",
                 )
                 result.edges_synced += 1
+
+    # 8. Stale-edge cleanup — same pattern as the existing PRECEDES cleanup
+    # above, extended to every other edge type this function owns (verified
+    # each is written ONLY here, never by relationship_extractor.py/
+    # claims_analyzer.py, so this can't delete another subsystem's edges).
+    edge_types_and_active_pairs = (
+        ("ALLOWED_REFERENCE", active_allowed_reference_pairs),
+        ("REQUIRES", active_requires_pairs),
+        ("ORIGINATED_IN", active_originated_in_pairs),
+        ("APPLIES_TO", active_applies_to_pairs),
+        ("ASSIGNED_TEAM", active_assigned_team_pairs),
+        ("MANAGES_PROJECT", active_manages_project_pairs),
+        ("MEMBER_OF", active_member_of_pairs),
+        ("BELONGS_TO_STAGE", active_belongs_to_stage_pairs),
+        ("OWNED_BY", active_owned_by_pairs),
+    )
+    for edge_type, active_pairs in edge_types_and_active_pairs:
+        current_edges = (
+            db.query(Edge)
+            .filter(Edge.project_id == project_id, Edge.edge_type == edge_type)
+            .all()
+        )
+        for edge in current_edges:
+            if (edge.source_node_id, edge.target_node_id) not in active_pairs:
+                db.delete(edge)
+
+    # 9. Stale-node cleanup for source_tables that can genuinely disappear
+    # from this project (a removed team/requirement, or a user with no
+    # remaining membership/admin role here). Edge rows have ON DELETE CASCADE
+    # to Node, so this also removes every edge still touching a stale node —
+    # covers cases the pair-based cleanup above can't (e.g. BOTH endpoints
+    # gone at once). Documents are excluded: never hard-deleted today.
+    node_types_and_active_ids = (
+        ("required_documents", active_requirement_ids),
+        ("teams", active_team_ids),
+        ("users", active_user_ids),
+    )
+    for source_table, active_ids in node_types_and_active_ids:
+        current_nodes = (
+            db.query(Node)
+            .filter(Node.project_id == project_id, Node.source_table == source_table)
+            .all()
+        )
+        for node in current_nodes:
+            if node.source_id not in active_ids:
+                db.delete(node)
 
     db.commit()
     return result

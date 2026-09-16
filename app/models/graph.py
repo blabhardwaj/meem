@@ -171,6 +171,49 @@ class ExtractionRun(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class DocumentCoherenceCheck(Base):
+    """
+    Master Plan v2, item 10: caches the LLM assessment of one document
+    version's content against related project context (contradiction,
+    duplication, or unmet requirement). Keyed like ExtractionRun
+    (version_id, content_hash) so it's computed once per finalize — the
+    audit sweep's R010 rule reads the cached `issues` on every run instead
+    of re-calling the LLM per audit (which can be triggered far more often
+    than a document is actually re-finalized).
+    """
+    __tablename__ = "document_coherence_checks"
+    __table_args__ = (
+        UniqueConstraint("version_id", "content_hash", "checker_version", name="uq_knowledge_coherence_idempotency"),
+        {"schema": "knowledge"},
+    )
+
+    check_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.tenant_id", ondelete="CASCADE"), nullable=False
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.project_id", ondelete="CASCADE"), nullable=False
+    )
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.document_id", ondelete="CASCADE"), nullable=False
+    )
+    version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("document_versions.version_id", ondelete="CASCADE"), nullable=False
+    )
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    checker_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    # [{type: "contradiction"|"duplicate"|"unmet_requirement", description, confidence, related_context}]
+    issues: Mapped[list[Any]] = mapped_column(JSONB, default=list, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class AuditRun(Base):
     """
     Immutable historical record of an audit execution run.

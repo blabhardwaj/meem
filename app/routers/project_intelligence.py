@@ -1,15 +1,15 @@
 import uuid
 from typing import Any, Dict, List, Optional, Set
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_current_user
-from app.database import get_db
+from app.api.dependencies import get_current_user, get_db_with_tenant
 from app.models.graph import AuditFinding, AuditRun, Edge, Node, ProjectMetricSnapshot
 from app.models.project import Project
 from app.models.stage import Stage
 from app.schemas.graph import (
     AuditRunResponse,
+    CompletionDTO,
     FindingDTO,
     FindingsResponse,
     GapsResponse,
@@ -28,8 +28,10 @@ from app.services.access_control import (
     get_accessible_stages_for_user,
     has_any_project_access,
 )
+from app.services.audit import record_audit
 from app.services.auth import ResolvedIdentity
-from app.services.graph.audit_engine import execute_project_audit
+from app.services.graph.audit_engine import execute_project_audit, sync_and_audit_project
+from app.services.graph.completion import mark_project_complete, reopen_project_if_stale
 from app.services.graph.metrics_service import (
     get_latest_project_health,
     get_project_progress_history,
@@ -57,26 +59,50 @@ def _check_project_access(db: Session, identity: ResolvedIdentity, project_id: u
     return accessible_stages
 
 
+def _require_project_admin(identity: ResolvedIdentity, project_id: uuid.UUID) -> None:
+    if identity.is_org_admin or project_id in identity.project_admin_project_ids:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Only project admins (or organization admins) can mark a project complete.",
+    )
+
+
 @router.get("/metrics", response_model=ProjectMetricsResponse)
 def get_metrics(
     project_id: uuid.UUID,
-    db: Session = Depends(get_db),
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db_with_tenant),
     identity: ResolvedIdentity = Depends(get_current_user),
 ):
     """
     Returns the latest project health metrics, readiness status, and stage-by-stage health.
     Stages outside the caller's team access are redacted.
+
+    Master Plan v2, item 5: previously ran a full synchronous audit inline
+    (blocking the response for seconds) whenever no cached health existed —
+    and did so WITHOUT ever syncing the graph first, so on a real
+    (non-seeded) project the audit had no graph data to evaluate at all. Now
+    schedules sync_and_audit_project() in the background and returns
+    immediately with audit_pending=True; the frontend polls.
     """
     accessible_stages = _check_project_access(db, identity, project_id)
+    project = db.get(Project, project_id)
+    completion = CompletionDTO(
+        is_complete=project.completed_at is not None,
+        completed_at=project.completed_at.isoformat() if project.completed_at else None,
+        completed_by=str(project.completed_by) if project.completed_by else None,
+    )
     health = get_latest_project_health(db, project_id)
 
     if not health or not health["project_metric"]:
-        # If no audit run has executed yet, trigger one synchronously
-        audit_run = execute_project_audit(db, project_id, triggered_by=identity.user_id)
-        health = get_latest_project_health(db, project_id)
-
-    if not health:
-        return ProjectMetricsResponse(project_id=str(project_id), project_metric=None, stages=[])
+        background_tasks.add_task(
+            sync_and_audit_project, project_id, project.tenant_id, identity.user_id
+        )
+        return ProjectMetricsResponse(
+            project_id=str(project_id), project_metric=None, stages=[], audit_pending=True,
+            completion=completion,
+        )
 
     pm = health["project_metric"]
     project_metric_dto = ProjectMetricDTO(**pm)
@@ -92,6 +118,7 @@ def get_metrics(
         project_id=str(project_id),
         project_metric=project_metric_dto,
         stages=visible_stages,
+        completion=completion,
     )
 
 
@@ -99,7 +126,7 @@ def get_metrics(
 def get_gaps(
     project_id: uuid.UUID,
     stage_id: Optional[uuid.UUID] = Query(None, description="Optional target stage scope"),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
     identity: ResolvedIdentity = Depends(get_current_user),
 ):
     """
@@ -147,11 +174,11 @@ def get_gaps(
             missing_reqs.append(dto)
         elif f.rule_code in ("R003", "R005"):
             broken_deps.append(dto)
-        elif f.rule_code == "R007":
+        elif f.rule_code == "R006":
             ref_violations.append(dto)
         elif f.rule_code == "R002":
             unapproved_gate.append(dto)
-        elif f.rule_code == "R009":
+        elif f.rule_code == "R008":
             contradictions.append(dto)
 
     total_blockers = len([f for f in visible_findings if f.is_blocker])
@@ -177,7 +204,7 @@ def get_findings(
     rule_code: Optional[str] = Query(None, description="Filter by rule code (e.g. R001, R002)"),
     is_blocker: Optional[bool] = Query(None, description="Filter by blocker status"),
     stage_id: Optional[uuid.UUID] = Query(None, description="Filter by target stage"),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
     identity: ResolvedIdentity = Depends(get_current_user),
 ):
     """
@@ -249,7 +276,7 @@ def get_neighborhood(
     source_table: Optional[str] = Query(None),
     source_id: Optional[uuid.UUID] = Query(None),
     depth: int = Query(1, ge=1, le=3),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
     identity: ResolvedIdentity = Depends(get_current_user),
 ):
     """
@@ -377,7 +404,7 @@ def get_neighborhood(
 def get_progress_history(
     project_id: uuid.UUID,
     limit: int = Query(50, ge=1, le=200),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
     identity: ResolvedIdentity = Depends(get_current_user),
 ):
     """
@@ -392,7 +419,7 @@ def get_progress_history(
 def get_timeline(
     project_id: uuid.UUID,
     limit: int = Query(100, ge=1, le=500),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
     identity: ResolvedIdentity = Depends(get_current_user),
 ):
     """
@@ -408,7 +435,7 @@ def get_timeline(
 def trigger_audit(
     project_id: uuid.UUID,
     body: TriggerAuditRequest = TriggerAuditRequest(),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
     identity: ResolvedIdentity = Depends(get_current_user),
 ):
     """
@@ -440,3 +467,80 @@ def trigger_audit(
         started_at=audit_run.started_at.isoformat(),
         completed_at=audit_run.completed_at.isoformat() if audit_run.completed_at else None,
     )
+
+
+@router.post("/mark-complete", response_model=CompletionDTO)
+def mark_complete(
+    project_id: uuid.UUID,
+    db: Session = Depends(get_db_with_tenant),
+    identity: ResolvedIdentity = Depends(get_current_user),
+):
+    """
+    Human decision (Layer 4): project_admin/org_admin only. Readiness is
+    advisory input here, not a precondition -- an admin can mark a project
+    complete even while GATED, e.g. to record a deliberate override. The
+    completion snapshot is taken from the latest AuditRun (running one now
+    if none exists yet) so the auto-reopen check has something real to
+    compare against.
+    """
+    project = db.get(Project, project_id)
+    if project is None or project.tenant_id != identity.tenant_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    _require_project_admin(identity, project_id)
+
+    latest_run = (
+        db.query(AuditRun)
+        .filter(AuditRun.project_id == project_id, AuditRun.target_stage_id.is_(None))
+        .order_by(AuditRun.started_at.desc())
+        .first()
+    )
+    if latest_run is None:
+        latest_run = execute_project_audit(db, project_id, triggered_by=identity.user_id)
+
+    mark_project_complete(db, project=project, actor_id=identity.user_id, latest_run=latest_run)
+    record_audit(
+        db, actor_id=identity.user_id, action="MARK_PROJECT_COMPLETE",
+        resource_type="project", resource_id=project_id,
+        details={"audit_run_id": str(latest_run.run_id)},
+    )
+    db.commit()
+    db.refresh(project)
+
+    return CompletionDTO(
+        is_complete=True,
+        completed_at=project.completed_at.isoformat(),
+        completed_by=str(project.completed_by),
+    )
+
+
+@router.post("/reopen", response_model=CompletionDTO)
+def reopen_project(
+    project_id: uuid.UUID,
+    db: Session = Depends(get_db_with_tenant),
+    identity: ResolvedIdentity = Depends(get_current_user),
+):
+    """
+    Manual override to clear a completion mark without waiting for the
+    automatic audit-difference reopen (app/services/graph/completion.py's
+    reopen_project_if_stale, which also runs after every background
+    sync_and_audit_project). project_admin/org_admin only, same as marking
+    complete in the first place.
+    """
+    project = db.get(Project, project_id)
+    if project is None or project.tenant_id != identity.tenant_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    _require_project_admin(identity, project_id)
+
+    if project.completed_at is not None:
+        project.completed_at = None
+        project.completed_by = None
+        project.completion_snapshot_score = None
+        project.completion_snapshot_blockers = None
+        project.completion_snapshot_signature = None
+        record_audit(
+            db, actor_id=identity.user_id, action="REOPEN_PROJECT",
+            resource_type="project", resource_id=project_id, details=None,
+        )
+        db.commit()
+
+    return CompletionDTO(is_complete=False, completed_at=None, completed_by=None)

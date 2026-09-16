@@ -206,6 +206,23 @@ def get_latest_project_health(
         .all()
     )
 
+    # StageMetricSnapshot.stage_id is deliberately not FK'd (history survives
+    # a stage's deletion) — look up order_index/requires_approval for
+    # whichever stages are still live, so item 8's frontend pipeline can sort
+    # in real project order instead of arbitrary snapshot-insertion order.
+    live_stages = {
+        s.stage_id: s
+        for s in db.query(Stage).filter(
+            Stage.stage_id.in_([s.stage_id for s in stage_snapshots])
+        ).all()
+    } if stage_snapshots else {}
+
+    stage_snapshots.sort(
+        key=lambda s: (
+            live_stages[s.stage_id].order_index if s.stage_id in live_stages else float("inf")
+        )
+    )
+
     return {
         "project_metric": {
             "snapshot_id": str(latest_project_snapshot.snapshot_id),
@@ -231,6 +248,8 @@ def get_latest_project_health(
                 "mandatory_requirements_satisfied": s.mandatory_requirements_satisfied,
                 "mandatory_requirements_missing": s.mandatory_requirements_missing,
                 "blockers_count": s.blockers_count,
+                "order_index": live_stages[s.stage_id].order_index if s.stage_id in live_stages else None,
+                "requires_approval": live_stages[s.stage_id].requires_approval if s.stage_id in live_stages else None,
             }
             for s in stage_snapshots
         ],

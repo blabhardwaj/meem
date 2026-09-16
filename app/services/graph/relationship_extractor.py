@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import re
 import uuid
 from datetime import datetime, timezone
@@ -6,14 +7,22 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from sqlalchemy.orm import Session
 
+from app.config import GROQ_MODEL
 from app.models.document import Document, DocumentVersion
 from app.models.graph import Edge, ExtractionRun, Node
 from app.models.project import Project
 from app.models.required_document import RequiredDocument
 from app.models.stage import Stage
+from app.services.graph.llm_extraction import DIRECT_FACT_CONFIDENCE_FLOOR, extract_references_llm
 from app.services.graph.sync import _upsert_edge, _upsert_node
 
-EXTRACTOR_VERSION = "1.0.0"
+logger = logging.getLogger(__name__)
+
+# Bumped from 1.0.0: the LLM-augmented pass changes what a "completed"
+# extraction run actually covers, so a cached 1.0.0 run must not be treated
+# as equivalent to a 2.0.0 one — see extract_document_relationships's
+# idempotency check.
+EXTRACTOR_VERSION = "2.0.0"
 
 ALLOWED_EDGE_TYPES: Set[str] = {
     "PRECEDES",
@@ -181,6 +190,7 @@ def extract_document_relationships(
                 edge_props = {
                     "matched_text": snippet,
                     "is_dependency": is_dependency,
+                    "source": "regex",
                 }
 
                 _upsert_edge(
@@ -237,11 +247,83 @@ def extract_document_relationships(
                         source_node_id=doc_node.node_id,
                         target_node_id=req_node.node_id,
                         edge_type=edge_type,
-                        properties={"matched_requirement": req.name, "rule": "title_or_content_evidence"},
+                        properties={"matched_requirement": req.name, "rule": "title_or_content_evidence", "source": "regex"},
                         confidence=0.95 if doc_name_match else 0.85,
                         provenance=provenance_metadata,
                     )
                     result.edges_created += 1
+
+        # 4.5. LLM-augmented reference extraction (item 9) — additive on top
+        # of the regex passes above. Catches a document that references
+        # another document/requirement by DESCRIPTION rather than exact
+        # name/filename, which regex structurally cannot.
+        all_reqs = (
+            db.query(RequiredDocument).filter(RequiredDocument.stage_id == doc.stage_id).all()
+            if doc.stage_id else []
+        )
+        candidate_documents = [
+            {"id": str(d.document_id), "filename": d.original_filename} for d in all_other_docs
+        ]
+        candidate_requirements = [
+            {"id": str(r.requirement_id), "name": r.name, "description": r.description}
+            for r in all_reqs
+        ]
+        doc_by_id = {str(d.document_id): d for d in all_other_docs}
+        req_by_id = {str(r.requirement_id): r for r in all_reqs}
+
+        llm_results = extract_references_llm(content, candidate_documents, candidate_requirements)
+        for item in llm_results:
+            if item["target_type"] == "document":
+                target = doc_by_id.get(item["target_id"])
+                if not target:
+                    continue
+                target_node = _upsert_node(
+                    db=db, tenant_id=target.tenant_id, project_id=target.project_id,
+                    entity_type="document", source_table="documents",
+                    source_id=target.document_id, label=target.original_filename or "Untitled Document",
+                )
+            else:
+                target = req_by_id.get(item["target_id"])
+                if not target:
+                    continue
+                target_node = _upsert_node(
+                    db=db, tenant_id=doc.tenant_id, project_id=doc.project_id,
+                    entity_type="requirement", source_table="required_documents",
+                    source_id=target.requirement_id, label=target.name,
+                )
+
+            # Same (source_node_id, target_node_id, edge_type) key as the
+            # regex passes above — never let a lower-confidence LLM find
+            # silently downgrade a higher-confidence regex-found edge.
+            # _upsert_edge() itself always overwrites, so check first.
+            existing = (
+                db.query(Edge)
+                .filter(
+                    Edge.source_node_id == doc_node.node_id,
+                    Edge.target_node_id == target_node.node_id,
+                    Edge.edge_type == item["relationship"],
+                )
+                .first()
+            )
+            if existing and existing.confidence is not None and existing.confidence >= item["confidence"]:
+                continue
+
+            _upsert_edge(
+                db=db,
+                tenant_id=doc.tenant_id,
+                project_id=doc.project_id,
+                source_node_id=doc_node.node_id,
+                target_node_id=target_node.node_id,
+                edge_type=item["relationship"],
+                properties={
+                    "source": "llm",
+                    "reason": item["reason"],
+                    "low_confidence": item["confidence"] < DIRECT_FACT_CONFIDENCE_FLOOR,
+                },
+                confidence=item["confidence"],
+                provenance={**provenance_metadata, "extractor": "llm", "model": GROQ_MODEL},
+            )
+            result.edges_created += 1
 
         # 5. Finalize ExtractionRun
         run.status = "completed"

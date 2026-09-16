@@ -1,5 +1,4 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
 import {
   X,
   ShieldAlert,
@@ -35,12 +34,20 @@ const getRuleCategory = (ruleCode) => {
     case 'R003':
     case 'R005':
       return 'Broken Dependency';
-    case 'R007':
+    case 'R004':
+      return 'Stale Document Reference';
+    case 'R006':
       return 'Reference Violation';
-    case 'R009':
+    case 'R007':
+      return 'Unassigned Stage Requirement';
+    case 'R008':
       return 'Performance Contradiction';
-    case 'R010':
+    case 'R009':
       return 'Pending Workflow Review';
+    case 'R010':
+      return 'Document-Level Coherence';
+    case 'R011':
+      return 'Scanner-Flagged Current Version';
     default:
       return 'Audit Rule Violation';
   }
@@ -53,8 +60,8 @@ const AuditFindingDrawer = ({
   projectId,
   stages = [],
   documents = [],
+  onAskSearchAgent,
 }) => {
-  const navigate = useNavigate();
   const [viewerDoc, setViewerDoc] = useState(null);
   const [neighborhood, setNeighborhood] = useState(null);
 
@@ -137,9 +144,9 @@ const AuditFindingDrawer = ({
   const implSnippet =
     'Payment Service P95 response times below 750 ms under sustained peak transaction throughput';
 
-  // Suggested questions for Query Agent
-  const isContradiction = finding.rule_code === 'R009';
-  const isApprovalGate = finding.rule_code === 'R002' || finding.rule_code === 'R010';
+  // Suggested questions for the Search Agent
+  const isContradiction = finding.rule_code === 'R008';
+  const isApprovalGate = finding.rule_code === 'R002' || finding.rule_code === 'R009';
 
   const suggestedQueries = [
     'Why is this project not ready?',
@@ -155,9 +162,7 @@ const AuditFindingDrawer = ({
 
   const handleAskQueryAgent = (queryText) => {
     onClose();
-    navigate(
-      `/projects/${encodeURIComponent(projectId)}?tab=query&q=${encodeURIComponent(queryText)}`
-    );
+    onAskSearchAgent?.(queryText);
   };
 
   const handlePreviewDocument = (filename, stage, snippet, fullTextFallback) => {
@@ -207,7 +212,7 @@ const AuditFindingDrawer = ({
         </div>
 
         {/* Drawer Body */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-6">
+        <div className="flex-1 overflow-y-auto scrollbar-thin p-6 space-y-6">
           {/* Finding Overview */}
           <div className="rounded-xl border border-border bg-background/80 p-4 space-y-3">
             <div className="flex items-center justify-between">
@@ -231,7 +236,7 @@ const AuditFindingDrawer = ({
             </div>
           </div>
 
-          {/* Special Visual Contradiction Callout if R009 */}
+          {/* Special Visual Contradiction Callout if R008 */}
           {isContradiction && (details.value_a || details.value_b) && (
             <div className="rounded-xl border border-red-500/30 bg-red-500/5 p-4 space-y-2">
               <div className="flex items-center justify-between">
@@ -468,12 +473,12 @@ const AuditFindingDrawer = ({
             </div>
           )}
 
-          {/* Ask Query Agent Section */}
+          {/* Ask Search Agent Section */}
           <div className="rounded-xl border border-border bg-background/70 p-4 space-y-3">
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold uppercase tracking-wider text-gray-300 flex items-center gap-1.5">
                 <Sparkles size={14} className="text-primary" />
-                Investigate with Query Agent
+                Investigate with Search Agent
               </span>
               <Badge variant="neutral">Read-only Context</Badge>
             </div>

@@ -1,3 +1,4 @@
+import logging
 import re
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
@@ -6,6 +7,23 @@ from sqlalchemy.orm import Session
 from app.models.graph import Claim, Edge, Node
 from app.models.document import Document, DocumentVersion
 from app.services.graph.audit_rules import FindingSpec
+from app.services.graph.llm_extraction import (
+    DIRECT_FACT_CONFIDENCE_FLOOR,
+    adjudicate_contradiction,
+    cosine_similarity,
+)
+from app.services.rag.embedding import embed_dense
+
+logger = logging.getLogger(__name__)
+
+# Master Plan v2, item 9: subject+object embedding similarity a claim pair
+# must clear before spending an LLM call to adjudicate whether they actually
+# conflict. Subjects/objects are short phrases, not full sentences, so this
+# needs to be fairly high to avoid flooding the LLM pass with unrelated pairs.
+SEMANTIC_CLAIM_SIMILARITY_THRESHOLD = 0.80
+# Hard cap on adjudication calls per audit run — bounds cost/latency
+# regardless of how many claims a large project accumulates.
+MAX_SEMANTIC_ADJUDICATIONS = 20
 
 
 # Extraction patterns for explicit semantic statements / claims
@@ -140,6 +158,7 @@ def extract_claims_from_text(
                 "start": match.start(),
                 "end": match.end(),
                 "claim_type": pattern["type"],
+                "source": "regex",
             }
             if req_code:
                 source_loc["requirement_context"] = req_code
@@ -199,6 +218,57 @@ def persist_claims(
     return created_claims
 
 
+def persist_llm_claims(
+    db: Session,
+    tenant_id: uuid.UUID,
+    project_id: uuid.UUID,
+    document_id: uuid.UUID,
+    version_id: uuid.UUID,
+    claims_data: List[Dict[str, Any]],
+    extraction_run_id: Optional[uuid.UUID] = None,
+) -> List[Claim]:
+    """
+    Persists LLM-extracted claims (item 9), additive to persist_claims()'s
+    regex claims for the same version — does NOT touch regex claims. Only
+    clears previously-persisted LLM claims for this version first (so
+    re-extraction is idempotent), identified by source_locator['source'].
+
+    Must be called AFTER persist_claims() in the same pass if both run —
+    persist_claims() deletes ALL claims for the version unconditionally, so
+    calling it after this would wipe these LLM claims too.
+    """
+    db.query(Claim).filter(
+        Claim.version_id == version_id,
+        Claim.source_locator["source"].astext == "llm",
+    ).delete(synchronize_session=False)
+
+    created_claims: List[Claim] = []
+    for cd in claims_data:
+        confidence = cd.get("confidence", 0.5)
+        claim = Claim(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            document_id=document_id,
+            version_id=version_id,
+            subject=cd["subject"],
+            predicate=cd["predicate"],
+            object=cd["object"],
+            polarity=cd.get("polarity", True),
+            snippet=cd.get("snippet", ""),
+            source_locator={
+                "source": "llm",
+                "low_confidence": confidence < DIRECT_FACT_CONFIDENCE_FLOOR,
+            },
+            confidence=confidence,
+            extraction_run_id=extraction_run_id,
+        )
+        db.add(claim)
+        created_claims.append(claim)
+
+    db.flush()
+    return created_claims
+
+
 def detect_project_contradictions(
     db: Session,
     tenant_id: uuid.UUID,
@@ -206,17 +276,36 @@ def detect_project_contradictions(
     evaluated_stage_ids: Optional[List[uuid.UUID]] = None,
 ) -> List[FindingSpec]:
     """
-    Detects contradictions between claims across documents in scope.
-    Generates CONFLICTS_WITH edges between conflicting document nodes and
-    returns R009 blocker findings.
+    Detects contradictions between claims across documents in scope via
+    EXACT (subject, predicate) string grouping. Generates CONFLICTS_WITH
+    edges between conflicting document nodes and returns R008 blocker
+    findings. See detect_semantic_contradictions() for the additive,
+    embedding+LLM pass that catches claims phrased differently (item 9) —
+    this function alone still only catches exact-phrasing matches, which is
+    all regex-sourced claims ever produce by construction.
+
+    Master Plan v2, item 9: only claims at/above DIRECT_FACT_CONFIDENCE_FLOOR
+    feed this deterministic pass — regex claims are always 0.95 (unaffected),
+    but a low-confidence LLM claim (0.5-0.7) must not be treated as fact here.
     """
     findings: List[FindingSpec] = []
 
-    # Query claims joined with Document to check stage scope
+    # Query claims joined with Document to check stage scope. Constrained to
+    # Claim.version_id == Document.current_version_id so a superseded
+    # version's claims (from an older revision that finalized before the
+    # current one) never contribute stale findings — persist_claims()/
+    # persist_llm_claims() only replace claims for the SAME version_id they
+    # write, so an old version's claims otherwise survive indefinitely once
+    # a newer version becomes current.
     query = (
         db.query(Claim, Document)
         .join(Document, Claim.document_id == Document.document_id)
-        .filter(Claim.tenant_id == tenant_id, Claim.project_id == project_id)
+        .filter(
+            Claim.tenant_id == tenant_id,
+            Claim.project_id == project_id,
+            Claim.confidence >= DIRECT_FACT_CONFIDENCE_FLOOR,
+            Claim.version_id == Document.current_version_id,
+        )
         .order_by(Document.created_at.asc(), Claim.created_at.asc())
     )
 
@@ -370,7 +459,7 @@ def detect_project_contradictions(
                     )
                 db.flush()
 
-            # Emit R009 blocker finding
+            # Emit R008 blocker finding
             finding_details = {
                 "conflicting_document_id": str(doc2.document_id),
                 "conflicting_document_name": doc2.original_filename,
@@ -397,7 +486,7 @@ def detect_project_contradictions(
 
             findings.append(
                 FindingSpec(
-                    rule_code="R009",
+                    rule_code="R008",
                     severity="HIGH",
                     is_blocker=True,
                     title="Document Contradiction Detected",
@@ -422,5 +511,179 @@ def detect_project_contradictions(
                     details=finding_details,
                 )
             )
+
+    return findings
+
+
+def detect_semantic_contradictions(
+    db: Session,
+    tenant_id: uuid.UUID,
+    project_id: uuid.UUID,
+    evaluated_stage_ids: Optional[List[uuid.UUID]] = None,
+) -> List[FindingSpec]:
+    """
+    Additive to detect_project_contradictions(): embeds each claim's
+    subject+object, finds candidate pairs across DIFFERENT documents whose
+    embeddings clear SEMANTIC_CLAIM_SIMILARITY_THRESHOLD — catches claims
+    phrased differently (e.g. "launch is Q3" vs "we ship in September") that
+    exact-(subject,predicate) grouping structurally cannot pair — then spends
+    an LLM call ONLY on those pre-filtered candidates to adjudicate whether
+    they actually conflict. Capped at MAX_SEMANTIC_ADJUDICATIONS calls per
+    run regardless of how many claims a large project accumulates.
+
+    Pairs already covered by detect_project_contradictions() (same
+    subject+predicate) are skipped here to avoid duplicate findings.
+    """
+    findings: List[FindingSpec] = []
+
+    # Same version-currency constraint as detect_project_contradictions() —
+    # see its comment for why.
+    query = (
+        db.query(Claim, Document)
+        .join(Document, Claim.document_id == Document.document_id)
+        .filter(
+            Claim.tenant_id == tenant_id,
+            Claim.project_id == project_id,
+            Claim.confidence >= DIRECT_FACT_CONFIDENCE_FLOOR,
+            Claim.version_id == Document.current_version_id,
+        )
+    )
+    if evaluated_stage_ids is not None:
+        query = query.filter(Document.stage_id.in_(evaluated_stage_ids))
+
+    results = query.all()
+    if len(results) < 2:
+        return findings
+
+    texts = [f"{claim.subject}: {claim.object}" for claim, _ in results]
+    try:
+        vectors = embed_dense(texts)
+    except Exception:
+        logger.exception("Semantic contradiction detection: embedding failed, skipping this run")
+        return findings
+
+    doc_ids = list({doc.document_id for _, doc in results})
+    doc_nodes = (
+        db.query(Node)
+        .filter(
+            Node.tenant_id == tenant_id,
+            Node.project_id == project_id,
+            Node.source_table == "documents",
+            Node.source_id.in_(doc_ids),
+        )
+        .all()
+    )
+    node_map = {n.source_id: n for n in doc_nodes}
+
+    candidates = []
+    for i in range(len(results)):
+        for j in range(i + 1, len(results)):
+            c1, doc1 = results[i]
+            c2, doc2 = results[j]
+            if doc1.document_id == doc2.document_id:
+                continue
+            if (
+                c1.subject.lower().strip() == c2.subject.lower().strip()
+                and c1.predicate.lower().strip() == c2.predicate.lower().strip()
+            ):
+                continue  # already covered by detect_project_contradictions
+            sim = cosine_similarity(vectors[i], vectors[j])
+            if sim >= SEMANTIC_CLAIM_SIMILARITY_THRESHOLD:
+                candidates.append((sim, c1, doc1, c2, doc2))
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    candidates = candidates[:MAX_SEMANTIC_ADJUDICATIONS]
+
+    seen_doc_pairs: set = set()
+    for sim, c1, doc1, c2, doc2 in candidates:
+        if doc1.created_at and doc2.created_at and doc1.created_at > doc2.created_at:
+            c1, doc1, c2, doc2 = c2, doc2, c1, doc1
+
+        pair_key = (
+            tuple(sorted([str(doc1.document_id), str(doc2.document_id)])),
+            c1.subject.lower(),
+            c2.subject.lower(),
+        )
+        if pair_key in seen_doc_pairs:
+            continue
+        seen_doc_pairs.add(pair_key)
+
+        verdict = adjudicate_contradiction(
+            {"subject": c1.subject, "object": c1.object, "snippet": c1.snippet},
+            {"subject": c2.subject, "object": c2.object, "snippet": c2.snippet},
+        )
+        if not verdict or not verdict["conflict"] or verdict["confidence"] < DIRECT_FACT_CONFIDENCE_FLOOR:
+            continue
+
+        conflict_props = {
+            "claim1_id": str(c1.claim_id),
+            "claim2_id": str(c2.claim_id),
+            "subject_a": c1.subject,
+            "subject_b": c2.subject,
+            "value1": c1.object,
+            "value2": c2.object,
+            "snippet1": c1.snippet,
+            "snippet2": c2.snippet,
+            "source": "llm_semantic",
+            "reason": verdict["reason"],
+            "similarity": sim,
+        }
+        node1 = node_map.get(doc1.document_id)
+        node2 = node_map.get(doc2.document_id)
+        if node1 and node2:
+            existing_edge = (
+                db.query(Edge)
+                .filter(
+                    Edge.source_node_id == node1.node_id,
+                    Edge.target_node_id == node2.node_id,
+                    Edge.edge_type == "CONFLICTS_WITH",
+                )
+                .first()
+            )
+            if existing_edge:
+                existing_edge.properties = {**(existing_edge.properties or {}), **conflict_props}
+            else:
+                db.add(Edge(
+                    tenant_id=tenant_id, project_id=project_id,
+                    source_node_id=node1.node_id, target_node_id=node2.node_id,
+                    edge_type="CONFLICTS_WITH", confidence=verdict["confidence"],
+                    properties=conflict_props,
+                ))
+            db.flush()
+
+        desc = (
+            f"Semantic contradiction detected between '{doc1.original_filename}' and '{doc2.original_filename}': "
+            f"'{c1.subject}: {c1.object}' appears to conflict with '{c2.subject}: {c2.object}' ({verdict['reason']})."
+        )
+        findings.append(
+            FindingSpec(
+                rule_code="R008",
+                severity="HIGH",
+                is_blocker=True,
+                title="Document Contradiction Detected (Semantic)",
+                description=desc,
+                affected_entity_type="document",
+                affected_entity_id=doc1.document_id,
+                target_stage_id=doc1.stage_id,
+                evidence_sources=[
+                    {
+                        "document_id": str(doc1.document_id), "version_id": str(c1.version_id),
+                        "snippet": c1.snippet, "claim_id": str(c1.claim_id),
+                    },
+                    {
+                        "document_id": str(doc2.document_id), "version_id": str(c2.version_id),
+                        "snippet": c2.snippet, "claim_id": str(c2.claim_id),
+                    },
+                ],
+                details={
+                    "conflicting_document_id": str(doc2.document_id),
+                    "conflicting_document_name": doc2.original_filename,
+                    "subject_a": c1.subject, "subject_b": c2.subject,
+                    "value_a": c1.object, "value_b": c2.object,
+                    "similarity": sim,
+                    "llm_reason": verdict["reason"],
+                },
+            )
+        )
 
     return findings

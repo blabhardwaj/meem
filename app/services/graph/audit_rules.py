@@ -1,14 +1,85 @@
+import logging
 import uuid
 from typing import Any, Dict, List, Optional, Set, Tuple
+from qdrant_client import models as qm
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.models.graph import Edge, Node
+from app.models.graph import DocumentCoherenceCheck, Edge, Node
 from app.models.stage import Stage, StageReference, TeamStageAccess
-from app.models.document import Document, DocumentVersion, DocumentStatus
+from app.models.document import Document, DocumentScan, DocumentVersion, DocumentStatus
 from app.models.required_document import RequiredDocument
 from app.models.workflow import WorkflowState, WorkflowStatus
-from app.models.team import Team
+from app.services.graph.llm_extraction import DIRECT_FACT_CONFIDENCE_FLOOR
+from app.services.rag.collection_setup import DENSE_VECTOR_NAME, collection_name_for_tenant, get_qdrant_client
+from app.services.rag.embedding import embed_dense
+
+logger = logging.getLogger(__name__)
+
+# Master Plan v2, item 7: cosine similarity a document chunk must clear
+# against a requirement's name+description to count as semantic evidence.
+# Starting value per the plan — tune from real audit data once there's
+# enough of it to calibrate against.
+SEMANTIC_EVIDENCE_SIMILARITY_THRESHOLD = 0.72
+
+
+def _has_semantic_evidence(
+    tenant_id: uuid.UUID,
+    project_id: uuid.UUID,
+    stage_ids: Set[uuid.UUID],
+    requirement_name: str,
+    requirement_description: Optional[str],
+) -> bool:
+    """
+    Nearest-neighbor fallback for R001 when no REFERENCES/EVIDENCES-style
+    graph edge names an evidence document — reuses the EXISTING RAG Qdrant
+    infrastructure (same collection, same dense embedding model) rather than
+    adding pgvector or a second embedding pipeline. This is what actually
+    fixes "1 doc vs 100 docs shows the same 100%": a stage with a placeholder
+    file has no chunk that's actually ABOUT the requirement, so nothing
+    clears the threshold, and the requirement still shows missing.
+
+    No separate workflow-state/approval check is needed here: index_document()
+    (app/services/indexing.py) only ever runs after should_index() has
+    confirmed the version is Scanner-passed AND approved-if-the-stage-
+    requires-it — the exact same "counts as evidence" bar the graph-edge
+    branch above checks explicitly. A chunk existing in Qdrant at all already
+    proves its document cleared that bar.
+    """
+    if not stage_ids:
+        return False
+
+    query_text = requirement_name
+    if requirement_description:
+        query_text = f"{requirement_name}\n{requirement_description}"
+
+    try:
+        query_vector = embed_dense([query_text])[0]
+    except Exception:
+        logger.exception("R001 semantic evidence check: embedding failed, treating as no match")
+        return False
+
+    client = get_qdrant_client()
+    collection = collection_name_for_tenant(tenant_id)
+    if not client.collection_exists(collection):
+        return False  # nothing indexed yet for this tenant at all
+
+    response = client.query_points(
+        collection_name=collection,
+        query=query_vector,
+        using=DENSE_VECTOR_NAME,
+        query_filter=qm.Filter(
+            must=[
+                qm.FieldCondition(key="tenant_id", match=qm.MatchValue(value=str(tenant_id))),
+                qm.FieldCondition(key="project_id", match=qm.MatchValue(value=str(project_id))),
+                qm.FieldCondition(key="stage_id", match=qm.MatchAny(any=[str(s) for s in stage_ids])),
+            ]
+        ),
+        limit=1,
+        score_threshold=SEMANTIC_EVIDENCE_SIMILARITY_THRESHOLD,
+        with_payload=False,
+    )
+    return len(response.points) > 0
 
 
 class FindingSpec:
@@ -50,6 +121,12 @@ def evaluate_r001_missing_mandatory_requirements(
     Considers both originating stage and explicit APPLIES_TO edges in the graph.
     Prevents downstream contamination (a requirement originating downstream cannot contaminate upstream).
     Flags when an applicable mandatory requirement has zero approved satisfying/evidentiary documents.
+
+    Master Plan v2, item 7: evidence is no longer graph-edges-only. If no
+    REFERENCES/EVIDENCES-style edge names a document, _has_semantic_evidence()
+    falls back to a Qdrant nearest-neighbor search against the requirement's
+    name+description — this is what makes "1 doc vs 100 docs" actually
+    reflect real content coverage instead of just document count.
     """
     findings: List[FindingSpec] = []
     if not evaluated_stage_ids:
@@ -167,6 +244,10 @@ def evaluate_r001_missing_mandatory_requirements(
                 Edge.project_id == project_id,
                 Edge.target_node_id == req_node.node_id,
                 Edge.edge_type.in_(["ESTABLISHES", "IMPLEMENTS", "VALIDATES", "EVIDENCES"]),
+                # Item 9: regex-found edges are always 0.85-0.95 (unaffected).
+                # A low-confidence LLM-found edge (0.5-0.7) must not count as
+                # direct evidence — only surfaced for manual review elsewhere.
+                Edge.confidence >= DIRECT_FACT_CONFIDENCE_FLOOR,
             )
             .all()
         )
@@ -193,6 +274,20 @@ def evaluate_r001_missing_mandatory_requirements(
                     elif current_wf_state == "approved":
                         has_approved_evidence = True
                         break
+
+        semantic_evidence = False
+        if not has_approved_evidence:
+            # Semantic fallback (item 7): no regex/pattern-derived graph edge
+            # names a document as evidence, but a document's CONTENT can
+            # still satisfy the requirement without ever mentioning its
+            # filename/UUID (which is all relationship_extractor.py can
+            # currently detect). Scoped to the same evaluated_stage_ids as
+            # the rest of this audit run, matching the graph-edge branch's
+            # own lack of per-requirement stage scoping for evidence docs.
+            semantic_evidence = _has_semantic_evidence(
+                tenant_id, project_id, set(evaluated_stage_ids), req.name, req.description,
+            )
+            has_approved_evidence = semantic_evidence
 
         if not has_approved_evidence:
             for t_stage_id in target_stages_in_scope:
@@ -230,8 +325,15 @@ def evaluate_r002_unapproved_documents_in_gate_stages(
     """
     R002: Unapproved Document in Gate Stage.
     For stages where requires_approval = True, documents must have state 'approved'.
-    Specifically flags unapproved documents in 'draft' or 'rejected' state.
-    (Documents in 'pending_review' are actively awaiting review and are flagged by R010).
+    Flags 'draft' or 'rejected' documents ONLY.
+
+    Master Plan v2, item 13: previously checked `current_state != "approved"`,
+    which also matched 'pending_review' — contradicting this function's own
+    docstring ("documents in pending_review... are flagged by the pending-
+    workflow-blocker rule, now R009 after UI_FIXES_2026-09-15.md's
+    renumbering") and producing two findings for the same document on every
+    single pending-review case in a gate stage. Fixed to explicitly exclude
+    pending_review, matching that rule's exact scope with no overlap.
     """
     findings: List[FindingSpec] = []
     gate_stages = (
@@ -257,7 +359,7 @@ def evaluate_r002_unapproved_documents_in_gate_stages(
                 .first()
             )
             current_state = wf.state.value if (wf and hasattr(wf.state, "value")) else (wf.state if wf else "draft")
-            if current_state != "approved":
+            if current_state in ("draft", "rejected"):
                 stage_name = stage_name_map.get(stage.stage_id, stage.name)
                 findings.append(
                     FindingSpec(
@@ -388,6 +490,22 @@ def evaluate_r004_stale_document_references(
     - newer available version
     - relevant stage/context
     - why the reference is stale
+
+    Master Plan v2, item 13 — STRUCTURALLY INACTIVE TODAY, documented rather
+    than deleted or hidden: this rule can only fire on an edge whose
+    properties carry "referenced_version_number" or "referenced_version_id"
+    (a reference pinned to a SPECIFIC version, not just the document).
+    Verified: neither extraction path (relationship_extractor.py's regex
+    pass, nor llm_extraction.py's LLM pass) ever writes either key — every
+    REFERENCES/DEPENDS_ON edge today only names a target DOCUMENT, never a
+    specific version of one. Given that, `referenced_version_number` is
+    always None below, so every edge hits `continue` and this rule produces
+    zero findings, unconditionally, under the current architecture. Kept
+    registered (not deleted) because the logic itself is legitimate and
+    becomes real the moment either extractor is extended to capture a
+    version-pinned reference (e.g. "see Design Doc v2") — at which point this
+    rule needs no changes to start working. Severity kept LOW/non-blocking
+    per the plan's policy call: staleness is informational even when real.
     """
     findings: List[FindingSpec] = []
     docs_in_scope = (
@@ -468,7 +586,7 @@ def evaluate_r004_stale_document_references(
             findings.append(
                 FindingSpec(
                     rule_code="R004",
-                    severity="MEDIUM",
+                    severity="LOW",
                     is_blocker=False,
                     title="Stale Document Reference",
                     description=(
@@ -565,124 +683,7 @@ def evaluate_r005_dependency_cycles(
     return findings
 
 
-def evaluate_r006_orphan_entities(
-    db: Session,
-    tenant_id: uuid.UUID,
-    project_id: uuid.UUID,
-    evaluated_stage_ids: List[uuid.UUID],
-    stage_name_map: Dict[uuid.UUID, str],
-) -> List[FindingSpec]:
-    """
-    R006: True Orphan Entity.
-    Detects documents that lack a valid/required relationship for normal project operation:
-    - no valid active project association
-    - no valid active stage assignment (missing or unmapped to project's active stages)
-    - no owner team where ownership is required (uploaded_as_team_id missing or not in project)
-
-    Does NOT classify legitimate tenant-level entities (e.g. user nodes) as orphans.
-    Distinguishes intentionally archived/deleted stages (where historical references are allowed).
-    """
-    findings: List[FindingSpec] = []
-
-    # Valid project teams
-    project_teams = db.query(Team).filter(Team.project_id == project_id).all()
-    project_team_ids = {t.team_id for t in project_teams}
-
-    # Valid active project stages
-    active_stages = (
-        db.query(Stage)
-        .filter(Stage.project_id == project_id, Stage.deleted_at.is_(None))
-        .all()
-    )
-    active_stage_ids = {s.stage_id for s in active_stages}
-
-    # Documents associated with this project or claimed to belong to evaluated stages
-    docs = db.query(Document).filter(Document.project_id == project_id).all()
-
-    for doc in docs:
-        doc_stage_id = getattr(doc, "stage_id", None)
-
-        # 1. Missing or invalid stage
-        if doc_stage_id is None or doc_stage_id not in active_stage_ids:
-            # Check if stage was intentionally soft-deleted (historical reference preserved)
-            is_soft_deleted_stage = False
-            if doc_stage_id is not None:
-                archived_stage = db.query(Stage).filter(Stage.stage_id == doc_stage_id).first()
-                if archived_stage and archived_stage.deleted_at is not None:
-                    is_soft_deleted_stage = True
-
-            if not is_soft_deleted_stage:
-                findings.append(
-                    FindingSpec(
-                        rule_code="R006",
-                        severity="HIGH",
-                        is_blocker=True,
-                        title="Orphan Document: Missing Stage Assignment",
-                        description=f"Document '{doc.original_filename}' has no valid active stage assignment in project.",
-                        affected_entity_type="document",
-                        affected_entity_id=doc.document_id,
-                        target_stage_id=None,
-                        details={
-                            "entity_label": doc.original_filename,
-                            "orphan_reason": "missing_or_invalid_stage",
-                            "stage_id": str(doc_stage_id) if doc_stage_id else None,
-                        },
-                    )
-                )
-                continue
-
-        # If stage is valid, only evaluate if in evaluated stages
-        if doc_stage_id not in evaluated_stage_ids:
-            continue
-
-        stage_name = stage_name_map.get(doc_stage_id, "Unknown Stage")
-
-        # 2. Missing owner team where ownership is required
-        owner_team_id = getattr(doc, "uploaded_as_team_id", None)
-        if owner_team_id is None or owner_team_id not in project_team_ids:
-            findings.append(
-                FindingSpec(
-                    rule_code="R006",
-                    severity="HIGH",
-                    is_blocker=True,
-                    title="Orphan Document: Missing Owner Team",
-                    description=f"Document '{doc.original_filename}' in stage '{stage_name}' has no valid owner team assigned in this project.",
-                    affected_entity_type="document",
-                    affected_entity_id=doc.document_id,
-                    target_stage_id=doc_stage_id,
-                    details={
-                        "stage_name": stage_name,
-                        "entity_label": doc.original_filename,
-                        "orphan_reason": "missing_owner_team",
-                        "owner_team_id": str(owner_team_id) if owner_team_id else None,
-                    },
-                )
-            )
-
-        # 3. Invalid project association
-        if doc.project_id is None or doc.project_id != project_id:
-            findings.append(
-                FindingSpec(
-                    rule_code="R006",
-                    severity="HIGH",
-                    is_blocker=True,
-                    title="Orphan Document: Invalid Project Association",
-                    description=f"Document '{doc.original_filename}' has an invalid project association.",
-                    affected_entity_type="document",
-                    affected_entity_id=doc.document_id,
-                    target_stage_id=doc_stage_id,
-                    details={
-                        "entity_label": doc.original_filename,
-                        "orphan_reason": "invalid_project_association",
-                        "project_id": str(doc.project_id) if doc.project_id else None,
-                    },
-                )
-            )
-
-    return findings
-
-
-def evaluate_r007_permitted_stage_reference_violations(
+def evaluate_r006_permitted_stage_reference_violations(
 
     db: Session,
     tenant_id: uuid.UUID,
@@ -691,7 +692,7 @@ def evaluate_r007_permitted_stage_reference_violations(
     stage_name_map: Dict[uuid.UUID, str],
 ) -> List[FindingSpec]:
     """
-    R007: Permitted Stage Reference Violation.
+    R006: Permitted Stage Reference Violation.
     Document in Stage A references a document in Stage B, but no ALLOWED_REFERENCE
     exists between Stage A and Stage B.
     """
@@ -743,7 +744,7 @@ def evaluate_r007_permitted_stage_reference_violations(
                         stage_b_name = stage_name_map.get(target_doc.stage_id, "Stage B")
                         findings.append(
                             FindingSpec(
-                                rule_code="R007",
+                                rule_code="R006",
                                 severity="HIGH",
                                 is_blocker=True,
                                 title="Cross-Stage Reference Violation",
@@ -763,7 +764,7 @@ def evaluate_r007_permitted_stage_reference_violations(
     return findings
 
 
-def evaluate_r008_unassigned_stage_requirements(
+def evaluate_r007_unassigned_stage_requirements(
     db: Session,
     tenant_id: uuid.UUID,
     project_id: uuid.UUID,
@@ -771,7 +772,7 @@ def evaluate_r008_unassigned_stage_requirements(
     stage_name_map: Dict[uuid.UUID, str],
 ) -> List[FindingSpec]:
     """
-    R008: Unassigned Stage Requirement.
+    R007: Unassigned Stage Requirement.
     Mandatory requirement exists in a stage where team_stage_access provides 0 teams with write access.
     """
     findings: List[FindingSpec] = []
@@ -792,7 +793,7 @@ def evaluate_r008_unassigned_stage_requirements(
                 stage_name = stage_name_map.get(stage_id, "Unknown Stage")
                 findings.append(
                     FindingSpec(
-                        rule_code="R008",
+                        rule_code="R007",
                         severity="MEDIUM",
                         is_blocker=False,
                         title="Unassigned Stage Requirement",
@@ -810,7 +811,7 @@ def evaluate_r008_unassigned_stage_requirements(
     return findings
 
 
-def evaluate_r009_document_contradictions(
+def evaluate_r008_document_contradictions(
     db: Session,
     tenant_id: uuid.UUID,
     project_id: uuid.UUID,
@@ -818,23 +819,34 @@ def evaluate_r009_document_contradictions(
     stage_name_map: Dict[uuid.UUID, str],
 ) -> List[FindingSpec]:
     """
-    R009: Contradictory Statements Across Documents.
+    R008: Contradictory Statements Across Documents.
     Evaluates semantic claims extracted into knowledge.claims for documents within evaluated stages.
     Flags direct contradictions (differing values or opposing polarities) as high-severity blockers.
+
+    Master Plan v2, item 9: combines the exact-match deterministic pass with
+    the additive embedding+LLM semantic pass (detect_semantic_contradictions)
+    — the latter catches contradictions phrased differently across documents
+    that exact (subject, predicate) grouping structurally cannot pair.
     """
     try:
-        from app.services.graph.claims_analyzer import detect_project_contradictions
-        return detect_project_contradictions(
-            db=db,
-            tenant_id=tenant_id,
-            project_id=project_id,
+        from app.services.graph.claims_analyzer import (
+            detect_project_contradictions,
+            detect_semantic_contradictions,
+        )
+        exact = detect_project_contradictions(
+            db=db, tenant_id=tenant_id, project_id=project_id,
             evaluated_stage_ids=evaluated_stage_ids,
         )
+        semantic = detect_semantic_contradictions(
+            db=db, tenant_id=tenant_id, project_id=project_id,
+            evaluated_stage_ids=evaluated_stage_ids,
+        )
+        return exact + semantic
     except (ImportError, ModuleNotFoundError):
         return []
 
 
-def evaluate_r010_pending_workflow_blockers(
+def evaluate_r009_pending_workflow_blockers(
     db: Session,
     tenant_id: uuid.UUID,
     project_id: uuid.UUID,
@@ -842,9 +854,9 @@ def evaluate_r010_pending_workflow_blockers(
     stage_name_map: Dict[uuid.UUID, str],
 ) -> List[FindingSpec]:
     """
-    R010: Pending Workflow Blocker.
+    R009: Pending Workflow Blocker.
     For stages where requires_approval = True, documents that are still awaiting approval
-    (status 'pending_review') generate an R010 blocker preventing the stage from exiting.
+    (status 'pending_review') generate an R009 blocker preventing the stage from exiting.
     Clearly distinct from R002 (which specifically flags unapproved draft or rejected documents).
     """
     findings: List[FindingSpec] = []
@@ -875,7 +887,7 @@ def evaluate_r010_pending_workflow_blockers(
                 stage_name = stage_name_map.get(stage.stage_id, stage.name)
                 findings.append(
                     FindingSpec(
-                        rule_code="R010",
+                        rule_code="R009",
                         severity="HIGH",
                         is_blocker=True,
                         title="Pending Workflow Blocker",
@@ -891,5 +903,171 @@ def evaluate_r010_pending_workflow_blockers(
                         },
                     )
                 )
+
+    return findings
+
+
+def evaluate_r010_document_coherence(
+    db: Session,
+    tenant_id: uuid.UUID,
+    project_id: uuid.UUID,
+    evaluated_stage_ids: List[uuid.UUID],
+    stage_name_map: Dict[uuid.UUID, str],
+) -> List[FindingSpec]:
+    """
+    R010: Document-Level Coherence (Master Plan v2, item 10) — the actual
+    "does this document's content make sense against the rest of the
+    project" check. Deliberately separate from R008 (cross-document claim
+    contradictions via the claims table) so the two don't get confused in
+    the UI: R008 is a claims-table sweep across all documents; R010 is one
+    document's content checked against retrieved related context.
+
+    Reads CACHED knowledge.document_coherence_checks rows only — never
+    calls the LLM during a sweep (see coherence.py's module docstring for
+    why: an audit can be triggered far more often than a document is
+    actually re-finalized). The cache is populated once per finalize by
+    coherence.run_document_coherence_check(), called from
+    audit_engine.extract_sync_and_audit_document().
+    """
+    findings: List[FindingSpec] = []
+    if not evaluated_stage_ids:
+        return findings
+
+    docs = (
+        db.query(Document)
+        .filter(Document.project_id == project_id, Document.stage_id.in_(evaluated_stage_ids))
+        .all()
+    )
+
+    for doc in docs:
+        if not doc.current_version_id:
+            continue
+
+        check = (
+            db.query(DocumentCoherenceCheck)
+            .filter(
+                DocumentCoherenceCheck.document_id == doc.document_id,
+                DocumentCoherenceCheck.version_id == doc.current_version_id,
+                DocumentCoherenceCheck.status == "completed",
+            )
+            .order_by(DocumentCoherenceCheck.completed_at.desc())
+            .first()
+        )
+        if not check or not check.issues:
+            continue
+
+        stage_name = stage_name_map.get(doc.stage_id, "Unknown Stage")
+
+        for issue in check.issues:
+            if not isinstance(issue, dict):
+                continue
+            confidence = issue.get("confidence", 0)
+            # Same confidence-gating principle as R001/R008 (item 9): a
+            # low-confidence (0.5-0.7) issue never becomes a direct finding.
+            if not isinstance(confidence, (int, float)) or confidence < DIRECT_FACT_CONFIDENCE_FLOOR:
+                continue
+
+            issue_type = issue.get("type", "unknown")
+            # Duplication is informational (not necessarily wrong), unlike an
+            # actual contradiction or a claimed-but-unmet requirement.
+            is_blocker = issue_type in ("contradiction", "unmet_requirement")
+
+            findings.append(
+                FindingSpec(
+                    rule_code="R010",
+                    severity="HIGH" if is_blocker else "MEDIUM",
+                    is_blocker=is_blocker,
+                    title=f"Document Coherence Issue: {issue_type.replace('_', ' ').title()}",
+                    description=issue.get("description", ""),
+                    affected_entity_type="document",
+                    affected_entity_id=doc.document_id,
+                    target_stage_id=doc.stage_id,
+                    details={
+                        "stage_name": stage_name,
+                        "entity_label": doc.original_filename,
+                        "issue_type": issue_type,
+                        "related_context": issue.get("related_context", ""),
+                        "confidence": confidence,
+                        "checked_at": check.completed_at.isoformat() if check.completed_at else None,
+                    },
+                )
+            )
+
+    return findings
+
+
+def evaluate_r011_scanner_flagged_current_version(
+    db: Session,
+    tenant_id: uuid.UUID,
+    project_id: uuid.UUID,
+    evaluated_stage_ids: List[uuid.UUID],
+    stage_name_map: Dict[uuid.UUID, str],
+) -> List[FindingSpec]:
+    """
+    R011: Scanner-Flagged Current Version.
+
+    UI_FIXES_2026-09-15.md #28/#30: the Structure Scanner's per-version
+    status (DocumentVersion.status == needs_attention, set by
+    document_finalize.py on a failed score or a flagged injection check) was
+    entirely invisible to the audit/findings system — R002/R009 only ever
+    look at the document-level WorkflowState (human approval), a completely
+    separate model. A document could show "needs_attention" in the Versions
+    panel while Intelligence's "What needs attention" showed nothing at all
+    for it. This rule closes that gap: it surfaces the CURRENT version only
+    (an old, superseded needs_attention version is not actionable — only
+    the current one blocks anything) whenever its status is needs_attention,
+    independent of the human-approval WorkflowState (a version can be
+    Scanner-flagged whether or not it's also pending/approved — this rule
+    and R002/R009 can both fire on the same document for different reasons).
+    """
+    findings: List[FindingSpec] = []
+    if not evaluated_stage_ids:
+        return findings
+
+    docs = (
+        db.query(Document)
+        .filter(Document.project_id == project_id, Document.stage_id.in_(evaluated_stage_ids))
+        .all()
+    )
+
+    for doc in docs:
+        if not doc.current_version_id:
+            continue
+        version = db.get(DocumentVersion, doc.current_version_id)
+        if version is None or version.status != DocumentStatus.needs_attention:
+            continue
+
+        stage_name = stage_name_map.get(doc.stage_id, "Unknown Stage")
+        scan = (
+            db.query(DocumentScan)
+            .filter(DocumentScan.version_id == version.version_id)
+            .order_by(DocumentScan.scan_id.desc())
+            .first()
+        )
+        score_note = f" (Structure Scanner score: {scan.overall_score}/60)" if scan else ""
+
+        findings.append(
+            FindingSpec(
+                rule_code="R011",
+                severity="HIGH",
+                is_blocker=True,
+                title="Scanner-Flagged Current Version",
+                description=(
+                    f"The current version of '{doc.original_filename}' in stage "
+                    f"'{stage_name}' was flagged by the Structure Scanner or the "
+                    f"injection check{score_note} — separate from its human-approval status."
+                ),
+                affected_entity_type="document",
+                affected_entity_id=doc.document_id,
+                target_stage_id=doc.stage_id,
+                details={
+                    "stage_name": stage_name,
+                    "entity_label": doc.original_filename,
+                    "version_id": str(version.version_id),
+                    "version_number": version.version_number,
+                    "scan_score": scan.overall_score if scan else None,
+                },
+            )
+        )
 
     return findings
