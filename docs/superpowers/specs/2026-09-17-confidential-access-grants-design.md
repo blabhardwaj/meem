@@ -773,7 +773,7 @@ These gaps — no per-target status lookup, no scope-aware approver UI, no expir
 
 ### Document scope (new)
 
-The locked placeholder document row (Section 8/9's redacted stub for a `blocked_by_sensitivity` document) gets a "Request access" action. It calls a new client method:
+The locked placeholder document row (Section 13.D's redacted stub for a `blocked_by_sensitivity` document) gets a "Request access" action. It calls a new client method:
 
 ```text
 accessRequestsApi.createForDocument(documentId)
@@ -889,6 +889,48 @@ Each `AccessRequestOut` row gains server-resolved `scope`, `target_id`, `target_
 ### Notification payload — structured routing
 
 `notify_access_request_created`/`notify_access_request_decided` already record `resource_type="access_request"`/`resource_id`. This section adds one field: an explicit `audience` (or `role_in_event`) value — `"approver"` for the created notification, `"requester"` for the decided notification — set at creation time. `TopNav.jsx`'s notification click-through (routing to the Pending Approvals tab or to "My Access Requests") is then a deterministic function of this structured field, never an inference from notification title wording.
+
+---
+
+## 13.D Document list redaction (locked rows)
+
+This decision predates the rest of Section 13 (it was settled during earlier, pre-architectural-pivot design work on the same underlying problem — "how does a user discover a confidential document exists at all") but was never transcribed into this document. It is recorded here now because Section 13.A's document-scope trigger depends on it existing somewhere concrete, and a plan task must not reference an undefined UI element.
+
+### The problem
+
+`GET /documents` (`app/routers/documents.py`) currently filters using `can_view_document()` — a plain boolean. A document that resolves to `blocked_by_sensitivity` is **silently dropped from the response entirely**, indistinguishable from a document that doesn't exist or that the user has no team relationship to at all (`not_visible`). This means a viewer/contributor has no way to discover that a confidential document exists on their own team before requesting access — the request is necessarily blind ("maybe there's something confidential here").
+
+### The decision
+
+`list_documents` is changed to use `classify_document_visibility()` (the three-way outcome, already defined in Section 2) instead of the boolean wrapper:
+
+```text
+fully_allowed          → serializes normally, exactly as today
+blocked_by_sensitivity → serializes as a redacted stub (see below)
+not_visible             → still dropped entirely, unchanged
+```
+
+### Redacted stub shape
+
+A `blocked_by_sensitivity` document is returned with a `locked: true` flag and only the following populated:
+
+```text
+document_id
+original_filename
+stage_id
+sensitivity_level
+uploaded_as_team_id   # needed so the client can pass it to Section 13.A's request-trigger UI
+```
+
+`workflow_state` and `uploaded_by` are omitted (`None`) — approval-lifecycle and authorship detail are not shown for content the user cannot open. No other field (content, version history, scan results) is ever included for a locked stub.
+
+### Frontend rendering
+
+`DocumentItem` renders a distinct locked variant when `doc.locked` is true: a dimmed row showing a lock icon, the filename, and the sensitivity badge, with the Section 13.A document-scope "Request access" trigger as its only action. The existing static banner in `SourcePanel.jsx` ("Some documents may be confidential — request access") is removed — it was compensating for content being entirely invisible, which is no longer the case once locked stubs render as real rows with a grounded, specific action.
+
+### Post-grant behavior
+
+No additional plumbing is required for a locked stub to become a full row once access is granted: `classify_document_visibility()` re-evaluates `resolve_effective_access()`-backed grant coverage on every call, so the very next `list_documents` fetch after an approval naturally returns the document as `fully_allowed` instead of `blocked_by_sensitivity`. The frontend does not need to special-case this transition — it is a consequence of the list simply being re-fetched (e.g. on the next page load, or a explicit refresh after the requester sees their request move to `granted` in "My Access Requests").
 
 ---
 
