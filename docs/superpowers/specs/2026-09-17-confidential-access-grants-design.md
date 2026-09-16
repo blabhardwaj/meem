@@ -4,7 +4,7 @@
 
 ### Status
 
-**Design phase — Sections 1–2 finalized, Section 3 pending**
+**Design phase — Sections 1–13 finalized. Two implementation-time decisions deliberately deferred (Section 14). Ready for implementation planning.**
 
 This specification defines scoped confidential-access grants that allow users to read confidential documents without granting them additional capabilities such as editing, submitting, approving, rejecting, deleting, or managing workflow state.
 
@@ -261,9 +261,74 @@ In particular, an access grant must never confer:
 
 ---
 
-# 4. Grant-Only Detection Helper
+# 4. Effective Access Resolution & the Grant-Only Detection Helper
 
-A new shared helper will be added to `access_control.py`:
+## 4.0 `resolve_effective_access()` — the single source of truth
+
+Both the read-only enforcement helper (`is_grant_only_confidential_access()`) and the requester-facing status endpoint (Section 13.C) need to answer variants of the same underlying question: *how, if at all, does this user currently have access to this specific target?*
+
+To prevent these two consumers from drifting into two independent implementations of that question, a single shared resolver is introduced in `access_control.py`:
+
+```python
+def resolve_effective_access(
+    db: Session,
+    user_id: UUID,
+    *,
+    document_id: UUID | None = None,
+    stage_id: UUID | None = None,
+    team_id: UUID | None = None,
+) -> EffectiveAccessResult:
+    ...
+```
+
+Exactly one of `document_id` / `stage_id` / `team_id` is provided per call — the caller is asking about one specific target.
+
+`EffectiveAccessResult` carries:
+
+```text
+status: "granted" | "pending" | "denied" | "expired" | "none"
+via_grant: bool          # only meaningful when status == "granted"
+expires_at: datetime | None
+request_id: UUID | None  # the request this verdict was derived from, if any
+```
+
+### 4.0.1 Resolution order
+
+```text
+resolve_effective_access()
+    │
+    ├─ native role access (org admin / project admin / team-lead+
+    │  on an applicable visible team)?
+    │      → granted, via_grant=False, expires_at=None
+    │
+    ├─ active document/stage/team grant covers this target?
+    │      → granted, via_grant=True, expires_at=<matching grant's expiry>
+    │
+    ├─ live pending request for this exact target?
+    │      → pending, expires_at=None
+    │
+    ├─ latest denied/expired request for this exact target?
+    │      → denied / expired (accordingly)
+    │
+    └─ nothing found
+           → none
+```
+
+Native role access is checked **first** and short-circuits the rest — a user with both native access and an active grant is reported as natively granted (`via_grant=False`), never as grant-only. This is the same precedence already established for document visibility (Section 2) and is what keeps a team_lead who also happens to hold a grant from ever being treated as read-only.
+
+Only when native access is absent does an active grant get consulted, and only when neither is present does request history (pending, then terminal) get consulted. A stale denied/expired request for a target the user now has an active grant for must never suppress the "granted" verdict — the resolver checks effective current access before it ever looks at request history.
+
+### 4.0.2 Open question: deterministic grant selection on overlap
+
+A target can, in principle, be covered by more than one active grant simultaneously — e.g. a document covered by both a document-scoped grant and a stage-scoped grant on the same stage. The resolved `status` is unambiguous (`granted`), but `expires_at`/`request_id` must come from exactly one of the overlapping grants, and the selection rule is not yet decided here.
+
+**This is left open, to be settled in the resolver's implementation plan** — not invented in this design document. The document > stage > team scope hierarchy already established elsewhere in this spec is the natural candidate for a narrowest-scope-wins rule, but the plan should decide and document this explicitly rather than leaving it to whichever query happens to return first.
+
+---
+
+## 4.1 `is_grant_only_confidential_access()` — thin consumer
+
+The read-only enforcement helper from the original design becomes a thin wrapper over the shared resolver rather than its own independent implementation:
 
 ```python
 def is_grant_only_confidential_access(
@@ -271,51 +336,17 @@ def is_grant_only_confidential_access(
     user_id: UUID,
     document: Document,
 ) -> bool:
-    ...
+    if document.sensitivity_level != SensitivityLevel.confidential:
+        return False
+    result = resolve_effective_access(db, user_id, document_id=document.document_id)
+    return result.status == "granted" and result.via_grant
 ```
 
-Its meaning is:
+Its meaning is unchanged from the original design:
 
 > Return `True` exactly when the document is confidential and the user's access to that document is coming from an approved confidential-access grant rather than native role-based access.
 
----
-
-## 4.1 Helper evaluation order
-
-The helper must first establish whether the user already has native access to confidential documents through their normal role.
-
-Conceptually:
-
-```text
-Is document confidential?
-    NO → False
-
-Is user an org admin?
-    YES → False
-
-Is user a project admin for this document?
-    YES → False
-
-Does user have team-lead+ role on a team
-that normally gives native access to this document?
-    YES → False
-
-Does user have an active confidential grant?
-    YES → True
-
-Otherwise
-    → False
-```
-
-The native-access checks include:
-
-* organization admin;
-* project admin;
-* team-lead-or-higher membership on an applicable visible team.
-
-The visible teams are again determined through `DocumentTeamVisibility`.
-
-This ordering is intentional.
+What changes is that this meaning is now expressed as a direct consequence of `resolve_effective_access()`'s `via_grant` field, rather than as a second, hand-written traversal of org admin → project admin → team-lead+ → grant. The evaluation order described conceptually in the original design (native access checked before grant) is now enforced structurally by the resolver itself, not re-derived here.
 
 If a user has both:
 
@@ -325,7 +356,7 @@ native role-based access
 confidential grant
 ```
 
-the user retains their normal capabilities. The grant does not downgrade a user's existing role.
+the user retains their normal capabilities. The grant does not downgrade a user's existing role. This guarantee now lives in one place (`resolve_effective_access()`) rather than being a property each consumer must independently get right.
 
 ---
 
@@ -707,25 +738,166 @@ The following are considered settled:
 * Brand-new document creation is outside grant-only mutation enforcement.
 * `document_id` and `stage_id` use `ON DELETE CASCADE`.
 * Existing `team_id` FK behavior remains unchanged.
+* `resolve_effective_access()` is the single shared resolver for target-level effective access, consumed by both `is_grant_only_confidential_access()` (mutation enforcement) and `GET /access-requests/status` (UI state) — neither independently re-derives grant precedence.
+* Native role access is checked before grant coverage, which is checked before request history (pending, then terminal) — this precedence lives in the resolver, not in each consumer.
+* The UI never reconstructs scope/target/grant-precedence logic; every trigger and status surface renders a server-resolved verdict.
+* Document/stage escalation in the request UI is presented as a deliberate, explicit broadening — never implied or automatic.
+* Team-scope requests keep their existing membership precondition, enforced server-side only.
+* `expires_at` is server-authoritative; any UI countdown is presentation-only, never separately stored state.
+* Notification routing (approver vs. requester) is driven by a structured `audience` field set at creation time, never inferred from notification title text.
 
-The following remains unresolved:
-
-* Exact behavior when `delete_stage()` encounters one or more confidential documents for which the actor has grant-only access: **hard-fail the stage deletion vs. partially execute while excluding/reporting those documents**.
+See **Section 14** for the complete, current list of deliberately deferred items — do not treat this section's earlier "unresolved" note as the final word; it has been superseded and folded into Section 14.
 
 ---
 
-# 13. Next Section
+# 13. UI & Request-Flow Design
 
-Before proceeding to implementation, the next design section should define the **UI/request flow**, including:
+## 13.0 Method
 
-* how a user requests access at document/stage/team scope;
-* how the scope is selected or inferred;
-* what information is shown to the requester;
-* how pending requests are represented;
-* how approvers see and act on scoped requests;
-* how granted access is communicated;
-* how expired grants are represented;
-* how the UI distinguishes ordinary visibility from grant-based read access;
-* and how the existing RAG/search experience interacts with the new grant types.
+This section was designed by first auditing the existing request/approval UI and backend flow as it stands today (not by assuming a design), then defining how the three scopes (document/stage/team) map onto that existing UX, then tracing the full lifecycle (request → pending → approval/rejection → grant → expiration) before deciding what UI changes are actually necessary.
 
-Implementation should not begin beyond the already-agreed design until these remaining architectural decisions are documented.
+### 13.0.1 Audit findings — current state before this design
+
+* **Requester side**: `ProjectWorkspace.jsx`'s "Request confidential access" modal is the only entry point in the direct-UI path. It lists every team where the caller is `viewer`/`contributor`, and calls `POST /access-requests` with body `{team_id}` only — no other field is sent. Status per team is derived from `GET /access-requests/mine`, inspecting only the caller's own, latest-per-team request.
+* **Approver side**: the "Pending Approvals" tab (`AdminPage.jsx`) lists every pending `AccessRequest` grouped by team, showing only requester identity + request date. There is no scope information today because no scope field exists yet; every request is implicitly team-wide, and approval unconditionally sets a flat 90-day expiry.
+* **Status visibility**: there is no dedicated "my requests" surface — status is visible only by reopening the exact modal that created the request. Nothing shows time-to-expiry; expiration is discovered reactively, after the fact, by process of elimination (`status == approved && !active` renders as "expired").
+* **Second entry point**: `app/tools/rag_tools.py`'s `request_confidential_access` tool is a parallel, agent-initiated path into the identical `request_confidential_access()` service function, triggered when the LLM decides the user has agreed to a scripted access-request offer. It is one-shot/fire-and-forget with no follow-up status mechanism of its own.
+* **Notifications**: `notify_access_request_created`/`notify_access_request_decided` fire real per-recipient notification rows with `resource_type="access_request"`/`resource_id` already attached, but are title-only (no body) and the `TopNav.jsx` bell UI renders them as inert text — no click-through to the Pending Approvals tab or to any status view exists today.
+* **Document-row visibility change**: once a grant is approved, a previously-hidden document simply appears in the list on the next fetch, indistinguishable from a document the user could always see — there is no "you can see this because of a grant" indicator anywhere.
+
+These gaps — no per-target status lookup, no scope-aware approver UI, no expiry countdown, inert notifications — are what the rest of this section addresses, in addition to wiring in the new document/stage scopes.
+
+---
+
+## 13.A Request triggers per scope
+
+### Document scope (new)
+
+The locked placeholder document row (Section 8/9's redacted stub for a `blocked_by_sensitivity` document) gets a "Request access" action. It calls a new client method:
+
+```text
+accessRequestsApi.createForDocument(documentId)
+    → POST /access-requests
+      { scope: "document", document_id: documentId }
+```
+
+**No `team_id` crosses the client/server boundary.** The server derives it from the document's `uploaded_as_team_id`, per Section 1.1's invariant. This is a direct extension of the existing trust boundary (today's `POST /access-requests` already only accepts `team_id` from the client for team-scope requests) — document/stage requests extend the same pattern with `document_id`/`stage_id` instead, never `team_id`.
+
+### Stage scope (new)
+
+Surfaced as an explicit escalation from the document context, worded to make the broadening deliberate rather than implied:
+
+> "Need access to more documents in this stage? Request stage access."
+
+```text
+accessRequestsApi.createForStage(stageId)
+    → POST /access-requests
+      { scope: "stage", stage_id: stageId }
+```
+
+The UI must not make it seem as though requesting stage access is the same action as, or an automatic consequence of, requesting document access — it is presented as a distinct, broader choice the user makes deliberately. The escalation reads as:
+
+```text
+this document
+     ↓ broader
+this stage
+     ↓ broader
+this team
+```
+
+### Team scope (existing, repurposed)
+
+The existing `ProjectWorkspace` modal is kept, not replaced, and becomes the explicit entry point for the broadest tier:
+
+> **Team access** — request access to confidential documents shared with this team.
+
+Its existing membership precondition (`viewer`/`contributor` already on that team, checked in `request_confidential_access()`) is unchanged and remains enforced **server-side only** — the UI may explain why the option isn't available to a given user, but never becomes the authority deciding eligibility.
+
+### Trigger state machine (applies to all three scopes)
+
+Because there are now three independent entry points into request creation, every trigger must be state-aware rather than unconditionally rendering "Request access" — otherwise a user could accumulate multiple redundant pending requests for the same effective target. Each trigger queries its exact scope+target's current state (Section 13.C) before rendering:
+
+```text
+none            → "Request access"
+pending         → "Pending review" (inert, not clickable)
+granted         → "Granted" (+ expiry countdown if via_grant; see 13.C)
+denied/expired  → "Request access" (retry)
+```
+
+This state is qualified by **exact scope + target** — an active grant for document A must not suppress the request trigger for stage X even though document A belongs to stage X, and conversely a team-wide grant must not make every individual document trigger read "Granted" unless that specific document actually resolves as visible through the grant. The underlying resolution (Section 4.0's `resolve_effective_access()`) is authoritative; the frontend renders its verdict and performs no grant-matching logic of its own.
+
+---
+
+## 13.B Approver-side scope display & requester status visibility
+
+### Approver side (Pending Approvals tab)
+
+Each request row's copy becomes scope-specific, so the approver knows the object being granted without needing to infer it from the requester's team membership:
+
+```text
+document → "{requester} requests access to {filename}"
+stage    → "{requester} requests access to the {stage name} stage"
+team     → "{requester} requests team-wide access"
+```
+
+The row also displays the grant duration that **will** apply if approved (72 hours for document scope, 90 days for stage/team scope, per Section 1.3) — computed and supplied by the server, not hard-coded as frontend policy. Approve/Deny remain exactly as they are mechanically: `POST .../approve` / `POST .../deny` with no body — the stored `AccessRequest` row (including its scope) remains the sole authority; the client supplies no scope or TTL at decision time.
+
+### Requester status visibility — "My Access Requests"
+
+A dedicated status surface is introduced (exact placement — dedicated page vs. panel/drawer off the notification bell — is a UI-placement detail for the implementation plan, not an architectural decision). It lists every request the caller has made, each row showing: scope, target name, status, and an expiry countdown when applicable.
+
+Per-row expiry follows one rule: **`expires_at` is server-authoritative; any countdown shown ("expires in 11 hours") is a presentation-layer computation over it, never a separately stored or trusted piece of state.** A `pending` row has no `expires_at` yet and shows no countdown — only once a request resolves to `granted` does an expiry exist to display.
+
+---
+
+## 13.C API shape — effective-state resolution, not raw row lookups
+
+The governing rule for this whole section:
+
+> `/access-requests/status` is an **effective-state endpoint**, not a raw request-row lookup. The server resolves current grant coverage and pending/terminal request state for the exact target, using the same authoritative access-resolution semantics as document visibility (`resolve_effective_access()`, Section 4.0). The frontend only renders the returned verdict — it performs no scope/target matching, grant-precedence, or expiry logic of its own.
+
+### `GET /access-requests/status?document_id=... | stage_id=... | team_id=...`
+
+New endpoint. Given exactly one target, calls `resolve_effective_access()` (Section 4.0) for the caller and returns its `EffectiveAccessResult` directly:
+
+```text
+{
+  status: "none" | "pending" | "granted" | "denied" | "expired",
+  via_grant: bool,           // only meaningful when status == "granted"
+  expires_at: string | null,
+  request_id: string | null
+}
+```
+
+This is what every Section 13.A trigger calls to render its state, and what closes the "frontend must not reconstruct grant logic" requirement — the two questions "is there a request for this target" and "does this user currently have effective read access to this target" are both resolved server-side, by the same function that governs actual document visibility and read-only enforcement, and are never conflated or re-derived in the browser.
+
+### `GET /access-requests/mine` — kept, distinct purpose
+
+Retained as-is in spirit (extended with `scope`/`target_name` for display), but now has a clearly distinct role from `/status`:
+
+```text
+/mine              → lifecycle/history surface (every request the caller ever made)
+/status?target=...  → point-in-time effective state for one exact target
+```
+
+`/mine` feeds the "My Access Requests" surface (13.B); `/status` feeds the per-target trigger state machine (13.A). Neither reimplements the other.
+
+### `GET /access-requests/pending` — enriched
+
+Each `AccessRequestOut` row gains server-resolved `scope`, `target_id`, `target_name`, and `grant_duration` — the approver-side copy and duration-preview in 13.B render directly off these fields; no scope-to-duration business logic (e.g. "documents get 72 hours") is duplicated in the frontend.
+
+### Notification payload — structured routing
+
+`notify_access_request_created`/`notify_access_request_decided` already record `resource_type="access_request"`/`resource_id`. This section adds one field: an explicit `audience` (or `role_in_event`) value — `"approver"` for the created notification, `"requester"` for the decided notification — set at creation time. `TopNav.jsx`'s notification click-through (routing to the Pending Approvals tab or to "My Access Requests") is then a deterministic function of this structured field, never an inference from notification title wording.
+
+---
+
+# 14. Status & Remaining Open Items
+
+Sections 1–13 are now finalized as the checkpoint design. The following are the only items deliberately left open, each explicitly flagged at its point of origin above rather than silently assumed:
+
+* **`delete_stage()` bulk-reassignment behavior** (Section 7): hard-fail the whole stage deletion vs. partially execute while excluding/reporting grant-only-inaccessible documents. Does not block UI design and can be resolved independently.
+* **Deterministic grant selection on multi-grant overlap** (Section 4.0.2): when a target is covered by more than one active grant simultaneously, which one's `expires_at`/`request_id` is surfaced. A narrowest-scope-wins rule is the natural candidate given the document > stage > team hierarchy, but the exact rule is deferred to the resolver's implementation plan.
+* **"My Access Requests" UI placement** (Section 13.B): dedicated page vs. panel/drawer off the notification bell — an implementation-time UI decision, not an architectural one.
+
+No other section carries an open decision. The next step is the implementation plan (via the writing-plans skill), which should address the two deferred rules above explicitly before or during implementation rather than leaving them to be decided ad hoc in code.
