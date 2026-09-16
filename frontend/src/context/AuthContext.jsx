@@ -51,19 +51,39 @@ export const AuthProvider = ({ children }) => {
     }
   }, []);
 
-  // Capture ?auth_token=... from the Google OAuth callback redirect.
+  // Capture ?oauth_code=... from the Google OAuth callback redirect.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const incoming = params.get('auth_token');
-    if (incoming) {
-      setToken(incoming);
+    const code = params.get('oauth_code');
+    const legacyToken = params.get('auth_token');
+
+    if (code) {
+      params.delete('oauth_code');
+      params.delete('is_new_user');
+      const clean = window.location.pathname + (params.toString() ? `?${params}` : '');
+      window.history.replaceState({}, '', clean);
+
+      authApi.exchangeOAuth(code)
+        .then(({ access_token }) => {
+          setToken(access_token);
+          loadUser();
+        })
+        .catch((err) => {
+          console.error('OAuth exchange failed:', err);
+          loadUser();
+        });
+    } else if (legacyToken) {
+      setToken(legacyToken);
       params.delete('auth_token');
       params.delete('is_new_user');
       const clean = window.location.pathname + (params.toString() ? `?${params}` : '');
       window.history.replaceState({}, '', clean);
+      loadUser();
+    } else {
+      loadUser();
     }
-    loadUser();
   }, [loadUser]);
+
 
   const login = async (email, password) => {
     const { access_token } = await authApi.login(email, password);
@@ -71,16 +91,14 @@ export const AuthProvider = ({ children }) => {
     await loadUser();
   };
 
-  const signup = async (data) => {
-    const { access_token } = await authApi.signup(data);
+  const registerOrg = async (data) => {
+    const { access_token } = await authApi.registerOrg(data);
     setToken(access_token);
     await loadUser();
   };
 
-  // Kept so his "Continue as Super Admin" button still renders; the call
-  // rejects with a "not connected" message that his LoginPage surfaces.
-  const loginSuperAdmin = async () => {
-    const { access_token } = await authApi.superAdmin();
+  const acceptInvite = async (data) => {
+    const { access_token } = await authApi.acceptInvite(data);
     setToken(access_token);
     await loadUser();
   };
@@ -103,9 +121,8 @@ export const AuthProvider = ({ children }) => {
         loading,
         isAuthenticated: !!user,
         login,
-        signup,
-        loginSuperAdmin,
-        loginDemo: loginSuperAdmin,
+        registerOrg,
+        acceptInvite,
         loginWithGoogle,
         logout,
         refresh: loadUser,

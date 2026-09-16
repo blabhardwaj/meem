@@ -1,8 +1,7 @@
 import React, { useState } from 'react';
-import { Navigate, useSearchParams } from 'react-router-dom';
+import { Navigate } from 'react-router-dom';
 import { Sparkles } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { authApi } from '../lib/api';
 import Input from '../components/ui/Input';
 import Button from '../components/ui/Button';
 
@@ -16,17 +15,18 @@ const GoogleIcon = (props) => (
 );
 
 const LoginPage = () => {
-  const { isAuthenticated, login, signup, loginSuperAdmin, loginWithGoogle } = useAuth();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const resetToken = searchParams.get('reset_token');
-  const [mode, setMode] = useState(resetToken ? 'reset' : 'login'); // login | signup | forgot | reset
-  const [form, setForm] = useState({
-    email: '', password: '', full_name: '', organization: '', team_name: '', job_title: '',
-  });
+  const { isAuthenticated, login, registerOrg, loginWithGoogle } = useAuth();
+  const [mode, setMode] = useState('login'); // login | register_org
+  const [form, setForm] = useState({ email: '', password: '', full_name: '', organization: '' });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  // A brand-new org lands on the onboarding wizard instead of the ordinary
+  // "/" redirect below — set right before registerOrg() resolves so this
+  // component's own re-render (from isAuthenticated flipping true) picks
+  // the right target instead of racing a separate navigate() call.
+  const [justRegisteredOrg, setJustRegisteredOrg] = useState(false);
 
-  if (isAuthenticated) return <Navigate to="/" replace />;
+  if (isAuthenticated) return <Navigate to={justRegisteredOrg ? '/onboarding' : '/'} replace />;
 
   const update = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
 
@@ -37,31 +37,14 @@ const LoginPage = () => {
     try {
       if (mode === 'login') {
         await login(form.email, form.password);
-      } else if (mode === 'signup') {
-        await signup(form);
-      } else if (mode === 'forgot') {
-        await authApi.forgotPassword(form.email);
-        setError('If an account exists, a password-reset email has been sent.');
       } else {
-        await authApi.resetPassword(resetToken, form.password);
-        setSearchParams({});
-        setMode('login');
-        setError('Password reset. You can now sign in.');
+        await registerOrg({
+          org_name: form.organization, email: form.email, password: form.password, full_name: form.full_name,
+        });
+        setJustRegisteredOrg(true);
       }
     } catch (err) {
       setError(err.detail?.detail || err.message || 'Something went wrong.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleSuperAdmin = async () => {
-    setError('');
-    setBusy(true);
-    try {
-      await loginSuperAdmin();
-    } catch (err) {
-      setError(err.message || 'Could not start super-admin access.');
     } finally {
       setBusy(false);
     }
@@ -74,7 +57,7 @@ const LoginPage = () => {
           <div className="flex items-center gap-2 text-sm font-bold uppercase tracking-[0.2em] text-primary mb-8"><Sparkles size={17} /> DocFlow AI</div>
           <h1 className="text-6xl font-bold tracking-tight text-gray-100 leading-[1.05]">Your work,<br /><span className="text-primary">in flow.</span></h1>
           <p className="text-lg text-gray-500 mt-6 max-w-md leading-relaxed">Turn scattered project documents into decisions, drafts, and momentum your whole team can see.</p>
-          <div className="flex gap-8 mt-12 text-sm text-gray-500"><span><strong className="block text-2xl text-gray-900">01</strong>Collect sources</span><span><strong className="block text-2xl text-gray-900">02</strong>Ask &amp; analyze</span><span><strong className="block text-2xl text-gray-900">03</strong>Draft forward</span></div>
+          <div className="flex gap-8 mt-12 text-sm text-gray-500"><span><strong className="block text-2xl text-gray-200">01</strong>Collect sources</span><span><strong className="block text-2xl text-gray-200">02</strong>Ask &amp; analyze</span><span><strong className="block text-2xl text-gray-200">03</strong>Draft forward</span></div>
         </div>
         <div>
         <div className="text-center mb-8">
@@ -83,69 +66,72 @@ const LoginPage = () => {
             DocFlow <span className="text-primary">AI</span>
           </div>
           <p className="text-gray-400 mt-2">
-            {mode === 'login' ? 'Sign in to your workspace' : 'Create your workspace account'}
+            {mode === 'login' ? 'Sign in to your workspace' : 'Create a new organization'}
           </p>
         </div>
 
         <div className="bg-surface border border-border rounded-xl p-6 shadow-lg shadow-black/20">
           <form onSubmit={handleSubmit} className="space-y-4">
-            {mode === 'signup' && (
+            {mode === 'register_org' && (
               <>
-                <Input label="Full name" required value={form.full_name} onChange={update('full_name')} placeholder="Jane Doe" />
-                <div className="grid grid-cols-2 gap-3">
-                  <Input label="Organization" required value={form.organization} onChange={update('organization')} placeholder="Acme Inc" />
-                  <Input label="Team" required value={form.team_name} onChange={update('team_name')} placeholder="Engineering" />
-                </div>
-                <Input label="Job title" required value={form.job_title} onChange={update('job_title')} placeholder="Product Manager" />
+                <Input label="Organization name" required value={form.organization} onChange={update('organization')} placeholder="Acme Inc" />
+                <Input label="Your full name" value={form.full_name} onChange={update('full_name')} placeholder="Jane Doe" />
               </>
             )}
             <Input label="Email" type="email" required value={form.email} onChange={update('email')} placeholder="you@company.com" />
-            {mode !== 'forgot' && <Input label={mode === 'reset' ? 'New password' : 'Password'} type="password" required value={form.password} onChange={update('password')} placeholder="••••••••" />}
+            <Input label="Password" type="password" required value={form.password} onChange={update('password')} placeholder="••••••••" />
 
             {error && <p className="text-sm text-red-400">{error}</p>}
 
-            <Button type="submit" className="w-full" loading={busy}>
-              {mode === 'login' ? 'Sign in' : mode === 'signup' ? 'Create account' : mode === 'forgot' ? 'Send reset link' : 'Reset password'}
+            <Button type="submit" className="w-full" loading={busy} disabled={busy}>
+              {mode === 'login' ? 'Sign in' : 'Create organization'}
             </Button>
           </form>
 
-          <div className="flex items-center gap-3 my-5">
-            <div className="h-px bg-border flex-1" />
-            <span className="text-xs text-gray-500 uppercase">or</span>
-            <div className="h-px bg-border flex-1" />
-          </div>
-
-          {mode === 'login' && <div className="space-y-3">
-            <Button
-              type="button"
-              variant="secondary"
-              className="w-full"
-              onClick={loginWithGoogle}
-            >
-              <GoogleIcon className="mr-2" />
-              Continue with Google
-            </Button>
-            <Button type="button" variant="ghost" className="w-full" onClick={handleSuperAdmin} loading={busy}>
-              Continue as Super Admin
-            </Button>
-          </div>}
           {mode === 'login' && (
-            <button type="button" className="mt-4 w-full text-sm text-primary-light hover:underline" onClick={() => { setError(''); setMode('forgot'); }}>
-              Forgot password?
-            </button>
+            <>
+              <div className="flex items-center gap-3 my-5">
+                <div className="h-px bg-border flex-1" />
+                <span className="text-xs text-gray-500 uppercase">or</span>
+                <div className="h-px bg-border flex-1" />
+              </div>
+              <div className="space-y-3">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="w-full"
+                  onClick={loginWithGoogle}
+                  disabled={busy}
+                >
+                  <GoogleIcon className="mr-2" />
+                  Continue with Google
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  className="w-full"
+                  onClick={() => { setError(''); setMode('register_org'); }}
+                  disabled={busy}
+                >
+                  Create an Organization
+                </Button>
+              </div>
+            </>
           )}
         </div>
 
-        <p className="text-center text-sm text-gray-500 mt-6">
-          {mode === 'login' || mode === 'forgot' || mode === 'reset' ? "Don't have an account? " : 'Already have an account? '}
-          <button
-            type="button"
-            className="text-primary-light hover:underline"
-            onClick={() => { setError(''); setMode(mode === 'signup' ? 'login' : 'signup'); }}
-          >
-            {mode === 'signup' ? 'Sign in' : 'Sign up'}
-          </button>
-        </p>
+        {mode === 'register_org' && (
+          <p className="text-center text-sm text-gray-500 mt-6">
+            Already have an account?{' '}
+            <button
+              type="button"
+              className="text-primary-light hover:underline"
+              onClick={() => { setError(''); setMode('login'); }}
+            >
+              Sign in
+            </button>
+          </p>
+        )}
         </div>
       </div>
     </div>

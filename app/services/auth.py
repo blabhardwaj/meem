@@ -32,8 +32,10 @@ from dataclasses import dataclass
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
+
+from datetime import datetime, timedelta, timezone
 
 from app.config import (
     FRONTEND_URL,
@@ -49,6 +51,30 @@ from app.models.user import User
 
 _PBKDF2_ALGO = "sha256"
 _PBKDF2_PREFIX = "pbkdf2_sha256"
+
+# --- login lockout ------------------------------------------------------------
+
+MAX_FAILED_LOGIN_ATTEMPTS = 10
+LOCKOUT_DURATION_MINUTES = 15
+
+
+def is_locked_out(user: User) -> bool:
+    return bool(user.locked_until and user.locked_until > datetime.now(timezone.utc))
+
+
+def record_failed_login(db: Session, user: User) -> None:
+    """Bump the failure counter; lock the account once the threshold is hit."""
+    user.failed_login_attempts = (user.failed_login_attempts or 0) + 1
+    if user.failed_login_attempts >= MAX_FAILED_LOGIN_ATTEMPTS:
+        user.locked_until = datetime.now(timezone.utc) + timedelta(minutes=LOCKOUT_DURATION_MINUTES)
+    db.add(user)
+
+
+def clear_failed_logins(db: Session, user: User) -> None:
+    if user.failed_login_attempts or user.locked_until:
+        user.failed_login_attempts = 0
+        user.locked_until = None
+        db.add(user)
 
 
 # --- password hashing --------------------------------------------------------
@@ -110,18 +136,19 @@ def _sign(value: str) -> str:
     return _b64e(mac)
 
 
-def create_session_token(user_id: str) -> str:
-    """HMAC-signed token carrying the user id and an absolute expiry."""
+def create_session_token(user_id: str, token_version: int = 0) -> str:
+    """HMAC-signed token carrying the user id, token_version, and an absolute expiry."""
     payload = {
         "uid": str(user_id),
+        "tv": int(token_version),
         "exp": int(time.time()) + SESSION_TOKEN_TTL_SECONDS,
     }
     encoded = _encode(payload)
     return f"{encoded}.{_sign(encoded)}"
 
 
-def verify_session_token(token: str) -> str:
-    """Return the user id from a valid token; raise ValueError otherwise."""
+def verify_session_token(token: str) -> tuple[str, int]:
+    """Return (user_id, token_version) from a valid token; raise ValueError otherwise."""
     try:
         encoded, signature = token.split(".", 1)
     except (AttributeError, ValueError) as exc:
@@ -134,7 +161,7 @@ def verify_session_token(token: str) -> str:
         raise ValueError("Malformed token payload") from exc
     if not payload.get("uid") or int(payload.get("exp", 0)) < int(time.time()):
         raise ValueError("Expired or invalid token")
-    return str(payload["uid"])
+    return str(payload["uid"]), int(payload.get("tv", 0))
 
 
 # --- Google OAuth2 --------------------------------------------------------------
@@ -238,12 +265,29 @@ def exchange_google_code(code: str) -> dict:
     }
 
 
-def post_login_redirect_url(token: str, *, is_new_user: bool = False) -> str:
+_exchange_store: dict[str, tuple[str, float]] = {}  # {code: (token, expiry_timestamp)}
+
+
+def create_oauth_exchange_code(token: str) -> str:
+    code = secrets.token_urlsafe(16)
+    _exchange_store[code] = (token, time.time() + 30)  # 30-second TTL
+    return code
+
+
+def consume_exchange_code(code: str) -> str:
+    entry = _exchange_store.pop(code, None)
+    if not entry or entry[1] < time.time():
+        raise ValueError("Invalid or expired exchange code")
+    return entry[0]
+
+
+def post_login_redirect_url(code: str, *, is_new_user: bool = False) -> str:
     """Where the Google callback sends the browser once a session token exists."""
-    params = {"auth_token": token}
+    params = {"oauth_code": code}
     if is_new_user:
         params["is_new_user"] = "true"
     return f"{FRONTEND_URL.rstrip('/')}/?{urlencode(params)}"
+
 
 
 # --- resolved identity (our per-team model, NOT his UserContext) ---------------
@@ -285,15 +329,23 @@ class ResolvedIdentity:
         return membership.role.value if membership else "viewer"
 
 
-def resolve_identity(db: Session, user_id: uuid.UUID) -> ResolvedIdentity:
+def resolve_identity(
+    db: Session, user_id: uuid.UUID, token_version: int | None = None
+) -> ResolvedIdentity:
     """
     Build the full picture: every UserTeamMembership row (per-team role),
     every ProjectAdmin scope, plus the org-level flag. No collapsing.
-    Raises ValueError if the user id doesn't exist.
+    Raises ValueError if the user id doesn't exist, or if `token_version` is
+    given and doesn't match the user's current one (invalidated by a
+    password change).
     """
     user = db.get(User, user_id)
     if user is None:
         raise ValueError("User not found")
+    if token_version is not None and token_version != user.token_version:
+        raise ValueError("Session has been invalidated")
+
+    db.execute(text("SET LOCAL app.current_tenant_id = :tid"), {"tid": str(user.tenant_id)})
 
     memberships = db.execute(
         select(UserTeamMembership).where(UserTeamMembership.user_id == user.user_id)
