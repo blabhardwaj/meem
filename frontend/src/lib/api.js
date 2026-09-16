@@ -9,10 +9,10 @@
 //              show live data in his own layout.
 //   - STUBBED: everything with no backend yet (projectsApi.create/activity,
 //              document versions/delete, ragApi, chatApi, agentsApi, studioApi,
-//              notesApi, adminApi, notificationsApi, password reset,
-//              super-admin). Every stub rejects with a clear
-//              "not connected yet" ApiError so the calling screen shows a
-//              message in that section instead of failing silently.
+//              notesApi, adminApi, password reset, super-admin). Every stub
+//              rejects with a clear "not connected yet" ApiError so the
+//              calling screen shows a message in that section instead of
+//              failing silently. notificationsApi is REAL (see below).
 
 export const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
 
@@ -84,22 +84,34 @@ const SENSITIVITY_TO_INT = { public: 0, internal: 1, confidential: 2 };
 export const authApi = {
   login: (email, password) =>
     request('/auth/login', { method: 'POST', body: { email, password }, auth: false }),
-  // his LoginPage calls signup(formObject); AuthContext narrows it to email+password
-  signup: (data) =>
-    request('/auth/signup', {
+  // creates a brand-new Tenant + its first user (org_admin)
+  registerOrg: (data) =>
+    request('/auth/register-org', {
       method: 'POST', auth: false,
-      body: { email: data.email, password: data.password },
+      body: {
+        org_name: data.org_name,
+        email: data.email,
+        password: data.password,
+        full_name: data.full_name || null,
+      },
+    }),
+  // redeem an admin-issued invite token
+  acceptInvite: (data) =>
+    request('/auth/accept-invite', {
+      method: 'POST', auth: false,
+      body: { token: data.token, password: data.password, full_name: data.full_name || null },
     }),
   me: () => request('/auth/me'),
   googleAuthorize: () =>
     request('/auth/google/authorize', { auth: false, credentials: 'include' }),
-
-  // no backend for these:
-  forgotPassword: () => notConnected('password reset'),
-  resetPassword: () => notConnected('password reset'),
-  changePassword: () => notConnected('change password'),
-  superAdmin: () => notConnected('super-admin login'),
-  demo: () => notConnected('demo login'),
+  exchangeOAuth: (code) =>
+    request('/auth/exchange', { method: 'POST', body: { code }, auth: false }),
+  // change own password -> bumps token_version, invalidating every other session
+  changePassword: (currentPassword, newPassword) =>
+    request('/auth/password', {
+      method: 'PUT',
+      body: { current_password: currentPassword, new_password: newPassword },
+    }),
 };
 
 // ---------- Workspace helper (project/team/stage names + ids) ----------
@@ -126,6 +138,7 @@ function mapDocs(rows, project) {
     stage_id: d.stage_id,
     sensitivity_level: SENSITIVITY_TO_INT[d.sensitivity_level] ?? 1,
     workflow_state: d.workflow_state,
+    uploaded_by: d.uploaded_by,
     uploaded_as_team_id: d.uploaded_as_team_id,
     team_name: teamName(d.uploaded_as_team_id),
     project_id: project?.project_id || null,
@@ -148,10 +161,14 @@ export const projectsApi = {
     clearWorkspaceCache();
     return created;
   },
-  documents: async (projectId) => {
+  // includeDrafts is only honoured server-side for org_admin/project_admin —
+  // a regular contributor always gets just their own drafts either way.
+  documents: async (projectId, { includeDrafts = false } = {}) => {
     const ws = await workspace();
     const project = ws.projects.find((p) => p.project_id === projectId);
-    const rows = await request(`/documents?project_id=${encodeURIComponent(projectId)}`);
+    const rows = await request(
+      `/documents?project_id=${encodeURIComponent(projectId)}&include_drafts=${includeDrafts}`,
+    );
     return mapDocs(rows, project);
   },
   pendingApprovals: async (projectId) => {
@@ -218,6 +235,37 @@ export const stagesApi = {
     clearWorkspaceCache();
     return r;
   },
+  // Required-document checklist for a stage — what R001 evaluates for
+  // mandatory evidence, and what "X/Y requirements satisfied" counts.
+  // -> [{ requirement_id, stage_id, name, description, is_mandatory, source, created_at }]
+  listRequirements: (projectId, stageId) =>
+    request(`/projects/${encodeURIComponent(projectId)}/stages/${encodeURIComponent(stageId)}/requirements`),
+  // body: { name, description?, is_mandatory? }
+  createRequirement: async (projectId, stageId, body) => {
+    const r = await request(
+      `/projects/${encodeURIComponent(projectId)}/stages/${encodeURIComponent(stageId)}/requirements`,
+      { method: 'POST', body },
+    );
+    clearWorkspaceCache();
+    return r;
+  },
+  // body: { name?, description?, is_mandatory? }
+  updateRequirement: async (projectId, stageId, requirementId, body) => {
+    const r = await request(
+      `/projects/${encodeURIComponent(projectId)}/stages/${encodeURIComponent(stageId)}/requirements/${encodeURIComponent(requirementId)}`,
+      { method: 'PATCH', body },
+    );
+    clearWorkspaceCache();
+    return r;
+  },
+  removeRequirement: async (projectId, stageId, requirementId) => {
+    const r = await request(
+      `/projects/${encodeURIComponent(projectId)}/stages/${encodeURIComponent(stageId)}/requirements/${encodeURIComponent(requirementId)}`,
+      { method: 'DELETE' },
+    );
+    clearWorkspaceCache();
+    return r;
+  },
 };
 
 // ---------- Teams (real backend) ----------
@@ -238,7 +286,7 @@ export const teamsApi = {
 
 // ---------- Documents ----------
 export const documentsApi = {
-  list: (projectId) => projectsApi.documents(projectId),
+  list: (projectId, opts) => projectsApi.documents(projectId, opts),
   listAll: () => notConnected('list all documents'),
   // body: { document_type, stage_id, content, team_id, sensitivity_level }
   upload: (data) => request('/documents/upload', { method: 'POST', body: data }),
@@ -272,15 +320,82 @@ export const documentsApi = {
     return payload;
   },
   uploadBatch: () => notConnected('batch upload'),
-  versions: () => notConnected('document versions'),
-  uploadVersion: () => notConnected('upload new version'),
-  remove: () => notConnected('delete document'),
-  openUrl: () => '#', // no download endpoint yet
+  // -> [{ version_id, version_number, approval_outcome, uploaded_by,
+  //        is_latest, is_live, can_delete, status, file_size_bytes, created_at }]
+  versions: (documentId) => request(`/documents/${encodeURIComponent(documentId)}/versions`),
+  // -> { version_id, version_number, content_markdown }
+  versionContent: (documentId, versionId) =>
+    request(`/documents/${encodeURIComponent(documentId)}/versions/${encodeURIComponent(versionId)}/content`),
+  // Per-version delete: your own draft/rejected version, only if it sits
+  // after the document's current live version. 204 No Content on success.
+  deleteVersion: (documentId, versionId) =>
+    request(`/documents/${encodeURIComponent(documentId)}/versions/${encodeURIComponent(versionId)}`, {
+      method: 'DELETE',
+    }),
+  // Line-level diff between any two of this document's versions (not tied
+  // to a review/chat session — a plain read).
+  // -> { added_lines, removed_lines, has_changes, unified_diff }
+  versionsDiff: (documentId, fromVersionId, toVersionId) =>
+    request(
+      `/documents/${encodeURIComponent(documentId)}/versions/diff?from_version_id=${encodeURIComponent(fromVersionId)}&to_version_id=${encodeURIComponent(toVersionId)}`
+    ),
+  // Master Plan v2, item 12: re-uploading an existing document. Never
+  // silently replaces the current version — returns a real diff + initial
+  // scan + a session_id to continue the review via versionReviewMessage.
+  // -> { document_id, session_id, diff, scan, scan_error, reformed_content,
+  //      injection_flagged, injection_findings, failed_criteria, reply }
+  uploadVersion: async (documentId, file) => {
+    const form = new FormData();
+    form.append('file', file);
+    const token = getToken();
+    const res = await fetch(`${API_BASE}/documents/${encodeURIComponent(documentId)}/upload-version`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: form,
+    });
+    const text = await res.text();
+    let payload = null;
+    if (text) { try { payload = JSON.parse(text); } catch { payload = text; } }
+    if (!res.ok) {
+      let detail = res.statusText || 'Upload failed';
+      if (payload && typeof payload.detail === 'string') detail = payload.detail;
+      throw new ApiError(detail, res.status, payload);
+    }
+    return payload;
+  },
+  // UI_FIXES_2026-09-15.md: edit the CURRENT document via chat, no file
+  // re-upload — seeds a version-review session from the current version's
+  // own content. Continue with versionReviewMessage exactly like uploadVersion.
+  // -> { document_id, session_id, reply }
+  startEdit: (documentId) =>
+    request(`/documents/${encodeURIComponent(documentId)}/start-edit`, { method: 'POST' }),
+  // One turn of the version-diff-review conversation (revise further, or
+  // finalize) — -> { reply, revised, finalized, diff, version_id,
+  // version_number, status, scan, scan_error, ..., workflow_reset }
+  versionReviewMessage: (documentId, sessionId, message) =>
+    request('/documents/review/version-message', {
+      method: 'POST',
+      body: { document_id: documentId, session_id: sessionId, message: message || '' },
+    }),
+  // Whole-document delete — project_admin/org_admin only. confirmText must
+  // be the literal word "delete" (also re-checked server-side). 204 on success.
+  remove: (documentId, confirmText) =>
+    request(`/documents/${encodeURIComponent(documentId)}`, {
+      method: 'DELETE', body: { confirm_text: confirmText },
+    }),
+  // -> { document_id, filename, version_id, version_number, version_status,
+  //      content_markdown, sensitivity_level, workflow_state, created_at,
+  //      scan_overall_score, scan_criteria, scan_passed, injection_flagged }
+  view: (documentId) => request(`/documents/${encodeURIComponent(documentId)}/view`),
 
   submit: (documentId) =>
     request(`/documents/${encodeURIComponent(documentId)}/submit`, { method: 'POST' }),
-  approve: (documentId) =>
-    request(`/documents/${encodeURIComponent(documentId)}/approve`, { method: 'POST' }),
+  // override=true only takes effect server-side for org_admin/project_admin —
+  // approve_document() re-checks the role itself, this flag alone grants nothing.
+  approve: (documentId, { override = false } = {}) =>
+    request(`/documents/${encodeURIComponent(documentId)}/approve`, {
+      method: 'POST', body: { override },
+    }),
   reject: (documentId, reason) =>
     request(`/documents/${encodeURIComponent(documentId)}/reject`, {
       method: 'POST', body: { reason },
@@ -313,11 +428,15 @@ function stubMethods(feature, names) {
 export const adminApi = {
   // -> [{ user_id, username, full_name, team_name, is_org_admin, roles:[{project_id, role}] }]
   listUsers: () => request('/admin/users'),
-  // his form collects full_name/team_name too; our backend only needs the email.
-  createUser: (data) => request('/admin/users', {
-    method: 'POST',
-    body: { email: data.email, full_name: data.full_name || null },
-  }),
+  // -> { status, email, role, project_id, team_id, expires_at, invite_link } —
+  // email sending deferred, the admin copies/hands out invite_link themselves.
+  // projectId/teamId optional (Master Plan v2, item 16): when set, accepting
+  // the invite auto-assigns that team role (or project_admin scope).
+  invite: (email, role = 'contributor', { projectId, teamId } = {}) =>
+    request('/admin/invite', {
+      method: 'POST',
+      body: { email, role, project_id: projectId || null, team_id: teamId || null },
+    }),
   // his "Promote to org admin" button (role is always 'admin' from his UI)
   assignAccess: (data) => request('/admin/access', { method: 'POST', body: { email: data.email } }),
   // invite / assign a TeamRole on a specific team. Accepts his
@@ -369,27 +488,16 @@ export const accessRequestsApi = {
   deny: (id) => request(`/access-requests/${encodeURIComponent(id)}/deny`, { method: 'POST' }),
 };
 
-// ---------- RAG Agent: REAL (Phase C) — the Search tab ----------
-// POST /agents/rag/message runs one grounded-retrieval turn. Conversation
+// ---------- Search Agent: REAL — the Search tab ----------
+// POST /agents/search/message runs one turn of the merged Search agent
+// (grounded content Q&A + read-only metadata Q&A in one conversation —
+// replaces the former separate RAG and Query agents/tabs). Conversation
 // ownership is per (user, project); pass session_id back to continue, or omit
 // it (null) to start fresh.
-export const ragApi = {
+export const searchApi = {
   // -> { reply, tools_called: [...], session_id }
   message: (projectId, sessionId, message) =>
-    request('/agents/rag/message', {
-      method: 'POST',
-      body: { project_id: projectId, session_id: sessionId || null, message },
-    }),
-};
-
-// ---------- Query Agent: REAL — the Query tab (read-only metadata Q&A) ----------
-// POST /agents/query/message runs one read-only metadata lookup turn. Same
-// per-(user, project) conversation ownership as ragApi; pass session_id back to
-// continue, or omit it (null) to start fresh.
-export const queryApi = {
-  // -> { reply, tools_called: [...], session_id }
-  message: (projectId, sessionId, message) =>
-    request('/agents/query/message', {
+    request('/agents/search/message', {
       method: 'POST',
       body: { project_id: projectId, session_id: sessionId || null, message },
     }),
@@ -418,11 +526,41 @@ export const chatApi = {
 export const agentsApi = {
   // -> { reply, drafted, finalized, scan, scan_error, final_content,
   //      download_url, filename }
-  draftMessage: (sessionId, message, projectId) =>
+  // layout (Master Plan v2, item 14) is only applied on a fresh session's
+  // first turn — pass it once, omit on every later message.
+  draftMessage: (sessionId, message, projectId, layout) =>
     request('/agents/draft/message', {
       method: 'POST',
-      body: { session_id: sessionId, message: message || '', project_id: projectId || null },
+      body: {
+        session_id: sessionId, message: message || '', project_id: projectId || null,
+        layout: layout || null,
+      },
     }),
+  // Item 14 — built-in standard section layouts for the template picker.
+  // -> [{ id, label, document_type, sections: [{name, purpose}] }]
+  draftLayouts: () => request('/agents/draft/layouts'),
+  // Item 14 — "Upload template": a real reference document in, a
+  // content-stripped section outline out. Nothing persisted server-side;
+  // the caller holds the returned sections and passes them as `layout`.
+  extractOutline: async (file) => {
+    const form = new FormData();
+    form.append('file', file);
+    const token = getToken();
+    const res = await fetch(`${API_BASE}/agents/draft/extract-outline`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: form,
+    });
+    const text = await res.text();
+    let payload = null;
+    if (text) { try { payload = JSON.parse(text); } catch { payload = text; } }
+    if (!res.ok) {
+      let detail = res.statusText || 'Could not extract a template from this file';
+      if (payload && typeof payload.detail === 'string') detail = payload.detail;
+      throw new ApiError(detail, res.status, payload);
+    }
+    return payload; // { sections: [{name, purpose}] }
+  },
   // Standalone Structure Scanner chat (DEFERRED_ITEMS.md #4). Auth only, no
   // project/persistence. -> { reply, tools_called: [...] }
   scanMessage: (sessionId, message) =>
@@ -456,9 +594,14 @@ export const agentsApi = {
   followups: () => notConnected('follow-up questions'),
 };
 
-export const studioApi = stub('Studio');
 export const notesApi = stub('Notes');
-export const notificationsApi = stub('Notifications');
+
+export const notificationsApi = {
+  list: () => request('/notifications'),
+  markRead: (notificationId) =>
+    request(`/notifications/${encodeURIComponent(notificationId)}/read`, { method: 'POST' }),
+  markAllRead: () => request('/notifications/read-all', { method: 'POST' }),
+};
 
 // ---------- Project Intelligence (real backend) ----------
 export const intelligenceApi = {
@@ -494,6 +637,14 @@ export const intelligenceApi = {
     request(`/projects/${encodeURIComponent(projectId)}/intelligence/audit`, {
       method: 'POST',
       body: { target_stage_id: targetStageId || null },
+    }),
+  markComplete: (projectId) =>
+    request(`/projects/${encodeURIComponent(projectId)}/intelligence/mark-complete`, {
+      method: 'POST',
+    }),
+  reopen: (projectId) =>
+    request(`/projects/${encodeURIComponent(projectId)}/intelligence/reopen`, {
+      method: 'POST',
     }),
 };
 

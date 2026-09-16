@@ -1,8 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, Pencil, ArrowUp, ArrowDown, ShieldCheck, Trash2, Settings2, Link2, Users, UploadCloud } from 'lucide-react';
+import { Plus, Pencil, ArrowUp, ArrowDown, ShieldCheck, Trash2, Settings2, Link2, Users, UploadCloud, Lock, ListChecks, X as XIcon } from 'lucide-react';
 import { STAGES } from '../../constants/stages';
 import StageSection from './StageSection';
-import KebabMenu from '../ui/KebabMenu';
 import Modal from '../ui/Modal';
 import Button from '../ui/Button';
 import Input from '../ui/Input';
@@ -14,6 +13,7 @@ const UPLOAD_ACCEPT = '.pdf,.docx,.txt,.md,.markdown,application/pdf,application
 const SourcePanel = ({
   documents = [],
   canReview = false,
+  canOverrideScan = false,
   canDelete = false,
   onChanged,
   projectId,
@@ -22,6 +22,11 @@ const SourcePanel = ({
   canManageStages = false,
   onStagesChanged,
   onDocumentUploaded,
+  hasRequestableTeams = false,
+  onRequestConfidentialAccess,
+  highlightDocumentId = null,
+  canEditAny = false,
+  currentUserId = null,
 }) => {
   const groupedDocs = useMemo(() => documents.reduce((acc, doc) => {
     const stage = doc.stage || 'Unspecified';
@@ -58,9 +63,20 @@ const SourcePanel = ({
   const [refIds, setRefIds] = useState([]); // stage_ids this stage references
   const [teamAccessIds, setTeamAccessIds] = useState([]); // team_ids granted access to this stage
   const [reassignTo, setReassignTo] = useState('');
-  const [stageBusy, setStageBusy] = useState(false);
+  // Which stage-settings action is in flight, if any — a string key rather
+  // than a plain boolean, so e.g. "Rename" and "Delete stage" (both visible
+  // in the same modal) don't spin together when only one was clicked.
+  const [stageBusyAction, setStageBusyAction] = useState(null);
+  const stageBusy = stageBusyAction !== null;
   const [stageErr, setStageErr] = useState('');
   const [stageNotice, setStageNotice] = useState('');
+
+  // --- per-stage required-documents checklist ---
+  const [requirements, setRequirements] = useState([]);
+  const [requirementsLoading, setRequirementsLoading] = useState(false);
+  const [newReqName, setNewReqName] = useState('');
+  const [newReqDescription, setNewReqDescription] = useState('');
+  const [newReqMandatory, setNewReqMandatory] = useState(true);
 
   // --- upload-doc modal ---
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -84,6 +100,68 @@ const SourcePanel = ({
     setTeamAccessIds(stage.team_access || []);
     setReassignTo('');
     setStageErr(''); setStageNotice('');
+    setNewReqName(''); setNewReqDescription(''); setNewReqMandatory(true);
+    loadRequirements(stage.stage_id);
+  };
+
+  const loadRequirements = async (stageId) => {
+    setRequirementsLoading(true);
+    try {
+      setRequirements(await stagesApi.listRequirements(projectId, stageId));
+    } catch (err) {
+      setStageErr(err.message || 'Could not load required documents.');
+    } finally {
+      setRequirementsLoading(false);
+    }
+  };
+
+  const addRequirement = async () => {
+    const name = newReqName.trim();
+    if (!name) return;
+    setStageBusyAction('req:create'); setStageErr(''); setStageNotice('');
+    try {
+      await stagesApi.createRequirement(projectId, settingsStage.stage_id, {
+        name, description: newReqDescription.trim() || null, is_mandatory: newReqMandatory,
+      });
+      setNewReqName(''); setNewReqDescription(''); setNewReqMandatory(true);
+      await loadRequirements(settingsStage.stage_id);
+      setStageNotice('Requirement added.');
+      await refresh();
+    } catch (err) {
+      setStageErr(err.message || 'Could not add this requirement.');
+    } finally {
+      setStageBusyAction(null);
+    }
+  };
+
+  const toggleRequirementMandatory = async (requirement) => {
+    setStageBusyAction(`req:${requirement.requirement_id}`); setStageErr(''); setStageNotice('');
+    try {
+      await stagesApi.updateRequirement(projectId, settingsStage.stage_id, requirement.requirement_id, {
+        is_mandatory: !requirement.is_mandatory,
+      });
+      await loadRequirements(settingsStage.stage_id);
+      await refresh();
+    } catch (err) {
+      setStageErr(err.message || 'Could not update this requirement.');
+    } finally {
+      setStageBusyAction(null);
+    }
+  };
+
+  const removeRequirement = async (requirement) => {
+    if (!window.confirm(`Delete the requirement "${requirement.name}"?`)) return;
+    setStageBusyAction(`req:${requirement.requirement_id}`); setStageErr(''); setStageNotice('');
+    try {
+      await stagesApi.removeRequirement(projectId, settingsStage.stage_id, requirement.requirement_id);
+      await loadRequirements(settingsStage.stage_id);
+      setStageNotice('Requirement deleted.');
+      await refresh();
+    } catch (err) {
+      setStageErr(err.message || 'Could not delete this requirement.');
+    } finally {
+      setStageBusyAction(null);
+    }
   };
 
   const handleCreate = async () => {
@@ -156,8 +234,8 @@ const SourcePanel = ({
     }
   };
 
-  const patchStage = async (patch, successMsg) => {
-    setStageBusy(true); setStageErr(''); setStageNotice('');
+  const patchStage = async (patch, successMsg, actionKey) => {
+    setStageBusyAction(actionKey); setStageErr(''); setStageNotice('');
     try {
       const updated = await stagesApi.update(projectId, settingsStage.stage_id, patch);
       setSettingsStage(updated);
@@ -170,7 +248,7 @@ const SourcePanel = ({
     } catch (err) {
       setStageErr(err.message || 'Could not update the stage.');
     } finally {
-      setStageBusy(false);
+      setStageBusyAction(null);
     }
   };
 
@@ -179,7 +257,7 @@ const SourcePanel = ({
       ? refIds.filter((id) => id !== targetId)
       : [...refIds, targetId];
     setRefIds(next); // optimistic
-    setStageBusy(true); setStageErr(''); setStageNotice('');
+    setStageBusyAction('references'); setStageErr(''); setStageNotice('');
     try {
       const updated = await stagesApi.setReferences(projectId, settingsStage.stage_id, next);
       setSettingsStage(updated);
@@ -190,7 +268,7 @@ const SourcePanel = ({
       setRefIds(refIds); // roll back
       setStageErr(err.message || 'Could not update references.');
     } finally {
-      setStageBusy(false);
+      setStageBusyAction(null);
     }
   };
 
@@ -199,7 +277,7 @@ const SourcePanel = ({
       ? teamAccessIds.filter((id) => id !== targetTeamId)
       : [...teamAccessIds, targetTeamId];
     setTeamAccessIds(next); // optimistic
-    setStageBusy(true); setStageErr(''); setStageNotice('');
+    setStageBusyAction('team-access'); setStageErr(''); setStageNotice('');
     try {
       const updated = await stagesApi.setTeamAccess(projectId, settingsStage.stage_id, next);
       setSettingsStage(updated);
@@ -210,7 +288,7 @@ const SourcePanel = ({
       setTeamAccessIds(teamAccessIds); // roll back
       setStageErr(err.message || 'Could not update team access.');
     } finally {
-      setStageBusy(false);
+      setStageBusyAction(null);
     }
   };
 
@@ -225,7 +303,7 @@ const SourcePanel = ({
         ? `Move ${docs} document(s) to the selected stage and delete "${settingsStage.name}"?`
         : `Delete the stage "${settingsStage.name}"?`,
     )) return;
-    setStageBusy(true); setStageErr(''); setStageNotice('');
+    setStageBusyAction('delete'); setStageErr(''); setStageNotice('');
     try {
       await stagesApi.remove(projectId, settingsStage.stage_id, reassignTo || undefined);
       setSettingsStage(null);
@@ -233,7 +311,7 @@ const SourcePanel = ({
     } catch (err) {
       setStageErr(err.message || 'Could not delete the stage.');
     } finally {
-      setStageBusy(false);
+      setStageBusyAction(null);
     }
   };
 
@@ -241,7 +319,7 @@ const SourcePanel = ({
     const idx = orderedStages.findIndex((s) => s.stage_id === settingsStage.stage_id);
     const target = idx + dir;
     if (target < 0 || target >= orderedStages.length) return;
-    patchStage({ order_index: target }, 'Order updated.');
+    patchStage({ order_index: target }, 'Order updated.', 'move');
   };
 
   const reassignOptions = orderedStages
@@ -266,22 +344,36 @@ const SourcePanel = ({
             )}
           </div>
           <div className="flex items-center gap-2">
-            <span className="text-[10px] uppercase tracking-widest text-primary font-bold">Library</span>
             {canManageStages && (
-              <KebabMenu
-                label="Manage stages"
-                items={[{ label: 'Create new stage', icon: Plus, onClick: () => { setCreateErr(''); setCreateOpen(true); } }]}
-              />
+              <Button
+                size="sm"
+                variant="secondary"
+                icon={Plus}
+                onClick={() => { setCreateErr(''); setCreateOpen(true); }}
+                className="text-xs h-7 px-2"
+              >
+                New Stage
+              </Button>
             )}
           </div>
         </div>
         <p className="text-sm text-gray-400 mt-1">Project documents and evidence</p>
+        {hasRequestableTeams && (
+          <button
+            type="button"
+            onClick={onRequestConfidentialAccess}
+            className="mt-2 flex items-center gap-1.5 text-xs text-primary-light hover:text-primary transition-colors"
+          >
+            <Lock size={12} />
+            Some documents may be confidential — request access
+          </button>
+        )}
       </div>
 
       <div className="p-4">
         {!hasAnything ? (
           <div className="text-center py-8 text-gray-500 text-sm">
-            {canManageStages ? 'No stages yet — create one from the ⋮ menu above.' : 'No documents found for this project.'}
+            {canManageStages ? 'No stages yet — create one from the New Stage button above.' : 'No documents found for this project.'}
           </div>
         ) : (
           <>
@@ -291,15 +383,14 @@ const SourcePanel = ({
                 stage={stage.name}
                 documents={groupedDocs[stage.name] || []}
                 canReview={canReview}
+                canOverrideScan={canOverrideScan}
                 canDelete={canDelete}
                 onChanged={onChanged}
                 requiresApproval={stage.requires_approval}
-                menu={canManageStages ? (
-                  <KebabMenu
-                    label={`Stage settings for ${stage.name}`}
-                    items={[{ label: 'Stage settings', icon: Settings2, onClick: () => openSettings(stage) }]}
-                  />
-                ) : null}
+                onEdit={canManageStages ? () => openSettings(stage) : null}
+                highlightDocumentId={highlightDocumentId}
+                canEditAny={canEditAny}
+                currentUserId={currentUserId}
               />
             ))}
             {extraNames.map((name) => (
@@ -308,8 +399,12 @@ const SourcePanel = ({
                 stage={name}
                 documents={groupedDocs[name] || []}
                 canReview={canReview}
+                canOverrideScan={canOverrideScan}
                 canDelete={canDelete}
                 onChanged={onChanged}
+                highlightDocumentId={highlightDocumentId}
+                canEditAny={canEditAny}
+                currentUserId={currentUserId}
               />
             ))}
           </>
@@ -355,7 +450,7 @@ const SourcePanel = ({
         onClose={() => setSettingsStage(null)}
         title={settingsStage ? `Stage: ${settingsStage.name}` : 'Stage'}
         description="Rename, reorder, toggle approval, or delete this stage."
-        footer={<Button variant="ghost" onClick={() => setSettingsStage(null)}>Close</Button>}
+        scrollable={true}
       >
         {settingsStage && (
           <div className="space-y-5">
@@ -370,9 +465,9 @@ const SourcePanel = ({
                 onChange={(e) => setEditName(e.target.value)}
               />
               <Button
-                variant="secondary" icon={Pencil} loading={stageBusy}
-                disabled={!editName.trim() || editName.trim() === settingsStage.name}
-                onClick={() => patchStage({ name: editName.trim() }, 'Stage renamed.')}
+                variant="secondary" icon={Pencil} loading={stageBusyAction === 'rename'}
+                disabled={!editName.trim() || editName.trim() === settingsStage.name || stageBusy}
+                onClick={() => patchStage({ name: editName.trim() }, 'Stage renamed.', 'rename')}
               >
                 Rename
               </Button>
@@ -408,7 +503,7 @@ const SourcePanel = ({
                 role="switch"
                 aria-checked={reqApproval}
                 disabled={stageBusy}
-                onClick={() => patchStage({ requires_approval: !reqApproval }, `Approval ${!reqApproval ? 'enabled' : 'disabled'} for this stage.`)}
+                onClick={() => patchStage({ requires_approval: !reqApproval }, `Approval ${!reqApproval ? 'enabled' : 'disabled'} for this stage.`, 'approval-toggle')}
                 className={`mt-0.5 shrink-0 relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${reqApproval ? 'bg-primary' : 'bg-border'} disabled:opacity-50`}
               >
                 <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${reqApproval ? 'translate-x-4' : 'translate-x-0.5'}`} />
@@ -481,6 +576,87 @@ const SourcePanel = ({
               )}
             </div>
 
+            {/* Required documents (stage completion checklist) */}
+            <div className="border-t border-border/60 pt-4">
+              <p className="text-sm font-medium text-gray-300 flex items-center gap-1.5">
+                <ListChecks size={14} className="text-primary" /> Required documents
+              </p>
+              <p className="text-xs text-gray-500 mt-0.5 mb-2">
+                What &ldquo;{settingsStage.name}&rdquo; needs to be considered complete. Mandatory items
+                drive the requirement-coverage score on the Intelligence page.
+              </p>
+              {requirementsLoading ? (
+                <p className="text-xs text-gray-600">Loading…</p>
+              ) : requirements.length === 0 ? (
+                <p className="text-xs text-gray-600">No requirements defined yet.</p>
+              ) : (
+                <div className="space-y-1.5 mb-3">
+                  {requirements.map((r) => (
+                    <div
+                      key={r.requirement_id}
+                      className="flex items-start justify-between gap-2 rounded-md border border-border bg-background px-2.5 py-2"
+                    >
+                      <div className="min-w-0">
+                        <p className="text-sm text-gray-200 truncate">{r.name}</p>
+                        {r.description && (
+                          <p className="text-xs text-gray-500 mt-0.5">{r.description}</p>
+                        )}
+                        <label className="flex items-center gap-1.5 mt-1 text-xs text-gray-400 cursor-pointer w-fit">
+                          <input
+                            type="checkbox"
+                            className="accent-primary"
+                            disabled={stageBusy}
+                            checked={r.is_mandatory}
+                            onChange={() => toggleRequirementMandatory(r)}
+                          />
+                          Mandatory
+                        </label>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={stageBusy}
+                        onClick={() => removeRequirement(r)}
+                        className="shrink-0 text-gray-500 hover:text-red-400 transition-colors p-1 disabled:opacity-50"
+                        title="Delete this requirement"
+                      >
+                        <XIcon size={14} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="space-y-2 rounded-md border border-border/60 p-2.5">
+                <Input
+                  placeholder="Requirement name, e.g. Test Plan"
+                  value={newReqName}
+                  onChange={(e) => setNewReqName(e.target.value)}
+                />
+                <Input
+                  placeholder="Description (optional)"
+                  value={newReqDescription}
+                  onChange={(e) => setNewReqDescription(e.target.value)}
+                />
+                <div className="flex items-center justify-between gap-2">
+                  <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="accent-primary"
+                      checked={newReqMandatory}
+                      onChange={(e) => setNewReqMandatory(e.target.checked)}
+                    />
+                    Mandatory
+                  </label>
+                  <Button
+                    size="sm" icon={Plus} loading={stageBusyAction === 'req:create'}
+                    disabled={!newReqName.trim() || stageBusy}
+                    onClick={addRequirement}
+                  >
+                    Add requirement
+                  </Button>
+                </div>
+              </div>
+            </div>
+
             {/* Delete */}
             <div className="border-t border-border/60 pt-4 space-y-2">
               <p className="text-sm font-medium text-gray-300">Delete stage</p>
@@ -501,8 +677,8 @@ const SourcePanel = ({
                 <p className="text-xs text-gray-500">This stage has no documents and can be deleted.</p>
               )}
               <Button
-                variant="danger" icon={Trash2} loading={stageBusy}
-                disabled={orderedStages.length <= 1}
+                variant="danger" icon={Trash2} loading={stageBusyAction === 'delete'}
+                disabled={orderedStages.length <= 1 || stageBusy}
                 onClick={handleDelete}
               >
                 Delete stage

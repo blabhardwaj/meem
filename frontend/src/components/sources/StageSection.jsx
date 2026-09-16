@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { ChevronDown, ShieldCheck } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { ChevronDown, ShieldCheck, Settings2 } from 'lucide-react';
 import Badge from '../ui/Badge';
 import DocumentItem from './DocumentItem';
 
@@ -9,13 +9,33 @@ const StageSection = ({
   stage,
   documents = [],
   canReview,
+  canOverrideScan = false,
   canDelete,
   onChanged,
   requiresApproval = false,
+  onEdit = null, // direct edit stage & settings callback
   menu = null, // optional <KebabMenu /> element rendered in the header
   defaultExpanded = true,
+  highlightDocumentId = null,
+  canEditAny = false,
+  currentUserId = null,
 }) => {
-  const [expanded, setExpanded] = useState(defaultExpanded);
+  const containsHighlight = highlightDocumentId
+    && documents.some((d) => d.document_id === highlightDocumentId);
+  const [expanded, setExpanded] = useState(defaultExpanded || containsHighlight);
+
+  // BUGFIXES_2026-09-15.md: useState's initializer only runs once, at
+  // mount. `documents` (and therefore `containsHighlight`) commonly arrives
+  // on a LATER render than this component's own mount (stage structure and
+  // document lists load separately) — a highlighted document outside the
+  // default-expanded stage would then never actually auto-expand, even
+  // though the parent's scrollIntoView still "succeeds" against the
+  // collapsed (0-height, opacity-0, but still DOM-present) section, landing
+  // the user on what looks like an empty area with nothing visible.
+  useEffect(() => {
+    if (containsHighlight) setExpanded(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [containsHighlight]);
 
   return (
     <div className="border border-border rounded-xl bg-surface mb-4">
@@ -37,7 +57,23 @@ const StageSection = ({
             </span>
           )}
         </button>
-        {menu && <div className="shrink-0">{menu}</div>}
+        <div className="flex items-center gap-1 shrink-0 pr-1">
+          {onEdit && (
+            <button
+              type="button"
+              aria-label={`Edit stage & settings for ${stage}`}
+              title={`Edit stage & settings for ${stage}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                onEdit();
+              }}
+              className="p-1.5 rounded-md text-gray-400 hover:text-gray-100 hover:bg-surface-hover transition-colors"
+            >
+              <Settings2 size={16} />
+            </button>
+          )}
+          {menu}
+        </div>
       </div>
 
       <div className={`grid transition-all duration-200 ease-in-out ${expanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'}`}>
@@ -50,8 +86,11 @@ const StageSection = ({
                     key={doc.document_id}
                     document={doc}
                     canReview={canReview}
+                    canOverrideScan={canOverrideScan}
                     canDelete={canDelete}
                     onChanged={onChanged}
+                    highlighted={doc.document_id === highlightDocumentId}
+                    canEdit={canEditAny || doc.uploaded_by === currentUserId}
                   />
                 ))}
               </div>

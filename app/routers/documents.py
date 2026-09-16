@@ -15,8 +15,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_current_user
+from app.api.dependencies import get_current_user, get_db_with_tenant
 from app.database import get_db
+
 from app.models.document import Document
 from app.models.project import Project
 from app.models.team import Team
@@ -64,6 +65,7 @@ class DocumentListItem(BaseModel):
     uploaded_as_team_id: str
     # Current approval state, or null if the stage doesn't require approval.
     workflow_state: str | None
+    uploaded_by: str
 
 
 # --- endpoints -----------------------------------------------------------
@@ -72,8 +74,9 @@ class DocumentListItem(BaseModel):
 def upload_document(
     body: DocumentUploadRequest,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
+
     team = db.get(Team, body.team_id)
     if team is None:
         raise HTTPException(status_code=404, detail="Team not found")
@@ -117,9 +120,17 @@ def upload_document(
 @router.get("", response_model=list[DocumentListItem])
 def list_documents(
     project_id: uuid.UUID = Query(..., description="Project to list documents for"),
+    include_drafts: bool = Query(
+        False,
+        description=(
+            "Only honoured for org_admin/project_admin — a regular contributor "
+            "always sees just their own drafts regardless of this flag."
+        ),
+    ),
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
+
     access_filter = build_access_filter(db, identity.user_id, project_id)
     rows = db.execute(
         select(Document).where(access_filter, Document.project_id == project_id)
@@ -138,6 +149,17 @@ def list_documents(
         ).scalars()
     } if visible else {}
 
+    # Master Plan v2, item 4: an in-progress draft is only the author's business
+    # until they submit it. `include_drafts=True` is server-side gated to
+    # org_admin/project_admin — a contributor passing it anyway still only sees
+    # their own drafts, never anyone else's.
+    can_see_all_drafts = identity.is_org_admin or (project_id in identity.project_admin_project_ids)
+    if not (include_drafts and can_see_all_drafts):
+        visible = [
+            d for d in visible
+            if wf_by_doc.get(d.document_id) != "draft" or d.uploaded_by == identity.user_id
+        ]
+
     return [
         DocumentListItem(
             document_id=str(d.document_id),
@@ -147,6 +169,7 @@ def list_documents(
             sensitivity_level=d.sensitivity_level.name,
             uploaded_as_team_id=str(d.uploaded_as_team_id),
             workflow_state=wf_by_doc.get(d.document_id),
+            uploaded_by=str(d.uploaded_by),
         )
         for d in visible
     ]
