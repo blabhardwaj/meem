@@ -13,7 +13,8 @@ document was excluded (not visible at all, vs. visible but sensitivity-
 blocked) to later offer a "request access" suggestion; nothing about the
 underlying logic changed by adding it.
 
-build_access_filter() — compound filter for listing/searching documents.
+build_access_filter() — compound filter for listing/searching documents
+(team visibility + stage access).
 
 has_any_project_access() — the coarse "does this user have ANY relationship
 to this project at all" gate (any team membership, or project/org admin),
@@ -95,6 +96,20 @@ def has_permission(db: Session, user_id: UUID, action: str, team_id: UUID, proje
         raise ValueError(f"Unknown action: {action}")
 
     return _TEAM_ROLE_RANK[membership.role] >= _TEAM_ROLE_RANK[required_role]
+
+
+def can_edit_document(db: Session, user_id: UUID, document) -> bool:
+    """
+    UI_FIXES_2026-09-15.md: who may edit a document's CONTENT (the chat-based
+    revision flow — start_version_review / start_version_review_from_current
+    — not the plain "upload"/"submit" actions, which stay at contributor).
+    Deliberately narrower than has_permission(..., "upload", ...): the
+    document's own uploader, or team_lead+ on the document's team (which
+    org_admin/project_admin bypass to, same as has_permission).
+    """
+    if document.uploaded_by == user_id:
+        return True
+    return has_permission(db, user_id, "manage_team_members", document.uploaded_as_team_id, document.project_id)
 
 
 def has_any_project_access(db: Session, user_id: UUID, project_id: UUID) -> bool:
@@ -360,14 +375,26 @@ def can_view_document(db: Session, user_id: UUID, document: Document) -> bool:
 def build_access_filter(db: Session, user_id: UUID, project_id: UUID):
     """
     Returns a SQLAlchemy filter condition for querying documents within a
-    project — the COARSE narrowing only: tenant, project, and team-visibility.
-    Sensitivity is deliberately NOT filtered here; that decision belongs
-    entirely to can_view_document()'s per-row check (team_lead+ sees
-    confidential automatically, contributor only with an active grant, viewer
-    never). Callers must still run each returned row through can_view_document().
+    project — the COARSE narrowing only: tenant, project, team-visibility,
+    and stage access. Sensitivity is deliberately NOT filtered here; that
+    decision belongs entirely to can_view_document()'s per-row check
+    (team_lead+ sees confidential automatically, contributor only with an
+    active grant, viewer never). Callers must still run each returned row
+    through can_view_document().
 
     For org_admin/project_admin, returns a filter scoped only to
     tenant/project (full visibility within that scope).
+
+    UI_FIXES_2026-09-15.md: a regular user's team can be visible to a
+    document (DocumentTeamVisibility) without that user having access to the
+    document's *stage* (team_stage_access) — team visibility and stage
+    access are two separate grants. Previously this filter checked only the
+    former, so a document sitting in an inaccessible stage still slipped
+    through here (the Sources panel would render its stage as "Unspecified"
+    — /workspace's stage list IS correctly scoped by
+    get_accessible_stages_for_user — while the document itself, wrongly,
+    remained visible). Now also requires the document's stage_id be in the
+    caller's accessible-stages set.
     """
     from sqlalchemy import and_
 
@@ -391,6 +418,10 @@ def build_access_filter(db: Session, user_id: UUID, project_id: UUID):
     if not user_team_ids:
         return Document.document_id == None  # no access — matches nothing
 
+    accessible_stage_ids = get_accessible_stages_for_user(db, user_id, project_id)
+    if not accessible_stage_ids:
+        return Document.document_id == None  # no access — matches nothing
+
     visible_doc_ids_subquery = (
         select(DocumentTeamVisibility.document_id)
         .where(DocumentTeamVisibility.team_id.in_(user_team_ids))
@@ -400,6 +431,7 @@ def build_access_filter(db: Session, user_id: UUID, project_id: UUID):
         Document.tenant_id == user.tenant_id,
         Document.project_id == project_id,
         Document.document_id.in_(visible_doc_ids_subquery),
+        Document.stage_id.in_(accessible_stage_ids),
         # NOTE: no sensitivity condition — every doc visible to the user's
         # teams (public, internal AND confidential) passes through here;
         # can_view_document() makes the final per-row call.

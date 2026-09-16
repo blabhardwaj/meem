@@ -24,6 +24,13 @@ _client = Groq(api_key=GROQ_API_KEY)
 _EXPECTED_CRITERION_NAMES = {c["name"] for c in RUBRIC_CRITERIA}
 _MAX_PER_CRITERION = 20
 
+# Master Plan v2, item 6: previously a document could score 0/20 on one
+# criterion and still pass overall as long as the SUM cleared the 60%
+# threshold (e.g. 0 + 18 + 18 = 36/60). A single-axis floor closes that —
+# every criterion must clear 40% of its own max, in addition to the overall
+# percentage threshold in scan_prompts.py.
+PER_CRITERION_MINIMUM = 8
+
 
 class ScoringError(Exception):
     """Raised when Groq's response can't be parsed into a valid score."""

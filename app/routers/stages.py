@@ -21,20 +21,21 @@ order_index is kept dense (0..n-1) after every mutation.
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_current_user
-from app.database import get_db
+from app.api.dependencies import get_current_user, get_db_with_tenant
 from app.models.document import Document
 from app.models.project import Project
+from app.models.required_document import RequiredDocument, RequirementSource
 from app.models.stage import Stage, StageReference, TeamStageAccess
 from app.models.team import Team
 from app.services.access_control import get_accessible_stages_for_user
 from app.services.audit import record_audit
 from app.services.auth import ResolvedIdentity
+from app.services.graph.audit_engine import sync_and_audit_project
 
 router = APIRouter(prefix="/projects", tags=["stages"])
 
@@ -74,6 +75,28 @@ class StageOut(BaseModel):
     references: list[str] = Field(default_factory=list)
     # Team IDs granted access to this stage (upload + visibility gate).
     team_access: list[str] = Field(default_factory=list)
+
+
+class RequiredDocumentOut(BaseModel):
+    requirement_id: str
+    stage_id: str
+    name: str
+    description: str | None
+    is_mandatory: bool
+    source: str
+    created_at: str
+
+
+class CreateRequiredDocumentRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=1000)
+    is_mandatory: bool = True
+
+
+class UpdateRequiredDocumentRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = None
+    is_mandatory: bool | None = None
 
 
 # --- helpers ---------------------------------------------------------------
@@ -172,7 +195,7 @@ def _serialize(
 def list_stages(
     project_id: uuid.UUID,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     _load_project(db, identity, project_id)
     if not _can_see_project(db, identity, project_id):
@@ -199,7 +222,7 @@ def create_stage(
     project_id: uuid.UUID,
     body: CreateStageRequest,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     _load_project(db, identity, project_id)
     _require_project_admin(identity, project_id)
@@ -238,7 +261,7 @@ def update_stage(
     stage_id: uuid.UUID,
     body: UpdateStageRequest,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     _load_project(db, identity, project_id)
     _require_project_admin(identity, project_id)
@@ -302,7 +325,7 @@ def delete_stage(
         description="Move this stage's documents to this stage before deleting.",
     ),
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     _load_project(db, identity, project_id)
     _require_project_admin(identity, project_id)
@@ -358,6 +381,13 @@ def delete_stage(
         synchronize_session=False
     )
 
+    # And for required_documents — a deleted stage's checklist is meaningless
+    # now (no reassignment concept makes sense here, unlike documents: these
+    # are stage-specific requirement definitions, not references to move).
+    deleted_requirements = db.query(RequiredDocument).filter(
+        RequiredDocument.stage_id == stage_id
+    ).delete(synchronize_session=False)
+
     record_audit(
         db, actor_id=identity.user_id, action="DELETE_STAGE", resource_type="stage",
         resource_id=stage.stage_id,
@@ -365,6 +395,7 @@ def delete_stage(
             "project_id": str(project_id), "name": stage.name,
             "reassigned_documents": reassigned,
             "reassigned_to": str(reassign_to) if reassigned else None,
+            "deleted_requirements": deleted_requirements,
         },
     )
     db.commit()
@@ -377,7 +408,7 @@ def set_stage_references(
     stage_id: uuid.UUID,
     body: SetStageReferencesRequest,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     """
     Replace this stage's full set of outbound references. One-way (A->B does not
@@ -433,7 +464,7 @@ def set_team_access(
     stage_id: uuid.UUID,
     body: SetTeamAccessRequest,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     """
     Replace the full set of teams granted access to this stage. Every team_id
@@ -482,3 +513,181 @@ def set_team_access(
     counts = _doc_counts(db, project_id)
     return _serialize(stage, counts.get(stage_id, 0),
                       _refs_by_stage(db, [stage_id])[stage_id], wanted)
+
+
+# --- required documents (stage completion checklist) -----------------------
+
+def _serialize_requirement(r: RequiredDocument) -> RequiredDocumentOut:
+    return RequiredDocumentOut(
+        requirement_id=str(r.requirement_id),
+        stage_id=str(r.stage_id),
+        name=r.name,
+        description=r.description,
+        is_mandatory=r.is_mandatory,
+        source=r.source.value,
+        created_at=r.created_at.isoformat(),
+    )
+
+
+def _load_active_stage(db: Session, project_id: uuid.UUID, stage_id: uuid.UUID) -> Stage:
+    stage = db.get(Stage, stage_id)
+    if stage is None or stage.project_id != project_id or stage.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Stage not found")
+    return stage
+
+
+@router.get("/{project_id}/stages/{stage_id}/requirements", response_model=list[RequiredDocumentOut])
+def list_requirements(
+    project_id: uuid.UUID,
+    stage_id: uuid.UUID,
+    identity: ResolvedIdentity = Depends(get_current_user),
+    db: Session = Depends(get_db_with_tenant),
+):
+    """
+    A stage's required-document checklist — what R001 (app/services/graph/
+    audit_rules.py) evaluates for mandatory evidence, and what the
+    Intelligence page's "X/Y requirements satisfied" counts. Read-only, so
+    visibility parity with GET /stages: any project member, not admin-only.
+    """
+    _load_project(db, identity, project_id)
+    if not _can_see_project(db, identity, project_id):
+        raise HTTPException(status_code=403, detail="You do not have access to this project")
+    _load_active_stage(db, project_id, stage_id)
+
+    requirements = db.execute(
+        select(RequiredDocument)
+        .where(RequiredDocument.stage_id == stage_id)
+        .order_by(RequiredDocument.created_at.asc())
+    ).scalars().all()
+    return [_serialize_requirement(r) for r in requirements]
+
+
+@router.post(
+    "/{project_id}/stages/{stage_id}/requirements",
+    response_model=RequiredDocumentOut, status_code=201,
+)
+def create_requirement(
+    project_id: uuid.UUID,
+    stage_id: uuid.UUID,
+    body: CreateRequiredDocumentRequest,
+    background_tasks: BackgroundTasks,
+    identity: ResolvedIdentity = Depends(get_current_user),
+    db: Session = Depends(get_db_with_tenant),
+):
+    """
+    Defines a new required-document checklist item for a stage — the piece
+    that was previously entirely missing: nothing in the app ever created a
+    RequiredDocument row, so every stage's completeness was vacuously 100%.
+    Schedules a graph re-sync so R001 can evaluate this requirement (it only
+    becomes evaluable once it has a matching knowledge-graph Node, created by
+    sync_project_graph() — see sync_and_audit_project()'s own docstring).
+    """
+    project = _load_project(db, identity, project_id)
+    _require_project_admin(identity, project_id)
+    _load_active_stage(db, project_id, stage_id)
+
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Requirement name cannot be empty")
+
+    requirement = RequiredDocument(
+        stage_id=stage_id, name=name, description=body.description,
+        is_mandatory=body.is_mandatory, source=RequirementSource.custom,
+    )
+    db.add(requirement)
+    db.flush()
+
+    record_audit(
+        db, actor_id=identity.user_id, action="CREATE_REQUIRED_DOCUMENT",
+        resource_type="required_document", resource_id=requirement.requirement_id,
+        details={"project_id": str(project_id), "stage_id": str(stage_id), "name": name},
+    )
+    db.commit()
+    db.refresh(requirement)
+
+    background_tasks.add_task(sync_and_audit_project, project_id, project.tenant_id, identity.user_id)
+    return _serialize_requirement(requirement)
+
+
+@router.patch(
+    "/{project_id}/stages/{stage_id}/requirements/{requirement_id}",
+    response_model=RequiredDocumentOut,
+)
+def update_requirement(
+    project_id: uuid.UUID,
+    stage_id: uuid.UUID,
+    requirement_id: uuid.UUID,
+    body: UpdateRequiredDocumentRequest,
+    background_tasks: BackgroundTasks,
+    identity: ResolvedIdentity = Depends(get_current_user),
+    db: Session = Depends(get_db_with_tenant),
+):
+    project = _load_project(db, identity, project_id)
+    _require_project_admin(identity, project_id)
+    _load_active_stage(db, project_id, stage_id)
+
+    requirement = db.get(RequiredDocument, requirement_id)
+    if requirement is None or requirement.stage_id != stage_id:
+        raise HTTPException(status_code=404, detail="Requirement not found")
+
+    changed: dict = {}
+
+    if body.name is not None:
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(status_code=422, detail="Requirement name cannot be empty")
+        if name != requirement.name:
+            changed["name"] = name
+            requirement.name = name
+
+    if body.description is not None and body.description != requirement.description:
+        changed["description"] = body.description
+        requirement.description = body.description
+
+    if body.is_mandatory is not None and body.is_mandatory != requirement.is_mandatory:
+        changed["is_mandatory"] = body.is_mandatory
+        requirement.is_mandatory = body.is_mandatory
+
+    if not changed:
+        return _serialize_requirement(requirement)
+
+    record_audit(
+        db, actor_id=identity.user_id, action="UPDATE_REQUIRED_DOCUMENT",
+        resource_type="required_document", resource_id=requirement.requirement_id,
+        details={"project_id": str(project_id), "stage_id": str(stage_id),
+                  **{k: str(v) for k, v in changed.items()}},
+    )
+    db.commit()
+    db.refresh(requirement)
+
+    background_tasks.add_task(sync_and_audit_project, project_id, project.tenant_id, identity.user_id)
+    return _serialize_requirement(requirement)
+
+
+@router.delete("/{project_id}/stages/{stage_id}/requirements/{requirement_id}")
+def delete_requirement(
+    project_id: uuid.UUID,
+    stage_id: uuid.UUID,
+    requirement_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    identity: ResolvedIdentity = Depends(get_current_user),
+    db: Session = Depends(get_db_with_tenant),
+):
+    project = _load_project(db, identity, project_id)
+    _require_project_admin(identity, project_id)
+    _load_active_stage(db, project_id, stage_id)
+
+    requirement = db.get(RequiredDocument, requirement_id)
+    if requirement is None or requirement.stage_id != stage_id:
+        raise HTTPException(status_code=404, detail="Requirement not found")
+
+    record_audit(
+        db, actor_id=identity.user_id, action="DELETE_REQUIRED_DOCUMENT",
+        resource_type="required_document", resource_id=requirement.requirement_id,
+        details={"project_id": str(project_id), "stage_id": str(stage_id), "name": requirement.name},
+    )
+    db.delete(requirement)
+    db.commit()
+
+    background_tasks.add_task(sync_and_audit_project, project_id, project.tenant_id, identity.user_id)
+    return {"status": "deleted", "requirement_id": str(requirement_id)}

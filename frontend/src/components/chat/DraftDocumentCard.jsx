@@ -7,7 +7,7 @@ import MarkdownMessage from '../ui/MarkdownMessage';
  * so the document itself reads cleanly like a document while the agent's
  * closing prompt remains conversational.
  */
-function splitDraftAndComment(text) {
+export function splitDraftAndComment(text) {
   if (!text || typeof text !== 'string') {
     return { documentContent: text || '', conversationalComment: null };
   }

@@ -17,8 +17,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_current_user
-from app.database import get_db
+from app.api.dependencies import get_current_user, get_db_with_tenant
 from app.models.project import Project
 from app.models.stage import Stage, StageReference, TeamStageAccess
 from app.models.team import Team
@@ -60,7 +59,7 @@ class WorkspaceResponse(BaseModel):
 @router.get("", response_model=WorkspaceResponse)
 def get_workspace(
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     # Which projects can this user act in?
     project_ids: set[uuid.UUID] = set(identity.project_admin_project_ids)

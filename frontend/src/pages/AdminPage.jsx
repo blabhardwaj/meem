@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link, Navigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, ShieldCheck, Users, ClipboardList, ScrollText, FlaskConical, Check, X, Clock3, Trash2, Search, ChevronDown } from 'lucide-react';
+import { ArrowLeft, ShieldCheck, Users, ClipboardList, ScrollText, FlaskConical, Check, X, Clock3, Trash2, Search, ChevronDown, ChevronRight, FolderKanban } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { adminApi, projectsApi, documentsApi, workspaceApi, accessRequestsApi, activityApi } from '../lib/api';
 import Button from '../components/ui/Button';
@@ -9,6 +9,7 @@ import Dropdown from '../components/ui/Dropdown';
 import Badge from '../components/ui/Badge';
 import Card from '../components/ui/Card';
 import Modal from '../components/ui/Modal';
+import BackButton from '../components/ui/BackButton';
 
 const TABS = [
   { id: 'users', label: 'Users & Access', icon: Users },
@@ -37,7 +38,7 @@ const MODE_OPTIONS = [
 const CheckList = ({ label, options, selected, onToggle, allLabel, allSelected, onToggleAll, emptyText }) => (
   <div className="w-full flex flex-col gap-1.5">
     <label className="text-sm font-medium text-gray-300">{label}</label>
-    <div className="rounded-md border border-border bg-background p-2 space-y-0.5 max-h-52 overflow-y-auto">
+    <div className="rounded-md border border-border bg-background p-2 space-y-0.5 max-h-52 overflow-y-auto scrollbar-thin">
       {allLabel && (
         <label className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-surface-hover cursor-pointer text-sm text-gray-200">
           <input type="checkbox" checked={allSelected} onChange={onToggleAll} className="accent-primary" />
@@ -114,13 +115,10 @@ const AdminPage = () => {
   return (
     <div className="flex-1 p-8 max-w-5xl mx-auto w-full">
       <div className="mb-6">
-        <Link to="/" className="text-gray-400 hover:text-gray-200 transition-colors flex items-center gap-1 text-sm mb-4">
-          <ArrowLeft size={16} />
-          All Projects
-        </Link>
+        <BackButton fallbackTo="/" className="mb-4" />
         <h1 className="text-2xl font-bold text-gray-100 flex items-center gap-2">
           <ShieldCheck className="text-primary" size={22} />
-          Admin
+          Access &amp; Governance
         </h1>
         <p className="text-gray-400 mt-1">User access, approvals, and access-control diagnostics.</p>
       </div>
@@ -183,19 +181,26 @@ const ProjectActivityTab = () => {
 
   const enterProject = (project) => {
     setOpenProject(project);
-    setTeamId('');
     setFeed(null);
     setFeedError('');
+    // Skip the team-picker step entirely when there's only one team to pick
+    // — a dropdown with exactly one option is friction, not a choice.
+    if (project.teams.length === 1) {
+      pickTeam(project.teams[0].team_id, project);
+    } else {
+      setTeamId('');
+    }
   };
 
-  const pickTeam = async (nextTeamId) => {
+  const pickTeam = async (nextTeamId, projectOverride) => {
+    const project = projectOverride || openProject;
     setTeamId(nextTeamId);
     setFeed(null);
     setFeedError('');
-    if (!nextTeamId) return;
+    if (!nextTeamId || !project) return;
     setFeedLoading(true);
     try {
-      setFeed(await activityApi.feed(openProject.project_id, nextTeamId));
+      setFeed(await activityApi.feed(project.project_id, nextTeamId));
     } catch (err) {
       setFeedError(err.message || 'Could not load activity for this team.');
     } finally {
@@ -225,24 +230,30 @@ const ProjectActivityTab = () => {
     }
     return (
       <div className="space-y-4">
-        <p className="text-sm text-gray-400">Pick a project, then a team, to see that team&rsquo;s document activity.</p>
+        <p className="text-sm text-gray-400">Pick a project to see its document activity.</p>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {projects.map((project) => (
             <button
               key={project.project_id}
               type="button"
               onClick={() => enterProject(project)}
-              className="text-left rounded-lg border border-border bg-background p-4 hover:border-primary/50 hover:bg-surface-hover transition-colors"
+              className="text-left rounded-xl border border-border bg-surface p-4 hover:border-primary/50 hover:bg-surface-hover transition-colors flex flex-col gap-3"
             >
               <div className="flex items-start justify-between gap-2">
-                <span className="font-semibold text-gray-100">{project.project_name}</span>
+                <span className="flex items-center gap-2 min-w-0">
+                  <FolderKanban size={16} className="text-primary shrink-0" />
+                  <span className="font-semibold text-gray-100 truncate">{project.project_name}</span>
+                </span>
                 <Badge variant={project.admin_here ? 'active' : 'neutral'}>
                   {project.admin_here ? 'Full access' : 'Your team'}
                 </Badge>
               </div>
-              <p className="text-xs text-gray-500 mt-2">
-                {project.teams.length} team{project.teams.length === 1 ? '' : 's'} you can view
-              </p>
+              <div className="flex items-center justify-between gap-2 mt-auto">
+                <p className="text-xs text-gray-500">
+                  {project.teams.length} team{project.teams.length === 1 ? '' : 's'} you can view
+                </p>
+                <ChevronRight size={14} className="text-gray-500 shrink-0" />
+              </div>
             </button>
           ))}
         </div>
@@ -262,20 +273,27 @@ const ProjectActivityTab = () => {
         <ArrowLeft size={15} /> All projects
       </button>
 
-      <Card
-        title={openProject.project_name}
-        description={openProject.admin_here
-          ? 'You administer this project — you can view activity for any team.'
-          : 'You can view activity for the team(s) you contribute to or lead.'}
-      >
-        <Dropdown
-          label="Team"
-          options={teamOptions}
-          value={teamId}
-          onChange={pickTeam}
-          placeholder="Select a team"
-        />
-      </Card>
+      {openProject.teams.length > 1 ? (
+        <Card
+          title={openProject.project_name}
+          description={openProject.admin_here
+            ? 'You administer this project — you can view activity for any team.'
+            : 'You can view activity for the team(s) you contribute to or lead.'}
+        >
+          <Dropdown
+            label="Team"
+            options={teamOptions}
+            value={teamId}
+            onChange={pickTeam}
+            placeholder="Select a team"
+          />
+        </Card>
+      ) : (
+        <div>
+          <h3 className="font-semibold text-gray-100">{openProject.project_name}</h3>
+          <p className="text-sm text-gray-400 mt-1">Showing activity for {openProject.teams[0]?.name}.</p>
+        </div>
+      )}
 
       {feedError && <p className="text-sm text-red-400">{feedError}</p>}
       {feedLoading && <p className="text-sm text-gray-400">Loading activity…</p>}
@@ -325,11 +343,16 @@ const UsersTab = ({ currentUser, initialProjectId = '' }) => {
   const [notice, setNotice] = useState('');
   const [expandedUserId, setExpandedUserId] = useState(null);
   const [userSearch, setUserSearch] = useState('');
-  const [busy, setBusy] = useState(false);
+  // Which action is in flight, if any — a string key rather than a plain
+  // boolean, so only the button actually clicked shows a spinner (a single
+  // shared `busy` flag previously lit up "Invite by link", "Add user", and
+  // "Assign Roles" together, whichever one was clicked).
+  const [busyAction, setBusyAction] = useState(null);
+  const busy = busyAction !== null;
 
   // "Add organization user"
   const [email, setEmail] = useState('');
-  const [newUserName, setNewUserName] = useState('');
+  const [inviteRole, setInviteRole] = useState('contributor');
 
   // "Assign Roles" modal
   const [assignOpen, setAssignOpen] = useState(false);
@@ -383,19 +406,17 @@ const UsersTab = ({ currentUser, initialProjectId = '' }) => {
   const isSelfTarget = assignTarget && assignTarget.user_id === currentUser?.user_id;
   const orgAdminCount = users.filter((u) => u.is_org_admin).length;
 
-  const handleCreateUser = async () => {
+  const handleInvite = async () => {
     if (!email.trim()) return;
-    setBusy(true); setError(''); setNotice('');
+    setBusyAction('invite'); setError(''); setNotice('');
     try {
-      const res = await adminApi.createUser({ email: email.trim(), full_name: newUserName.trim() });
-      const pwd = res?.default_password || 'DemoPassword123!';
-      setNotice(`${email.trim()} was added with default password "${pwd}". Use "Assign Roles" to give them access.`);
-      setNewUserName('');
-      await load();
+      const res = await adminApi.invite(email.trim(), inviteRole);
+      setNotice(`Invite link for ${res.email}: ${res.invite_link}`);
+      setEmail('');
     } catch (err) {
-      setError(err.message || 'Could not add the user.');
+      setError(err.message || 'Could not create the invite.');
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   };
 
@@ -428,7 +449,7 @@ const UsersTab = ({ currentUser, initialProjectId = '' }) => {
     } else {
       body = { email: assignEmail.trim(), mode: 'org_admin' };
     }
-    setBusy(true); setError(''); setNotice('');
+    setBusyAction('add-access'); setError(''); setNotice('');
     try {
       const res = await adminApi.assignRoles(body);
       setNotice(res.message || 'Access added.');
@@ -437,12 +458,12 @@ const UsersTab = ({ currentUser, initialProjectId = '' }) => {
     } catch (err) {
       setError(err.message || 'Could not add access.');
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   };
 
   const handleChangeMembershipRole = async (membershipId, role) => {
-    setBusy(true); setError(''); setNotice('');
+    setBusyAction(`membership-role-${membershipId}`); setError(''); setNotice('');
     try {
       await adminApi.updateTeamRole(membershipId, role);
       setNotice('Role updated.');
@@ -450,13 +471,13 @@ const UsersTab = ({ currentUser, initialProjectId = '' }) => {
     } catch (err) {
       setError(err.message || 'Could not update the role.');
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   };
 
   const handleRemoveMembership = async (membershipId, label) => {
     if (!window.confirm(`Remove this access${label ? ` (${label})` : ''}?`)) return;
-    setBusy(true); setError(''); setNotice('');
+    setBusyAction(`membership-remove-${membershipId}`); setError(''); setNotice('');
     try {
       await adminApi.removeTeamMembership(membershipId);
       setNotice('Access removed.');
@@ -464,13 +485,13 @@ const UsersTab = ({ currentUser, initialProjectId = '' }) => {
     } catch (err) {
       setError(err.message || 'Could not remove the access.');
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   };
 
   const handleRemoveProjectAdmin = async (scopeId, projectName) => {
     if (!window.confirm(`Remove Project Admin on ${projectName}?`)) return;
-    setBusy(true); setError(''); setNotice('');
+    setBusyAction(`project-admin-remove-${scopeId}`); setError(''); setNotice('');
     try {
       await adminApi.removeProjectAdmin(scopeId);
       setNotice('Project Admin removed.');
@@ -478,7 +499,7 @@ const UsersTab = ({ currentUser, initialProjectId = '' }) => {
     } catch (err) {
       setError(err.message || 'Could not remove Project Admin.');
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   };
 
@@ -488,7 +509,7 @@ const UsersTab = ({ currentUser, initialProjectId = '' }) => {
       return;
     }
     if (!window.confirm(`Remove organization-admin from ${targetUser.username}?`)) return;
-    setBusy(true); setError(''); setNotice('');
+    setBusyAction('revoke-org-admin'); setError(''); setNotice('');
     try {
       await adminApi.revokeOrgAdmin(targetUser.user_id);
       setNotice(`${targetUser.username} is no longer an organization admin.`);
@@ -496,7 +517,7 @@ const UsersTab = ({ currentUser, initialProjectId = '' }) => {
     } catch (err) {
       setError(err.message || 'Could not revoke organization-admin.');
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   };
 
@@ -507,11 +528,8 @@ const UsersTab = ({ currentUser, initialProjectId = '' }) => {
         onClose={() => setAssignOpen(false)}
         title="Assign Roles"
         description="Review and edit what this person can access, then add new access below."
-        footer={(
-          <Button type="button" variant="ghost" onClick={() => setAssignOpen(false)}>Close</Button>
-        )}
       >
-        <div className="space-y-6 max-h-[70vh] overflow-y-auto pr-1">
+        <div className="space-y-6 max-h-[70vh] overflow-y-auto scrollbar-thin pr-1">
           <Input
             label="User email"
             value={assignEmail}
@@ -711,7 +729,7 @@ const UsersTab = ({ currentUser, initialProjectId = '' }) => {
               </p>
             )}
 
-            <Button onClick={handleAddAccess} loading={busy} disabled={!canSubmitAssign}>
+            <Button onClick={handleAddAccess} loading={busyAction === 'add-access'} disabled={!canSubmitAssign || busy}>
               Add access
             </Button>
           </section>
@@ -719,19 +737,42 @@ const UsersTab = ({ currentUser, initialProjectId = '' }) => {
       </Modal>
 
       {isOrgAdmin ? (
-        <Card title="Add organization user" description="Create the login first (email + full name; default password: DemoPassword123!), then assign roles.">
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+        <Card title="Add organization user" description="Enter an email, then pick one of the two options below — both use this same email.">
+          <div className="space-y-4">
             <Input label="Email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="new.user@company.com" />
-            <Input label="Full name" value={newUserName} onChange={(e) => setNewUserName(e.target.value)} placeholder="New user" />
-            <Button variant="secondary" onClick={handleCreateUser} loading={busy} disabled={!email.trim()}>Add user</Button>
-            <Button onClick={() => openAssign(email.trim())} disabled={!email.trim()}>Assign Roles</Button>
+            {!email.trim() && (
+              <p className="text-xs text-amber-400/80 -mt-2">Enter an email above first — every option below is disabled until you do.</p>
+            )}
+
+            <div className="border-t border-border/60 pt-4">
+              <p className="text-xs font-semibold text-gray-400 mb-2">Option 1 — Invite by link (recommended: they set their own password)</p>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+                <Dropdown
+                  label="Role"
+                  options={[
+                    { label: 'Viewer', value: 'viewer' },
+                    { label: 'Contributor', value: 'contributor' },
+                    { label: 'Team Lead', value: 'team_lead' },
+                    { label: 'Project Admin', value: 'project_admin' },
+                    { label: 'Org Admin', value: 'org_admin' },
+                  ]}
+                  value={inviteRole}
+                  onChange={setInviteRole}
+                />
+                <Button onClick={handleInvite} loading={busyAction === 'invite'} disabled={!email.trim() || busy}>Invite by link</Button>
+              </div>
+              <p className="text-xs text-gray-500 mt-1.5">Single-use link, expires in 72 hours.</p>
+            </div>
+
+            <div className="border-t border-border/60 pt-4">
+              <p className="text-xs font-semibold text-gray-400 mb-2">Option 2 — Assign roles directly (fine-grained: pick a role per team, or grant Project/Org Admin)</p>
+              <Button variant="secondary" onClick={() => openAssign(email.trim())} disabled={!email.trim()}>Assign Roles</Button>
+              <p className="text-xs text-gray-500 mt-1.5">Works on an existing user too — or use the button on their row below. If the email has no account yet, one is created automatically with a default password (shown after) — always attached to the access you just granted, never an orphan account.</p>
+            </div>
           </div>
-          <p className="text-xs text-gray-500 mt-3">
-            &ldquo;Assign Roles&rdquo; also works on an existing user &mdash; enter their email and open the modal, or use the button on their row below.
-          </p>
         </Card>
       ) : (
-        <Card title="Assign roles" description="Add someone to a team you lead. Enter a new or existing email in the modal.">
+        <Card title="Assign roles" description="Change the role of someone already in one of your projects. Adding a new person to a project requires a project admin.">
           <Button onClick={() => openAssign('')}>Assign Roles</Button>
         </Card>
       )}
@@ -784,7 +825,7 @@ const UsersTab = ({ currentUser, initialProjectId = '' }) => {
                     )}
                   </div>
                   <div className="flex items-center gap-2">
-                    <Button size="sm" variant="secondary" onClick={() => openAssign(u.username)} loading={busy}>
+                    <Button size="sm" variant="secondary" onClick={() => openAssign(u.username)}>
                       Assign Roles
                     </Button>
                   </div>

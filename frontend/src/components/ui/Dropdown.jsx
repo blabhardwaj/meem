@@ -55,10 +55,16 @@ const Dropdown = ({
               <button
                 key={option.value}
                 type="button"
-                className={`w-full text-left px-3 py-2 text-sm transition-colors hover:bg-surface-hover hover:text-primary-light
-                  ${value === option.value ? 'bg-surface-hover text-primary' : 'text-gray-300'}
+                disabled={option.disabled}
+                title={option.disabled ? 'Already selected on the other side' : undefined}
+                className={`w-full text-left px-3 py-2 text-sm transition-colors
+                  ${option.disabled
+                    ? 'text-gray-600 opacity-50 cursor-not-allowed'
+                    : `hover:bg-surface-hover hover:text-primary-light ${value === option.value ? 'bg-surface-hover text-primary' : 'text-gray-300'}`
+                  }
                 `}
                 onClick={() => {
+                  if (option.disabled) return;
                   onChange(option.value);
                   setIsOpen(false);
                 }}

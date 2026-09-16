@@ -2,12 +2,25 @@
 Phase 6: user directory + role assignment/editing + the audit-log read endpoint.
 Refitted from the teammate's /admin/* routes to our per-team model.
 
-  GET    /admin/users                          directory + each user's full access
-  POST   /admin/users                          create a bare org user (org_admin only)
+UI_FIXES_2026-09-15.md #9/#11: this router used to carry a blanket
+`dependencies=[Depends(require_org_admin)]` at the APIRouter level, silently
+overriding every endpoint's own, more permissive, already-written role
+checks — team_lead could never actually reach /assign-roles or /audit-log
+despite those endpoints' own logic explicitly allowing them. Removed; each
+endpoint below now enforces its own access rule (every one already had one,
+except GET /users, which gained an explicit check when the blanket gate was
+removed).
+
+  GET    /admin/users                          directory + each user's full access (org_admin, project_admin, or team_lead)
   POST   /admin/assign-roles                   add access:
                                                  mode=team_member  -> UserTeamMembership row(s),
                                                    a per-team role each (team_assignments=[{team_id,role}]).
                                                    Gated per team by has_permission("manage_team_members").
+                                                   UI_FIXES_2026-09-15.md #9: a team_lead (not project_admin
+                                                   or org_admin) may only change the role of someone ALREADY
+                                                   in that project — bringing a new person into the project
+                                                   (new account or an existing account with no prior
+                                                   membership there) requires a project admin or org admin.
                                                  mode=project_admin -> ProjectAdmin row(s). ORG_ADMIN ONLY.
                                                  mode=org_admin      -> User.is_org_admin = True. ORG_ADMIN ONLY.
                                                New users get tenant_id from the target project(s) — never
@@ -19,27 +32,38 @@ Refitted from the teammate's /admin/* routes to our per-team model.
                                                your own, nor the last org_admin in the tenant.
   POST   /admin/project-access                 legacy single-team assign (kept for compatibility)
   POST   /admin/access                         legacy grant-org-admin (kept for compatibility)
-  GET    /admin/audit-log                      tenant-wide audit rows (org_admin only)
+  GET    /admin/audit-log                      role-scoped audit rows (org_admin, project_admin, or team_lead — see app/services/audit.py::list_audit_log)
 """
 
+import hashlib
+import secrets
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_current_user
-from app.config import DEFAULT_NEW_USER_PASSWORD
-from app.database import get_db
+from app.api.dependencies import get_current_user, get_db_with_tenant
+from app.config import DEFAULT_NEW_USER_PASSWORD, FRONTEND_URL
+from app.models.invitation import Invitation
 from app.models.project import Project
 from app.models.team import ProjectAdmin, Team, TeamRole, UserTeamMembership
 from app.models.user import User
 from app.services.access_control import has_permission
 from app.services.audit import AuditAccessError, list_audit_log, record_audit
 from app.services.auth import ResolvedIdentity, hash_password
+from app.services.notifications import notify_role_changed
 
-router = APIRouter(prefix="/admin", tags=["admin"])
+INVITE_TTL_HOURS = 72
+_INVITE_ROLES = {"viewer", "contributor", "team_lead", "project_admin", "org_admin"}
+
+router = APIRouter(
+    prefix="/admin",
+    tags=["admin"],
+)
+
 
 _ROLE_ALIASES = {"member": "contributor"}
 _TEAM_ROLES = {"viewer", "contributor", "team_lead"}
@@ -47,9 +71,14 @@ _TEAM_ROLES = {"viewer", "contributor", "team_lead"}
 
 # --- request / response models ------------------------------------------------
 
-class CreateUserRequest(BaseModel):
+class InviteUserRequest(BaseModel):
     email: str = Field(min_length=5, max_length=254)
-    full_name: str | None = Field(default=None, max_length=255)
+    role: str = Field(default="contributor")
+    # Master Plan v2, item 16: optional project/team scope. team_id requires
+    # project_id (a team belongs to exactly one project); project_id alone is
+    # valid only for role="project_admin" (a project-wide scope, no team).
+    project_id: uuid.UUID | None = None
+    team_id: uuid.UUID | None = None
 
 
 class OrgAdminRequest(BaseModel):
@@ -214,38 +243,94 @@ def _load_membership(db, identity, membership_id) -> tuple[UserTeamMembership, T
 @router.get("/users", response_model=list[AdminUser])
 def list_admin_users(
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
-    _require_directory_access(identity)
+    # UI_FIXES_2026-09-15.md #9: this router no longer has a blanket
+    # org-admin-only gate (that also silently blocked team_lead from
+    # /assign-roles and /audit-log despite their own correct internal role
+    # checks) — so a directory-listing endpoint like this one needs its own
+    # explicit check now that it's reachable by anyone authenticated.
+    if not (identity.is_org_admin or identity.project_admin_project_ids
+            or any(m.role == TeamRole.team_lead for m in identity.team_memberships)):
+        raise HTTPException(status_code=403, detail="You don't have access to the user directory")
     return _all_users(db, identity.tenant_id)
 
 
-@router.post("/users", status_code=201)
-def create_org_user(
-    body: CreateUserRequest,
+
+@router.post("/invite", status_code=201)
+def invite_user(
+    body: InviteUserRequest,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
+    """Generate a single-use invite link (org_admin only). Email sending deferred —
+    the raw link is returned directly so the admin can hand it out.
+
+    Master Plan v2, item 16: optional project_id/team_id. When present, the
+    invitee is automatically assigned that team role (or project_admin
+    scope) the moment they accept — rather than landing with a bare org
+    account and needing a separate manual assignment afterward."""
     if not identity.is_org_admin:
-        raise HTTPException(status_code=403, detail="Only organization admins can add users")
+        raise HTTPException(status_code=403, detail="Only organization admins can invite users")
     email = body.email.strip().lower()
     if "@" not in email:
         raise HTTPException(status_code=422, detail="Enter a valid email address")
+    role = body.role.strip().lower()
+    if role not in _INVITE_ROLES:
+        raise HTTPException(status_code=422, detail=f"role must be one of {sorted(_INVITE_ROLES)}")
     if db.execute(select(User).where(User.email == email)).scalar_one_or_none() is not None:
         raise HTTPException(status_code=409, detail="An account with that email already exists")
-    full_name = _clean_name(body.full_name)
-    user = User(
-        email=email, tenant_id=identity.tenant_id, password_hash=hash_password(DEFAULT_NEW_USER_PASSWORD),
-        is_org_admin=False, full_name=full_name,
+
+    project_id = body.project_id
+    team_id = body.team_id
+    if team_id is not None:
+        team = db.get(Team, team_id)
+        if team is None:
+            raise HTTPException(status_code=404, detail="Team not found")
+        project = db.get(Project, team.project_id)
+        if project is None or project.tenant_id != identity.tenant_id:
+            raise HTTPException(status_code=404, detail="Team not found")
+        if project_id is not None and project_id != team.project_id:
+            raise HTTPException(status_code=422, detail="team_id does not belong to project_id")
+        project_id = team.project_id
+        if role not in _TEAM_ROLES:
+            raise HTTPException(status_code=422, detail=f"team_id requires role to be one of {sorted(_TEAM_ROLES)}")
+    elif project_id is not None:
+        project = db.get(Project, project_id)
+        if project is None or project.tenant_id != identity.tenant_id:
+            raise HTTPException(status_code=404, detail="Project not found")
+        if role != "project_admin":
+            raise HTTPException(status_code=422, detail="project_id without team_id requires role='project_admin'")
+
+    raw_token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+    invitation = Invitation(
+        tenant_id=identity.tenant_id,
+        email=email,
+        role=role,
+        project_id=project_id,
+        team_id=team_id,
+        token_hash=token_hash,
+        invited_by=identity.user_id,
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=INVITE_TTL_HOURS),
     )
-    db.add(user)
+    db.add(invitation)
     db.flush()
-    record_audit(db, actor_id=identity.user_id, action="CREATE_USER", resource_type="user",
-                 resource_id=user.user_id, details={"email": email})
+    record_audit(db, actor_id=identity.user_id, action="INVITE_USER", resource_type="user",
+                 resource_id=invitation.invitation_id,
+                 details={"email": email, "role": role, "project_id": str(project_id) if project_id else None,
+                          "team_id": str(team_id) if team_id else None})
     db.commit()
-    db.refresh(user)
-    return {"status": "created", "user_id": str(user.user_id), "email": email,
-            "full_name": user.full_name, "default_password": DEFAULT_NEW_USER_PASSWORD}
+
+    return {
+        "status": "invited",
+        "email": email,
+        "role": role,
+        "project_id": str(project_id) if project_id else None,
+        "team_id": str(team_id) if team_id else None,
+        "expires_at": invitation.expires_at.isoformat(),
+        "invite_link": f"{FRONTEND_URL.rstrip('/')}/accept-invite?token={raw_token}",
+    }
 
 
 # --- add access ---------------------------------------------------------------
@@ -254,7 +339,7 @@ def create_org_user(
 def assign_roles(
     body: AssignRolesRequest,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     email = body.email.strip().lower()
     if "@" not in email:
@@ -280,6 +365,32 @@ def assign_roles(
             if not has_permission(db, identity.user_id, "manage_team_members", team.team_id, project.project_id):
                 raise HTTPException(status_code=403, detail=f"You cannot manage members of team '{team.name}'")
 
+        # A team_lead may only change the role of someone ALREADY in the
+        # project (any team) — not add a brand-new person to the project, and
+        # not bring in an existing org account that has no prior membership
+        # here. Project admins and org admins can add anyone. This is
+        # deliberately per-project, not per-team: a team_lead moving someone
+        # from another team on the same project into their own is allowed.
+        target_user = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
+        for team, project, _role in norm:
+            is_project_admin_here = project.project_id in set(identity.project_admin_project_ids)
+            if identity.is_org_admin or is_project_admin_here:
+                continue
+            already_in_project = target_user is not None and db.execute(
+                select(UserTeamMembership).where(
+                    UserTeamMembership.user_id == target_user.user_id,
+                    UserTeamMembership.project_id == project.project_id,
+                )
+            ).first() is not None
+            if not already_in_project:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        f"As a team lead you can only change the role of someone already in "
+                        f"'{project.name}' — adding a new person to the project requires a project admin."
+                    ),
+                )
+
         tenant_for_new = norm[0][1].tenant_id
         target, new_user = _get_or_create_target(db, identity, email, tenant_for_new, full_name=full_name)
 
@@ -299,10 +410,18 @@ def assign_roles(
                          resource_id=target.user_id,
                          details={"email": email, "team_id": str(team.team_id),
                                   "project_id": str(project.project_id), "role": role})
+            if target.user_id != identity.user_id:
+                notify_role_changed(
+                    db, affected_user_id=target.user_id, team_name=team.name,
+                    role=role, project_id=project.project_id,
+                )
             assigned.append(f"{role} on {team.name}")
         db.commit()
+        message = f"{email}: {', '.join(assigned)}."
+        if new_user:
+            message += f' New account created with default password "{DEFAULT_NEW_USER_PASSWORD}".'
         return {"status": "assigned", "user_id": str(target.user_id), "email": email,
-                "new_user": new_user, "message": f"{email}: {', '.join(assigned)}."}
+                "new_user": new_user, "message": message}
 
     # ---- project_admin -> ProjectAdmin rows (org_admin only) ----
     if body.mode == "project_admin":
@@ -327,8 +446,11 @@ def assign_roles(
                          details={"email": email, "project_id": str(project.project_id)})
             names.append(project.name)
         db.commit()
+        message = f"{email} is now Project Admin of {', '.join(names)}."
+        if new_user:
+            message += f' New account created with default password "{DEFAULT_NEW_USER_PASSWORD}".'
         return {"status": "assigned", "user_id": str(target.user_id), "email": email,
-                "new_user": new_user, "message": f"{email} is now Project Admin of {', '.join(names)}."}
+                "new_user": new_user, "message": message}
 
     # ---- org_admin -> is_org_admin flag (org_admin only) ----
     if body.mode == "org_admin":
@@ -341,8 +463,11 @@ def assign_roles(
         record_audit(db, actor_id=identity.user_id, action="GRANT_ORG_ADMIN", resource_type="user",
                      resource_id=target.user_id, details={"email": email})
         db.commit()
+        message = f"{email} is now an Organization Admin."
+        if new_user:
+            message += f' New account created with default password "{DEFAULT_NEW_USER_PASSWORD}".'
         return {"status": "assigned", "user_id": str(target.user_id), "email": email,
-                "new_user": new_user, "message": f"{email} is now an Organization Admin."}
+                "new_user": new_user, "message": message}
 
     raise HTTPException(status_code=422, detail=f"Unknown mode: {body.mode}")
 
@@ -354,7 +479,7 @@ def update_team_role(
     membership_id: uuid.UUID,
     body: RoleUpdateRequest,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     role = _ROLE_ALIASES.get(body.role, body.role)
     if role not in _TEAM_ROLES:
@@ -364,6 +489,11 @@ def update_team_role(
     record_audit(db, actor_id=identity.user_id, action="UPDATE_ROLE", resource_type="user",
                  resource_id=m.user_id,
                  details={"team_id": str(team.team_id), "project_id": str(project.project_id), "role": role})
+    if m.user_id != identity.user_id:
+        notify_role_changed(
+            db, affected_user_id=m.user_id, team_name=team.name,
+            role=role, project_id=project.project_id,
+        )
     db.commit()
     return {"status": "updated", "membership_id": str(m.id), "role": role}
 
@@ -372,7 +502,7 @@ def update_team_role(
 def remove_team_membership(
     membership_id: uuid.UUID,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     m, team, project = _load_membership(db, identity, membership_id)
     record_audit(db, actor_id=identity.user_id, action="REMOVE_ROLE", resource_type="user",
@@ -388,7 +518,7 @@ def remove_team_membership(
 def remove_project_admin(
     scope_id: uuid.UUID,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     if not identity.is_org_admin:
         raise HTTPException(status_code=403, detail="Only organization admins can remove Project Admin")
@@ -409,7 +539,7 @@ def remove_project_admin(
 def revoke_org_admin(
     body: RevokeOrgAdminRequest,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     if not identity.is_org_admin:
         raise HTTPException(status_code=403, detail="Only organization admins can revoke Org Admin")
@@ -442,7 +572,7 @@ def revoke_org_admin(
 def grant_org_admin(
     body: OrgAdminRequest,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     if not identity.is_org_admin:
         raise HTTPException(status_code=403, detail="Only organization admins can grant admin access")
@@ -461,7 +591,7 @@ def grant_org_admin(
 def assign_project_access(
     body: ProjectAccessRequest,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     role = _ROLE_ALIASES.get(body.role, body.role)
     if role not in _TEAM_ROLES:
@@ -506,7 +636,7 @@ def assign_project_access(
 def get_audit_log(
     limit: int = 200,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     """
     Account / permission-management audit trail, scoped by role:

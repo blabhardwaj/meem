@@ -18,7 +18,7 @@ const Card = ({
       onClick={onClick}
     >
       {(title || description || Icon) && (
-        <div className="p-5 border-b border-border/50">
+        <div className={`p-5 ${children ? 'border-b border-border/50' : ''}`}>
           <div className="flex items-center gap-3">
             {Icon && (
               <div className="p-2 bg-background rounded-lg text-primary">
@@ -32,11 +32,13 @@ const Card = ({
           </div>
         </div>
       )}
-      
-      <div className="p-5">
-        {children}
-      </div>
-      
+
+      {children && (
+        <div className="p-5">
+          {children}
+        </div>
+      )}
+
       {footer && (
         <div className="card-footer px-5 py-4 bg-background/50 border-t border-border/50">
           {footer}

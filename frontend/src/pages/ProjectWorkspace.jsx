@@ -1,21 +1,23 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { useParams, Link } from 'react-router-dom';
-import { ArrowLeft, Lock, PanelRight } from 'lucide-react';
+import { useParams, Link, useSearchParams } from 'react-router-dom';
+import { Layers } from 'lucide-react';
+import BackButton from '../components/ui/BackButton';
 import SourcePanel from '../components/sources/SourcePanel';
 import ChatPanel from '../components/chat/ChatPanel';
 import ChatModeTabs from '../components/chat/ChatModeTabs';
-import StudioPanel from '../components/studio/StudioPanel';
 import Badge from '../components/ui/Badge';
 import Modal from '../components/ui/Modal';
 import Button from '../components/ui/Button';
 import Input from '../components/ui/Input';
-import MarkdownViewer from '../components/ui/MarkdownViewer';
-import { draftTitle } from '../lib/markdown';
 import { projectsApi, workspaceApi, accessRequestsApi, teamsApi } from '../lib/api';
 import { useAuth } from '../context/AuthContext';
 
 const ProjectWorkspace = () => {
   const { projectId } = useParams();
+  const [searchParams] = useSearchParams();
+  const urlTab = searchParams.get('tab');
+  const urlQuery = searchParams.get('q');
+  const highlightDocumentId = searchParams.get('highlight');
   const { user } = useAuth();
   const [project, setProject] = useState(null);
   const [documents, setDocuments] = useState([]);
@@ -28,16 +30,21 @@ const ProjectWorkspace = () => {
   // uploading a different document.
   const [reviewSession, setReviewSession] = useState(null);
 
-  // Chat Interface mode — deterministic tab selection (Draft | Scan | Search |
-  // Query). An active reviewSession overrides this (upload -> review flow).
-  const [chatTab, setChatTab] = useState('draft');
+  // Chat panel mode — deterministic tab selection (Draft | Search). An active
+  // reviewSession overrides this (upload -> review flow). 'rag' and 'query'
+  // are accepted as legacy URL aliases for 'search' (old bookmarks/links).
+  const CHAT_TABS = ['draft', 'search', 'rag', 'query'];
+  const normalizeTab = (tab) => (tab === 'rag' || tab === 'query' ? 'search' : tab);
+  const [chatTab, setChatTab] = useState(
+    urlTab && CHAT_TABS.includes(urlTab) ? normalizeTab(urlTab) : 'draft'
+  );
 
-  // Studio side panel (Part 2) — hidden by default, opened from the toolbar.
-  const [studioOpen, setStudioOpen] = useState(false);
-  // A scratch/working template uploaded into Studio — client-side only, kept
-  // for this project visit, never persisted.
-  const [scratchTemplate, setScratchTemplate] = useState(null);
-  const [studioViewerDoc, setStudioViewerDoc] = useState(null);
+  useEffect(() => {
+    if (urlTab && CHAT_TABS.includes(urlTab)) {
+      setChatTab(normalizeTab(urlTab));
+    }
+  }, [urlTab]);
+
 
   // Confidential-access requests (viewer/contributor entry point)
   const [wsProject, setWsProject] = useState(null); // this project's teams + my per-team role
@@ -61,7 +68,9 @@ const ProjectWorkspace = () => {
     try {
       const [projects, docs, ws, mine] = await Promise.all([
         projectsApi.list(),
-        projectsApi.documents(projectId),
+        // includeDrafts is server-gated to org_admin/project_admin — a
+        // contributor passing it still only gets their own drafts back.
+        projectsApi.documents(projectId, { includeDrafts: true }),
         workspaceApi.get().catch(() => null),
         accessRequestsApi.mine().catch(() => []),
       ]);
@@ -79,6 +88,41 @@ const ProjectWorkspace = () => {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Scroll a document into view when opened via ?highlight=<document_id>
+  // (e.g. from Intelligence's Recent Project Activity — see
+  // UI_FIXES_2026-09-15.md #19). StageSection auto-expands the stage that
+  // contains it; this just brings it into the viewport once rendered.
+  //
+  // BUGFIXES_2026-09-15.md: StageSection's own expand happens in a CHILD
+  // effect + state update, which lands in a LATER commit than this effect
+  // (same trigger, but a child's setState-in-effect always schedules an
+  // extra render). Reading the DOM here on the very first pass can catch
+  // the section still collapsed (present in the DOM via CSS grid-rows-[0fr]
+  // opacity-0, so scrollIntoView "succeeds" against a zero-height target —
+  // the page silently jumps to an empty-looking area). Poll across a
+  // handful of frames instead of a single attempt, so this effect's own
+  // scroll waits for the child's expand to actually commit.
+  useEffect(() => {
+    if (!highlightDocumentId || loading) return undefined;
+    let cancelled = false;
+    let attempts = 0;
+    const tryScroll = () => {
+      if (cancelled) return;
+      const el = document.getElementById(`document-${highlightDocumentId}`);
+      // StageSection's collapsed state uses grid-rows-[0fr] + opacity-0, not
+      // display:none — the element stays in the DOM and offsetParent stays
+      // non-null even collapsed, so check its actual rendered height instead.
+      if (el && el.getBoundingClientRect().height > 0) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return;
+      }
+      attempts += 1;
+      if (attempts < 10) requestAnimationFrame(tryScroll);
+    };
+    requestAnimationFrame(tryScroll);
+    return () => { cancelled = true; };
+  }, [highlightDocumentId, loading, documents]);
 
   // Teams in this project where I'm viewer/contributor — i.e. not auto-cleared for confidential docs.
   const requestableTeams = (wsProject?.teams || []).filter(
@@ -111,7 +155,10 @@ const ProjectWorkspace = () => {
   // Our model: team_lead+ or project_admin can review (the backend still checks
   // the document's *specific* team and returns a clear 403 otherwise).
   const canReview = ['org_admin', 'project_admin', 'team_lead'].includes(role);
-  const canManageStages = ['org_admin', 'project_admin'].includes(role);
+  // Only org_admin/project_admin may force through a document that failed
+  // the scan (approve_document() re-checks this server-side regardless).
+  const canOverrideScan = ['org_admin', 'project_admin'].includes(role);
+  const canManageStages = ['org_admin', 'project_admin'].includes(role) || Boolean(user?.is_org_admin);
   const canManageTeams = ['org_admin', 'project_admin'].includes(role);
 
   const teamNames = (wsProject?.teams || []).map((t) => t.name);
@@ -162,6 +209,7 @@ const ProjectWorkspace = () => {
       reformedContent: result.reformed_content,
       injectionFlagged: result.injection_flagged,
       injectionFindings: result.injection_findings,
+      failedCriteria: result.failed_criteria,
     });
   };
 
@@ -184,7 +232,7 @@ const ProjectWorkspace = () => {
       <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
         <h2 className="text-2xl font-bold text-gray-200 mb-2">Couldn't open this project</h2>
         <p className="text-gray-500 mb-4">{error}</p>
-        <Link to="/" className="text-primary hover:underline">Return to Projects</Link>
+        <BackButton fallbackTo="/" label="Return to Projects" />
       </div>
     );
   }
@@ -193,10 +241,7 @@ const ProjectWorkspace = () => {
     <div className="flex flex-col h-[calc(100vh-3.5rem)] overflow-hidden">
       {/* Workspace Header — stays fixed; the columns below scroll independently */}
       <div className="h-14 border-b border-border bg-background px-6 flex items-center gap-4 shrink-0 overflow-x-auto">
-        <Link to="/" className="text-gray-400 hover:text-gray-200 transition-colors flex items-center gap-1 text-sm">
-          <ArrowLeft size={16} />
-          All Projects
-        </Link>
+        <BackButton fallbackTo="/" />
         <div className="w-px h-4 bg-border"></div>
         <h1 className="font-semibold text-gray-100">{project.project_name}</h1>
         <button
@@ -210,36 +255,33 @@ const ProjectWorkspace = () => {
             {teamNames.length ? teamNames.join(', ') : '—'}
           </span>
         </button>
-        <div className="flex-1" />
-        {requestableTeams.length > 0 && (
-          <Button
-            size="sm"
-            variant="secondary"
-            icon={Lock}
-            onClick={() => { setReqNotice(''); setReqError(''); setAccessOpen(true); }}
-          >
-            Confidential access
-          </Button>
-        )}
-        <Button
-          size="sm"
-          variant={studioOpen ? 'primary' : 'secondary'}
-          icon={PanelRight}
-          onClick={() => setStudioOpen((v) => !v)}
+
+        <div
+          title="Pipeline stages in this project"
+          className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-2.5 py-1 text-xs font-medium text-gray-300 shrink-0"
         >
-          Studio
-        </Button>
+          <Layers size={13} className="text-primary" />
+          Stages
+          <span className="text-gray-500 max-w-[260px] truncate">
+            {(wsProject?.stages || []).map((s) => s.name).join(' → ') || '—'}
+          </span>
+        </div>
+
+
+        <div className="flex-1" />
       </div>
 
-      {/* Two-column layout (Sources + Chat Interface). Studio is a toggleable
-          overlay panel, not a permanent column. Each column scrolls inside its
+      {/* Two-column layout (Sources + Chat). Each column scrolls inside its
           own fixed-height pane; below lg the row scrolls as one stack. */}
       <div className="relative flex-1 min-h-0 flex flex-col lg:flex-row overflow-y-auto lg:overflow-hidden">
-        <div className="w-full lg:w-[32%] shrink-0 lg:h-full lg:min-h-0 lg:overflow-y-auto">
+        <div className="w-full lg:w-[32%] shrink-0 lg:h-full lg:min-h-0 lg:overflow-y-auto scrollbar-thin">
           <SourcePanel
             documents={documents}
             canReview={canReview}
+            canOverrideScan={canOverrideScan}
             canDelete={user?.is_org_admin}
+            canEditAny={canReview}
+            currentUserId={user?.user_id}
             onChanged={load}
             projectId={projectId}
             stages={wsProject?.stages || []}
@@ -247,6 +289,9 @@ const ProjectWorkspace = () => {
             canManageStages={canManageStages}
             onStagesChanged={() => load({ silent: true })}
             onDocumentUploaded={handleDocumentUploaded}
+            hasRequestableTeams={requestableTeams.length > 0}
+            onRequestConfidentialAccess={() => { setReqNotice(''); setReqError(''); setAccessOpen(true); }}
+            highlightDocumentId={highlightDocumentId}
           />
         </div>
         {/* Center pane: header + scrolling message area + input pinned to the
@@ -256,57 +301,23 @@ const ProjectWorkspace = () => {
         <div className="w-full lg:flex-1 shrink-0 flex flex-col h-[70vh] lg:h-full lg:min-h-0 overflow-hidden border-t border-border lg:border-t-0 lg:border-l">
           {!reviewSession && <ChatModeTabs active={chatTab} onChange={setChatTab} />}
           <ChatPanel
-            key={reviewSession ? 'review' : chatTab}
+            key={reviewSession ? 'review' : `${chatTab}-${urlQuery || ''}`}
             projectId={projectId}
             mode={reviewSession ? 'review' : chatTab}
             reviewSession={reviewSession}
+            initialQuery={urlQuery}
             onReviewFinalized={handleReviewFinalized}
             onReviewExit={() => setReviewSession(null)}
           />
         </div>
 
-        {/* Studio — toggleable panel (Claude artifact-panel pattern): an in-flow
-            column on lg that shrinks the chat; a fixed overlay drawer on mobile. */}
-        {studioOpen && (
-          <>
-            <button
-              type="button"
-              aria-label="Close Studio"
-              onClick={() => setStudioOpen(false)}
-              className="fixed inset-x-0 bottom-0 top-14 z-30 bg-background/50 lg:hidden"
-            />
-            <div className="fixed top-14 bottom-0 right-0 z-40 w-full max-w-md border-l border-border shadow-2xl lg:static lg:top-0 lg:z-auto lg:h-full lg:w-[380px] lg:max-w-none lg:shadow-none shrink-0">
-              <StudioPanel
-                projectId={projectId}
-                onClose={() => setStudioOpen(false)}
-                scratchTemplate={scratchTemplate}
-                onScratchUpload={setScratchTemplate}
-                onScratchClear={() => setScratchTemplate(null)}
-                onScratchView={(tpl) => setStudioViewerDoc({
-                  title: draftTitle({ content: tpl.content, filename: tpl.name }),
-                  subtitle: `${tpl.name} · working template`,
-                  content: tpl.content,
-                })}
-              />
-            </div>
-          </>
-        )}
       </div>
-
-      <MarkdownViewer
-        open={Boolean(studioViewerDoc)}
-        onClose={() => setStudioViewerDoc(null)}
-        title={studioViewerDoc?.title}
-        subtitle={studioViewerDoc?.subtitle}
-        content={studioViewerDoc?.content || ''}
-      />
 
       <Modal
         open={teamsOpen}
         onClose={() => setTeamsOpen(false)}
         title="Teams"
         description="The teams that exist in this project. (To add people to a team, use Assign Roles.)"
-        footer={<Button variant="ghost" onClick={() => setTeamsOpen(false)}>Close</Button>}
       >
         <div className="space-y-4">
           {teamError && <p className="text-sm text-red-400">{teamError}</p>}
@@ -357,7 +368,6 @@ const ProjectWorkspace = () => {
         onClose={() => setAccessOpen(false)}
         title="Request confidential access"
         description="Confidential documents need clearance. Ask the team lead for a grant — it lasts 90 days."
-        footer={<Button variant="ghost" onClick={() => setAccessOpen(false)}>Close</Button>}
       >
         <div className="space-y-3">
           {reqNotice && <p className="text-sm text-emerald-400">{reqNotice}</p>}

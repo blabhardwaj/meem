@@ -35,6 +35,7 @@ from app.models.team import (
 )
 from app.services.access_control import _is_org_admin, _is_project_admin, _get_team_membership
 from app.services.audit import record_audit
+from app.services.notifications import notify_access_request_created
 
 GRANT_TTL_DAYS = 90
 
@@ -171,6 +172,10 @@ def request_confidential_access(
         resource_type="team",
         resource_id=team.team_id,
         details={"team": team.name, "project": project.name},
+    )
+    notify_access_request_created(
+        db, team_id=team.team_id, team_name=team.name, project_id=project.project_id,
+        requester_id=user_id, request_id=req.request_id,
     )
     db.commit()
     db.refresh(req)

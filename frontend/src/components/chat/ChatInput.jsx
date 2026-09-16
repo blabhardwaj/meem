@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Send } from 'lucide-react';
 import Button from '../ui/Button';
 
-const ChatInput = ({ onSend, disabled }) => {
+const ChatInput = ({ onSend, disabled, placeholder = 'Ask a question about your project...' }) => {
   const [message, setMessage] = useState('');
 
   const handleSubmit = (e) => {
@@ -21,7 +21,7 @@ const ChatInput = ({ onSend, disabled }) => {
           value={message}
           onChange={(e) => setMessage(e.target.value)}
           disabled={disabled}
-          placeholder="Ask a question about your project..."
+          placeholder={placeholder}
           className="w-full bg-surface border border-border rounded-lg pl-4 pr-12 py-3 text-sm text-gray-200 placeholder:text-gray-500 focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary disabled:opacity-50"
         />
         <Button 

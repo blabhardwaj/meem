@@ -15,8 +15,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_current_user
-from app.database import get_db
+from app.api.dependencies import get_current_user, get_db_with_tenant
 from app.services.activity import (
     ActivityAccessError,
     ActivityNotFound,
@@ -31,7 +30,7 @@ router = APIRouter(prefix="/activity", tags=["activity"])
 @router.get("/projects")
 def activity_projects(
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     return list_activity_projects(db, identity)
 
@@ -42,7 +41,7 @@ def activity_feed(
     team_id: uuid.UUID = Query(...),
     limit: int = Query(200, ge=1, le=500),
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     try:
         return list_team_activity(db, identity, project_id, team_id, limit)

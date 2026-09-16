@@ -22,14 +22,20 @@ upload_and_scan() ties together:
 """
 
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from app.models.document import DocumentScan, DocumentStatus, DocumentVersion, ScanReviewStatus
+from app.models.document import Document, DocumentScan, DocumentStatus, DocumentVersion, ScanReviewStatus
+from app.models.workflow import WorkflowState, WorkflowStatus
 from app.services import draft_workspace
-from app.services.document_finalize import run_full_scan, scan_passed
+from app.services.access_control import has_permission
+from app.services.document_finalize import failed_criteria, run_full_scan, scan_passed
 from app.services.document_persistence import CreatedDocumentFromFile, create_document_from_file
+from app.services.indexing import index_document, should_index
 from app.services.injection_scan import scan_for_injection
+from app.services.notifications import notify_document_viewers
+from app.services.workflow import promote_version_on_approval
 
 
 def upload_and_scan(
@@ -57,6 +63,13 @@ def upload_and_scan(
             "reformed_content": str | None,
             "injection_flagged": bool, "injection_findings": list,
             "scan_skipped": bool,   # True when the content-hash marker matched
+            "scan_passed": bool, "failed_criteria": list[str],
+            "status": str,    # the version's REAL resulting DocumentStatus —
+                               # "pending_review" for an ordinary upload, but
+                               # "indexed" when the uploader could auto-approve
+                               # and the scan passed (BUGFIXES_2026-09-15.md
+                               # Bug 3) or "needs_attention" when flagged.
+            "auto_approved": bool,
         }
     """
     created: CreatedDocumentFromFile = create_document_from_file(
@@ -103,6 +116,39 @@ def upload_and_scan(
             DocumentVersion.version_id == created.version_id
         ).update({"status": DocumentStatus.needs_attention}, synchronize_session=False)
 
+    # BUGFIXES_2026-09-15.md: an uploader who already holds 'approve'
+    # permission on this team (team_lead/admin) gets their upload reviewed
+    # immediately, right here, instead of silently sitting in
+    # pending_review forever until they separately open the review chat and
+    # finalize — most such uploaders have no reason to know that second
+    # step exists, and previously ended up with a WorkflowState the UI
+    # showed as "approved" while should_index() could never be true (the
+    # version's own status never left pending_review). The gate now runs
+    # BEFORE any WorkflowState is set to approved: passing => real
+    # Scanner-driven `indexed` status, approved, and actually indexed into
+    # Qdrant; failing => stays `pending_review`/`needs_attention` and the
+    # WorkflowState stays `draft`, exactly like any other failed scan — an
+    # uploader with approve rights never gets a free pass around the scan.
+    can_auto_approve = (
+        created.workflow_state is not None  # stage requires approval -> a WorkflowState row exists
+        and has_permission(db, user_id, "approve", team_id, project_id)
+    )
+    auto_approved = False
+    final_status = (
+        DocumentStatus.needs_attention if scan_outcome["injection"]["flagged"] else DocumentStatus.pending_review
+    )
+    review_status = ScanReviewStatus.pending
+
+    if can_auto_approve and passed and not scan_outcome["injection"]["flagged"]:
+        final_status = DocumentStatus.indexed
+        review_status = ScanReviewStatus.not_required
+        auto_approved = True
+
+    if final_status != DocumentStatus.pending_review:
+        db.query(DocumentVersion).filter(
+            DocumentVersion.version_id == created.version_id
+        ).update({"status": final_status}, synchronize_session=False)
+
     if scan_outcome["scan"] is not None:
         db.add(DocumentScan(
             version_id=created.version_id,
@@ -110,21 +156,44 @@ def upload_and_scan(
             criteria=scan_outcome["scan"]["criteria"],
             reform_triggered=scan_outcome["reformed_content"] is not None,
             reformed_content=scan_outcome["reformed_content"],
-            # Upload-time scans are never "not_required" even on a clean pass
-            # — the document still needs an explicit human finalize (chat)
-            # before it can be indexed, per the upload+review flow.
-            review_status=ScanReviewStatus.pending,
+            review_status=review_status,
             injection_flagged=scan_outcome["injection"]["flagged"],
             injection_findings=scan_outcome["injection"]["findings"],
         ))
+
+    if auto_approved:
+        now = datetime.now(timezone.utc)
+        db.query(WorkflowState).filter(
+            WorkflowState.document_id == created.document_id
+        ).update({
+            "state": WorkflowStatus.approved,
+            "approved_by": user_id,
+            "approval_timestamp": now,
+        }, synchronize_session=False)
+        promote_version_on_approval(
+            db, document_id=created.document_id, version_id=created.version_id,
+        )
 
     # Unconditional (not nested under the DocumentScan branch above): the
     # needs_attention status update must be committed even on a total
     # scoring failure (scan_outcome["scan"] is None) if injection was flagged.
     db.commit()
 
+    if auto_approved and should_index(db, created.document_id):
+        index_document(db, created.document_id)
+        approved_document = db.get(Document, created.document_id)
+        if approved_document is not None:
+            notify_document_viewers(
+                db, document=approved_document, exclude_user_ids={user_id},
+            )
+            db.commit()
+
     # Seed the review session's working file — same draft_workspace machinery
     # Phase 4 uses, just seeded with this upload's content instead of blank.
+    # Still seeded even when auto-approved: the uploader may still want to
+    # open the review chat afterward (e.g. to fix something despite passing,
+    # or because they didn't intend the auto-approve) — that path is
+    # unaffected by this fix.
     draft_workspace.write_working_draft(session_id, seed_content)
 
     return {
@@ -136,4 +205,9 @@ def upload_and_scan(
         "injection_findings": scan_outcome["injection"]["findings"],
         "scan_skipped": scan_skipped,
         "scan_passed": passed,
+        "failed_criteria": failed_criteria(
+            scan_outcome["scan"].get("criteria") if scan_outcome["scan"] else None
+        ),
+        "status": final_status.value,
+        "auto_approved": auto_approved,
     }

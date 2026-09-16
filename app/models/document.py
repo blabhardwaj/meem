@@ -178,6 +178,24 @@ class DocumentScan(Base):
     )
 
     
+class VersionApprovalOutcome(str, enum.Enum):
+    """
+    A version's resolved fate, independent of DocumentStatus (which is
+    purely the Scanner's verdict on content quality). None until resolved —
+    a version sitting in draft/pending_review/needs_attention has no
+    outcome yet. 'approved' is set on exactly the version approve_document()
+    promotes to current (which also assigns it its version_number).
+    'rejected' covers BOTH an explicit human reject() call AND a version
+    that was still unresolved when a later version got approved instead
+    (auto-superseded) — deliberately the same value/label for both, per
+    product decision: the versions list doesn't distinguish "a reviewer
+    said no" from "a newer draft won instead," both are dead ends shown as
+    "Rejected".
+    """
+    approved = "approved"
+    rejected = "rejected"
+
+
 class DocumentVersion(Base):
     """
     Actual file bytes for one version of a document. Structure Scanner review
@@ -188,6 +206,14 @@ class DocumentVersion(Base):
     New versions are only created via an explicit "upload new version" action
     from within an existing document's context — never automatically/via hash
     detection. The normal add-document flow always creates a new Document.
+
+    version_number means "the Nth version of this document to ever be
+    APPROVED" — nullable, assigned ONLY by approve_document(), never at
+    creation/finalize time. A version with no number yet is a draft/pending/
+    needs_attention attempt that hasn't been resolved either way; the
+    versions list shows it unnumbered (as "Draft"), distinct from the
+    numbered "v1, v2, v3..." lineage of what was actually approved over
+    time. See approval_outcome for how a version's fate is resolved.
     """
     __tablename__ = "document_versions"
 
@@ -197,7 +223,7 @@ class DocumentVersion(Base):
     document_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("documents.document_id"), nullable=False
     )
-    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    version_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     file_data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     file_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     uploaded_by: Mapped[uuid.UUID] = mapped_column(
@@ -207,6 +233,10 @@ class DocumentVersion(Base):
         Enum(DocumentStatus, name="document_status"),
         default=DocumentStatus.pending_review,
         nullable=False,
+    )
+    approval_outcome: Mapped[VersionApprovalOutcome | None] = mapped_column(
+        Enum(VersionApprovalOutcome, name="version_approval_outcome"),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)

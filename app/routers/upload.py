@@ -140,7 +140,6 @@ def upload_document(
 
     version = DocumentVersion(
         document_id=document.document_id,
-        version_number=1,
         file_data=file_bytes,
         file_size_bytes=size_bytes,
         uploaded_by=uploaded_by,

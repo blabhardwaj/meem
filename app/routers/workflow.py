@@ -19,8 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_current_user
-from app.database import get_db
+from app.api.dependencies import get_current_user, get_db_with_tenant
 from app.models.document import Document
 from app.models.workflow import WorkflowState
 from app.services.access_control import can_view_document
@@ -28,6 +27,7 @@ from app.services.auth import ResolvedIdentity
 from app.services.workflow import (
     WorkflowError,
     WorkflowPermissionError,
+    WorkflowScanNotPassedError,
     approve_document,
     get_workflow_state,
     reject_document,
@@ -39,6 +39,12 @@ router = APIRouter(prefix="/documents", tags=["workflow"])
 
 class RejectRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=2000)
+
+
+class ApproveRequest(BaseModel):
+    # org_admin/project_admin only — approve_document() re-checks the role
+    # itself, this flag alone grants nothing.
+    override: bool = False
 
 
 class WorkflowStateResponse(BaseModel):
@@ -73,7 +79,7 @@ def _load_document(db: Session, identity: ResolvedIdentity, document_id: uuid.UU
 def submit(
     document_id: uuid.UUID,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     doc = _load_document(db, identity, document_id)
     role = identity.role_on_team(doc.uploaded_as_team_id, doc.project_id)
@@ -91,17 +97,24 @@ def submit(
 @router.post("/{document_id}/approve", response_model=WorkflowStateResponse)
 def approve(
     document_id: uuid.UUID,
+    body: ApproveRequest = ApproveRequest(),
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     doc = _load_document(db, identity, document_id)
     role = identity.role_on_team(doc.uploaded_as_team_id, doc.project_id)
     try:
         state = approve_document(
-            db, document_id, identity.user_id, doc.uploaded_as_team_id, doc.project_id, role
+            db, document_id, identity.user_id, doc.uploaded_as_team_id, doc.project_id, role,
+            override=body.override,
         )
     except WorkflowPermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except WorkflowScanNotPassedError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": str(exc), "scan": exc.scan_detail},
+        ) from exc
     except WorkflowError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _to_response(state)
@@ -112,7 +125,7 @@ def reject(
     document_id: uuid.UUID,
     body: RejectRequest,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     doc = _load_document(db, identity, document_id)
     role = identity.role_on_team(doc.uploaded_as_team_id, doc.project_id)
@@ -134,7 +147,7 @@ def reject(
 def status(
     document_id: uuid.UUID,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     doc = _load_document(db, identity, document_id)
     if not can_view_document(db, identity.user_id, doc):

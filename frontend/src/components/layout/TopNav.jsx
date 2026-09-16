@@ -1,44 +1,59 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { ShieldCheck, LogOut, ChevronDown, User, Command, CircleHelp, Bell, X } from 'lucide-react';
-import { Link, useNavigate } from 'react-router-dom';
+import { ShieldCheck, LogOut, ChevronDown, User, Command, CircleHelp, Bell, X, FolderKanban, Activity, Sun, Moon } from 'lucide-react';
+import { Link, useNavigate, useMatch } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
-import { notificationsApi } from '../../lib/api';
+import { notificationsApi, projectsApi } from '../../lib/api';
 
-const TopNav = ({ onTutorialOpen }) => {
+const TopNav = () => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  // Workspace/Intelligence switcher only makes sense while inside a project
+  // — moved here from the per-project header (UI_FIXES_2026-09-15.md #8) so
+  // its position stays fixed instead of shifting with badge content.
+  const workspaceMatch = useMatch('/projects/:projectId');
+  const intelligenceMatch = useMatch('/projects/:projectId/intelligence');
+  const activeProjectId = workspaceMatch?.params.projectId || intelligenceMatch?.params.projectId;
+  const inIntelligence = Boolean(intelligenceMatch);
+  const adminMatch = useMatch('/admin');
   const [menuOpen, setMenuOpen] = useState(false);
-  const [faqOpen, setFaqOpen] = useState(false);
+  const [projectMenuOpen, setProjectMenuOpen] = useState(false);
+  const [projects, setProjects] = useState([]);
   const [notificationOpen, setNotificationOpen] = useState(false);
   const [notifications, setNotifications] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
+  const [lightMode, setLightMode] = useState(() => window.localStorage.getItem('docflow_theme') === 'light');
   const menuRef = useRef(null);
+  const projectMenuRef = useRef(null);
   const notificationRef = useRef(null);
   // The Admin area now hosts role-scoped tabs (Audit Log, Project Activity) that
   // are open to project admins, team leads and contributors — not just org
   // admins. Show the entry point to anyone with a non-viewer role.
   const canOpenAdmin = Boolean(user?.is_org_admin)
     || Object.values(user?.project_roles || {}).some((r) => ['contributor', 'team_lead', 'project_admin'].includes(r));
-  const notificationDismissedKey = `docflow_notifications_dismissed_${user?.user_id || user?.username || 'guest'}`;
 
   useEffect(() => {
     const onClick = (e) => {
       if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false);
+      if (projectMenuRef.current && !projectMenuRef.current.contains(e.target)) setProjectMenuOpen(false);
       if (notificationRef.current && !notificationRef.current.contains(e.target)) setNotificationOpen(false);
     };
     document.addEventListener('mousedown', onClick);
     return () => document.removeEventListener('mousedown', onClick);
   }, []);
 
+  const openProjectMenu = () => {
+    const nextOpen = !projectMenuOpen;
+    setProjectMenuOpen(nextOpen);
+    if (nextOpen && projects.length === 0) {
+      projectsApi.list().then(setProjects).catch(() => {});
+    }
+  };
+
   const loadNotifications = async () => {
     try {
-      const dismissed = JSON.parse(window.localStorage.getItem(notificationDismissedKey) || '[]');
       const data = await notificationsApi.list();
-      const visibleNotifications = (data.notifications || []).filter(
-        (notification) => !dismissed.includes(notification.log_id)
-      );
-      setNotifications(visibleNotifications);
-      setUnreadCount(visibleNotifications.length);
+      setNotifications(data.notifications || []);
+      setUnreadCount(data.unread_count || 0);
     } catch {
       // Notifications should not interrupt the main workspace.
     }
@@ -63,40 +78,27 @@ const TopNav = ({ onTutorialOpen }) => {
     }
   };
 
-  const dismissNotification = (logId) => {
-    const dismissed = JSON.parse(window.localStorage.getItem(notificationDismissedKey) || '[]');
-    if (!dismissed.includes(logId)) {
-      window.localStorage.setItem(notificationDismissedKey, JSON.stringify([...dismissed, logId]));
+  const dismissNotification = async (notificationId) => {
+    setNotifications((current) => current.filter((n) => n.notification_id !== notificationId));
+    setUnreadCount((count) => {
+      const wasUnread = notifications.find((n) => n.notification_id === notificationId && !n.read);
+      return wasUnread ? Math.max(0, count - 1) : count;
+    });
+    try {
+      await notificationsApi.markRead(notificationId);
+    } catch {
+      // Best-effort — the row stays unread server-side but is already hidden here.
     }
-    setNotifications((current) => current.filter((notification) => notification.log_id !== logId));
-    setUnreadCount((count) => Math.max(0, count - 1));
   };
 
-  const clearAllNotifications = () => {
-    const dismissed = JSON.parse(window.localStorage.getItem(notificationDismissedKey) || '[]');
-    const allIds = notifications.map((notification) => notification.log_id);
-    window.localStorage.setItem(
-      notificationDismissedKey,
-      JSON.stringify([...new Set([...dismissed, ...allIds])])
-    );
+  const clearAllNotifications = async () => {
     setNotifications([]);
     setUnreadCount(0);
-  };
-
-  const notificationTitle = (notification) => {
-    if (
-      notification.action === 'ASSIGN_PROJECT_ACCESS'
-      && notification.resource_id === user?.user_id
-    ) {
-      return 'You were granted project access';
+    try {
+      await notificationsApi.markAllRead();
+    } catch {
+      // Best-effort — a later reload will just show them again.
     }
-    if (
-      notification.action === 'ASSIGN_ACCESS'
-      && notification.resource_id === user?.user_id
-    ) {
-      return 'You were granted organization admin access';
-    }
-    return notification.action.replaceAll('_', ' ');
   };
 
   const handleLogout = () => {
@@ -104,24 +106,101 @@ const TopNav = ({ onTutorialOpen }) => {
     navigate('/login');
   };
 
+  const toggleAdmin = () => {
+    if (adminMatch) {
+      if (window.history.state?.idx > 0) navigate(-1);
+      else navigate('/');
+    } else {
+      navigate('/admin');
+    }
+  };
+
+  const toggleTheme = () => {
+    const nextLightMode = !lightMode;
+    setLightMode(nextLightMode);
+    window.localStorage.setItem('docflow_theme', nextLightMode ? 'light' : 'dark');
+    window.dispatchEvent(new Event('docflow-theme-change'));
+  };
+
   return (
-    <nav className="h-14 border-b border-border bg-surface/95 backdrop-blur flex items-center justify-between px-6 sticky top-0 z-40">
+    <nav className="relative h-14 border-b border-border bg-surface/95 backdrop-blur flex items-center justify-between px-6 sticky top-0 z-40">
+      {activeProjectId && (
+        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 hidden md:flex items-center gap-1 rounded-lg border border-border bg-surface p-1">
+          <Link
+            to={`/projects/${encodeURIComponent(activeProjectId)}`}
+            className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition-colors ${
+              inIntelligence
+                ? 'text-gray-400 hover:text-gray-200 hover:bg-surface-hover'
+                : 'bg-background text-gray-100 shadow-sm'
+            }`}
+          >
+            <FolderKanban size={13} className={inIntelligence ? '' : 'text-primary'} />
+            Workspace
+          </Link>
+          <Link
+            to={`/projects/${encodeURIComponent(activeProjectId)}/intelligence`}
+            className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition-colors ${
+              inIntelligence
+                ? 'bg-background text-gray-100 shadow-sm'
+                : 'text-gray-400 hover:text-gray-200 hover:bg-surface-hover'
+            }`}
+          >
+            <Activity size={13} className={inIntelligence ? 'text-primary' : ''} />
+            Intelligence
+          </Link>
+        </div>
+      )}
       <div className="flex items-center gap-8">
-        <Link to="/" className="flex items-center gap-2.5 text-xl font-bold tracking-tight bg-gemini-gradient bg-clip-text text-transparent">
+        <Link to="/" className="flex items-center gap-2.5 text-xl font-bold tracking-tight bg-gemini-gradient bg-clip-text text-transparent" title="All Projects">
           <Command className="text-primary" size={19} /> DocFlow AI
         </Link>
         <div className="hidden md:flex items-center gap-5 text-sm text-gray-500">
-          <Link to="/" className="hover:text-primary transition-colors">Projects</Link>
+          <div className="relative" ref={projectMenuRef}>
+            <button
+              type="button"
+              onClick={openProjectMenu}
+              aria-expanded={projectMenuOpen}
+              className="flex items-center gap-1 hover:text-primary transition-colors"
+            >
+              Projects <ChevronDown size={14} />
+            </button>
+            {projectMenuOpen && (
+              <div className="absolute left-0 mt-2 w-64 max-w-[calc(100vw-2rem)] bg-surface border border-border rounded-lg shadow-lg overflow-hidden z-[70]">
+                <Link
+                  to="/"
+                  onClick={() => setProjectMenuOpen(false)}
+                  className="flex items-center gap-2 px-4 py-2.5 text-sm font-medium text-gray-100 hover:bg-surface-hover transition-colors border-b border-border/50"
+                >
+                  <FolderKanban size={15} /> All Projects
+                </Link>
+                <div className="max-h-72 overflow-y-auto scrollbar-thin">
+                  {projects.length === 0 ? (
+                    <p className="px-4 py-3 text-xs text-gray-500">No projects yet</p>
+                  ) : projects.map((p) => (
+                    <Link
+                      key={p.project_id}
+                      to={`/projects/${p.project_id}`}
+                      onClick={() => setProjectMenuOpen(false)}
+                      className="block px-4 py-2.5 text-sm text-gray-300 hover:bg-surface-hover transition-colors truncate"
+                    >
+                      {p.project_name}
+                    </Link>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
       <div className="flex items-center gap-2">
         <button
-          onClick={onTutorialOpen}
+          type="button"
+          onClick={toggleTheme}
           className="p-2 text-gray-500 hover:text-primary transition-colors rounded-full hover:bg-surface-hover"
-          title="Open tutorial"
-          aria-label="Open tutorial"
+          aria-label={`Switch to ${lightMode ? 'dark' : 'light'} mode`}
+          title={`Switch to ${lightMode ? 'dark' : 'light'} mode`}
         >
-          <CircleHelp size={20} />
+          {lightMode ? <Moon size={20} /> : <Sun size={20} />}
         </button>
         <div className="relative" ref={notificationRef}>
           <button
@@ -146,32 +225,33 @@ const TopNav = ({ onTutorialOpen }) => {
                     {user?.is_org_admin ? 'All recent organization activity.' : 'Activity from your assigned projects.'}
                   </p>
                 </div>
-                {notifications.length > 0 && (
+                {unreadCount > 0 && (
                   <button
                     type="button"
                     onClick={clearAllNotifications}
-                    className="shrink-0 rounded-md p-1 text-gray-400 hover:bg-red-500/10 hover:text-red-300 transition-colors"
-                    title="Clear all visible notifications"
-                    aria-label="Clear all visible notifications"
+                    className="shrink-0 text-xs font-medium text-primary-light hover:text-primary transition-colors whitespace-nowrap"
                   >
-                    <X size={16} />
+                    Mark all as read
                   </button>
                 )}
               </div>
-              <div className="max-h-80 overflow-y-auto">
+              <div className="max-h-80 overflow-y-auto scrollbar-thin">
                 {notifications.length === 0 ? (
                   <p className="px-4 py-6 text-sm text-gray-500 text-center">No recent notifications.</p>
                 ) : notifications.map((notification) => (
-                  <div key={notification.log_id} className="px-4 py-3 border-b border-border/30 last:border-0">
+                  <div
+                    key={notification.notification_id}
+                    className={`px-4 py-3 border-b border-border/30 last:border-0 ${notification.read ? '' : 'bg-primary/5'}`}
+                  >
                     <div className="flex items-start justify-between gap-2">
-                      <span className={`text-xs font-semibold ${notification.resource_id === user?.user_id ? 'text-emerald-400' : 'text-primary-light'}`}>
-                        {notificationTitle(notification)}
+                      <span className={`text-xs font-semibold ${notification.read ? 'text-gray-300' : 'text-primary-light'}`}>
+                        {notification.title}
                       </span>
                       <div className="flex items-center gap-2 shrink-0">
-                        <span className="text-[10px] text-gray-600">{new Date(notification.timestamp).toLocaleString()}</span>
+                        <span className="text-[10px] text-gray-600">{new Date(notification.created_at).toLocaleString()}</span>
                         <button
                           type="button"
-                          onClick={() => dismissNotification(notification.log_id)}
+                          onClick={() => dismissNotification(notification.notification_id)}
                           className="text-gray-500 hover:text-gray-200 transition-colors"
                           title="Clear notification"
                           aria-label="Clear notification"
@@ -180,7 +260,9 @@ const TopNav = ({ onTutorialOpen }) => {
                         </button>
                       </div>
                     </div>
-                    <p className="text-xs text-gray-400 mt-1">{notification.actor_name}{notification.details ? ` · ${notification.details}` : ''}</p>
+                    {notification.body && (
+                      <p className="text-xs text-gray-400 mt-1">{notification.body}</p>
+                    )}
                   </div>
                 ))}
               </div>
@@ -188,21 +270,22 @@ const TopNav = ({ onTutorialOpen }) => {
           )}
         </div>
         {canOpenAdmin && (
-          <Link
-            to="/admin"
-            className="p-2 text-gray-500 hover:text-primary transition-colors rounded-full hover:bg-surface-hover"
-            title="Admin"
+          <button
+            type="button"
+            onClick={toggleAdmin}
+            aria-pressed={Boolean(adminMatch)}
+            className={`p-2 rounded-full transition-colors ${
+              adminMatch ? 'text-primary bg-surface-hover' : 'text-gray-500 hover:text-primary hover:bg-surface-hover'
+            }`}
+            title="Access & Governance"
           >
             <ShieldCheck size={20} />
-          </Link>
+          </button>
         )}
 
         <div className="relative ml-2" ref={menuRef}>
           <button
-            onClick={() => {
-              setMenuOpen((v) => !v);
-              setFaqOpen(false);
-            }}
+            onClick={() => setMenuOpen((v) => !v)}
             className="flex items-center gap-2 pl-1 pr-2 py-1 rounded-full hover:bg-surface-hover transition-colors"
           >
               <div className="w-7 h-7 rounded-full bg-primary/20 text-primary-light flex items-center justify-center">
@@ -219,40 +302,23 @@ const TopNav = ({ onTutorialOpen }) => {
               <div className="px-4 py-3 border-b border-border/50">
                 <p className="text-sm font-medium text-gray-100 truncate">{user?.full_name || user?.username}</p>
                 <p className="text-xs text-gray-500 truncate">{user?.username}</p>
-                <p className="text-xs text-primary-light mt-1">{user?.role}{user?.is_org_admin ? ' · org admin' : ''}</p>
               </div>
-              <button
-                type="button"
-                onClick={() => setFaqOpen((open) => !open)}
-                aria-expanded={faqOpen}
-                className="w-full px-4 py-2.5 text-left text-sm text-primary-light hover:bg-surface-hover transition-colors"
+              <Link
+                to="/profile"
+                onClick={() => setMenuOpen(false)}
+                className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-gray-300 hover:bg-surface-hover transition-colors"
               >
+                <User size={16} />
+                Profile
+              </Link>
+              <Link
+                to="/faq"
+                onClick={() => setMenuOpen(false)}
+                className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-primary-light hover:bg-surface-hover transition-colors"
+              >
+                <CircleHelp size={16} />
                 FAQ
-              </button>
-              {faqOpen && (
-                <div className="absolute right-0 top-full mt-2 w-80 max-w-[calc(100vw-2rem)] bg-surface border border-border rounded-lg shadow-lg overflow-hidden">
-                  <div className="px-4 py-3 border-b border-border/50">
-                    <p className="text-sm font-semibold text-gray-100">Access FAQ</p>
-                    <p className="text-xs text-gray-500 mt-1">What each role can do in DocFlow.</p>
-                  </div>
-                  <div className="p-3">
-                    <table className="w-full text-left text-xs">
-                      <thead className="bg-background/60 text-gray-500">
-                        <tr>
-                          <th className="px-2 py-1.5 font-medium">Role</th>
-                          <th className="px-2 py-1.5 font-medium">Access</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-border/40 text-gray-400">
-                        <tr><td className="px-2 py-2 text-gray-300">Member</td><td className="px-2 py-2">View and upload documents</td></tr>
-                        <tr><td className="px-2 py-2 text-gray-300">Project Admin</td><td className="px-2 py-2">Review and approve documents</td></tr>
-                        <tr><td className="px-2 py-2 text-gray-300">Admin</td><td className="px-2 py-2">Manage assigned project access</td></tr>
-                        <tr><td className="px-2 py-2 text-gray-300">Org admin</td><td className="px-2 py-2">Manage users, projects, and access</td></tr>
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
+              </Link>
               <button
                 onClick={handleLogout}
                 className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-gray-300 hover:bg-surface-hover hover:text-red-400 transition-colors"

@@ -20,6 +20,7 @@ no stage / team / project.
 import hashlib
 import json
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +30,13 @@ from app.services.scan_score import ScoringError, score_document
 
 WIP_DIR = DRAFTS_DIR / ".wip"
 FINALIZED_DIR = DRAFTS_DIR / ".finalized"
+# Master Plan v2, item 12: the version-diff-review revision loop always diffs
+# against the ORIGINAL previous finalized version, never against the
+# just-edited state (never diff-of-a-diff). That anchor content is written
+# once when a re-upload review session starts and never mutated afterward —
+# a second on-disk file per session, alongside (never replacing) the mutable
+# working draft.
+ANCHOR_DIR = DRAFTS_DIR / ".anchor"
 
 
 class DraftNotFoundError(Exception):
@@ -85,6 +93,60 @@ def delete_working_draft(session_id: str) -> None:
     path = _wip_path(session_id)
     if path.exists():
         path.unlink()
+
+
+def _anchor_path(session_id: str) -> Path:
+    name = Path(str(session_id)).name
+    if name != str(session_id) or not name:
+        raise ValueError(f"Invalid session_id: {session_id!r}")
+    return ANCHOR_DIR / f"{name}.md"
+
+
+def write_anchor_content(session_id: str, content: str) -> str:
+    """Write-once record of the original previous version's content for this
+    session, so every later diff recompute stays anchored to it rather than
+    to whatever the working draft currently holds."""
+    ANCHOR_DIR.mkdir(parents=True, exist_ok=True)
+    path = _anchor_path(session_id)
+    path.write_bytes(content.encode("utf-8"))
+    return str(path)
+
+
+def read_anchor_content(session_id: str) -> str | None:
+    path = _anchor_path(session_id)
+    return path.read_bytes().decode("utf-8") if path.exists() else None
+
+
+def delete_anchor_content(session_id: str) -> None:
+    path = _anchor_path(session_id)
+    if path.exists():
+        path.unlink()
+
+
+# Master Plan v2, item 12: a version-review session's working file/anchor
+# should not live forever if the uploader never finalizes or explicitly
+# abandons the session. No scheduler infrastructure exists in this app (no
+# APScheduler/cron), so rather than add one for a single low-stakes cleanup,
+# this sweeps opportunistically — called from start_version_review() on every
+# new re-upload, which is exactly the traffic that creates these files.
+STALE_SESSION_TTL_SECONDS = 4 * 60 * 60  # 4 hours
+
+
+def cleanup_stale_sessions(ttl_seconds: int = STALE_SESSION_TTL_SECONDS) -> int:
+    """Deletes .wip/.anchor files older than ttl_seconds. Returns count removed."""
+    cutoff = time.time() - ttl_seconds
+    removed = 0
+    for directory in (WIP_DIR, ANCHOR_DIR):
+        if not directory.exists():
+            continue
+        for path in directory.glob("*.md"):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                continue
+    return removed
 
 
 def embed_scan_marker(content: str, score: int) -> str:

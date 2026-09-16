@@ -13,7 +13,20 @@ from app.models.document import (
 )
 from app.models.workflow import WorkflowState
 from app.models.audit import AuditLog
+from app.models.notification import Notification, NotificationType
 from app.models.chat import ChatSession, ChatMessage
+from app.models.invitation import Invitation
+from app.models.graph import (
+    Node,
+    Edge,
+    Claim,
+    ExtractionRun,
+    AuditRun,
+    AuditFinding,
+    ProjectMetricSnapshot,
+    StageMetricSnapshot,
+    DocumentCoherenceCheck,
+)
 
 __all__ = [
     "Tenant",
@@ -33,6 +46,19 @@ __all__ = [
     "DocumentStageReference",
     "WorkflowState",
     "AuditLog",
+    "Notification",
+    "NotificationType",
     "ChatSession",
     "ChatMessage",
+    "Node",
+    "Edge",
+    "Claim",
+    "ExtractionRun",
+    "AuditRun",
+    "AuditFinding",
+    "ProjectMetricSnapshot",
+    "StageMetricSnapshot",
+    "DocumentCoherenceCheck",
+    "Invitation",
 ]
+

@@ -52,7 +52,7 @@ const MarkdownViewer = ({ open, onClose, title, subtitle, content = '', onDownlo
           </div>
         </div>
 
-        <div className="overflow-y-auto p-6">
+        <div className="overflow-y-auto scrollbar-thin p-6">
           <MarkdownMessage content={content} />
         </div>
       </div>

@@ -26,8 +26,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_current_user
-from app.database import get_db
+from app.api.dependencies import get_current_user, get_db_with_tenant
 from app.models.project import Project
 from app.models.team import (
     AccessRequest,
@@ -45,6 +44,7 @@ from app.services.access_requests_service import (
 )
 from app.services.audit import record_audit
 from app.services.auth import ResolvedIdentity
+from app.services.notifications import notify_access_request_decided
 
 router = APIRouter(prefix="/access-requests", tags=["access-requests"])
 
@@ -92,7 +92,7 @@ def _serialize(db: Session, r: AccessRequest, *, team=None, project=None, reques
 def create_access_request(
     body: CreateAccessRequest,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     try:
         req = request_confidential_access(
@@ -110,7 +110,7 @@ def create_access_request(
 @router.get("/mine", response_model=list[AccessRequestOut])
 def my_access_requests(
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     rows = db.execute(
         select(AccessRequest)
@@ -130,7 +130,7 @@ def my_access_requests(
 @router.get("/pending", response_model=list[AccessRequestOut])
 def pending_access_requests(
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     rows = pending_requests_for_reviewer(
         db, reviewer_id=identity.user_id, tenant_id=identity.tenant_id
@@ -164,6 +164,10 @@ def _decide(db: Session, identity: ResolvedIdentity, request_id: uuid.UUID, *, a
         resource_type="access_request", resource_id=r.request_id,
         details={"team": team.name, "requester_id": str(r.user_id)},
     )
+    notify_access_request_decided(
+        db, requester_id=r.user_id, team_name=team.name, project_id=project.project_id,
+        request_id=r.request_id, approved=approve,
+    )
     db.commit()
     db.refresh(r)
     return _serialize(db, r, team=team, project=project)
@@ -173,7 +177,7 @@ def _decide(db: Session, identity: ResolvedIdentity, request_id: uuid.UUID, *, a
 def approve_access_request(
     request_id: uuid.UUID,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     return _decide(db, identity, request_id, approve=True)
 
@@ -182,6 +186,6 @@ def approve_access_request(
 def deny_access_request(
     request_id: uuid.UUID,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     return _decide(db, identity, request_id, approve=False)

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search, Sun, Moon } from 'lucide-react';
+import { Search } from 'lucide-react';
 import ProjectCard from '../components/projects/ProjectCard';
 import CreateProjectCard from '../components/projects/CreateProjectCard';
 import Input from '../components/ui/Input';
@@ -22,11 +22,10 @@ const getKolkataGreeting = () => {
     }).format()
   );
 
-  if (hour < 5) return 'Good night';
+  if (hour < 5) return 'Working late';
   if (hour < 12) return 'Good morning';
   if (hour < 17) return 'Good afternoon';
-  if (hour < 21) return 'Good evening';
-  return 'Good night';
+  return 'Good evening';
 };
 
 const ProjectsPage = () => {
@@ -39,7 +38,6 @@ const ProjectsPage = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [lightMode, setLightMode] = useState(() => window.localStorage.getItem('docflow_theme') === 'light');
 
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectDesc, setNewProjectDesc] = useState('');
@@ -67,15 +65,6 @@ const ProjectsPage = () => {
       window.removeEventListener('focus', refreshOnFocus);
     };
   }, []);
-
-  const toggleTheme = () => {
-    const nextLightMode = !lightMode;
-    setLightMode(nextLightMode);
-    window.localStorage.setItem('docflow_theme', nextLightMode ? 'light' : 'dark');
-    document.documentElement.classList.toggle('light-theme', nextLightMode);
-    document.body.classList.toggle('light-theme', nextLightMode);
-    window.dispatchEvent(new Event('docflow-theme-change'));
-  };
 
   useEffect(() => {
     const updateGreeting = () => setGreeting(getKolkataGreeting());
@@ -112,22 +101,12 @@ const ProjectsPage = () => {
 
   return (
     <div className="flex-1 px-5 py-8 lg:px-10 max-w-[1500px] mx-auto w-full">
-      <div className="flex flex-col lg:flex-row lg:items-start justify-between mb-9 gap-6">
-        <div>
-          <p className="text-xs font-bold uppercase tracking-[0.2em] text-primary mb-3">Workspace overview</p>
-          <h1 className="text-4xl font-bold tracking-tight text-gray-100">{greeting}, let&apos;s make progress.</h1>
-          <p className="text-gray-500 mt-2 max-w-xl">One calm place for the documents, decisions, and drafts moving your team forward.</p>
-        </div>
-        <button
-          type="button"
-          onClick={toggleTheme}
-          className="self-start lg:self-start lg:ml-auto inline-flex items-center gap-2 rounded-lg border border-border bg-surface px-3 py-2 text-sm text-gray-300 hover:bg-surface-hover transition-colors"
-          aria-label={`Switch to ${lightMode ? 'dark' : 'light'} mode`}
-          title={`Switch to ${lightMode ? 'dark' : 'light'} mode`}
-        >
-          {lightMode ? <Moon size={16} /> : <Sun size={16} />}
-          {lightMode ? 'Dark mode' : 'Light mode'}
-        </button>
+      <div className="mb-9">
+        <p className="text-xs font-bold uppercase tracking-[0.2em] text-primary mb-3">
+          {user?.tenant_name || 'Workspace overview'}
+        </p>
+        <h1 className="text-4xl font-bold tracking-tight text-gray-100">{greeting}, let&apos;s make progress.</h1>
+        <p className="text-gray-500 mt-2 max-w-xl">One calm place for the documents, decisions, and drafts moving your team forward.</p>
       </div>
 
       {error && <p className="text-red-400 text-sm mb-4">{error}</p>}

@@ -18,8 +18,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_current_user
-from app.database import get_db
+from app.api.dependencies import get_current_user, get_db_with_tenant
 from app.models.document import Document
 from app.models.project import Project
 from app.models.stage import Stage
@@ -99,7 +98,7 @@ def _summarize(db: Session, project: Project) -> ProjectSummary:
     return ProjectSummary(
         project_id=str(project.project_id),
         project_name=project.name,
-        description=None,
+        description=project.description,
         document_count=doc_count,
         created_at=project.created_at.isoformat() if project.created_at else None,
         members=members,
@@ -110,7 +109,7 @@ def _summarize(db: Session, project: Project) -> ProjectSummary:
 @router.get("", response_model=list[ProjectSummary])
 def list_projects(
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     out = []
     for pid in _visible_project_ids(db, identity):
@@ -125,7 +124,7 @@ def list_projects(
 def create_project(
     body: CreateProjectRequest,
     identity: ResolvedIdentity = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_with_tenant),
 ):
     if not identity.is_org_admin:
         raise HTTPException(status_code=403, detail="Only organization admins can create projects")
@@ -133,7 +132,7 @@ def create_project(
     if not name:
         raise HTTPException(status_code=422, detail="Project name cannot be empty")
 
-    project = Project(tenant_id=identity.tenant_id, name=name)
+    project = Project(tenant_id=identity.tenant_id, name=name, description=body.description)
     db.add(project)
     db.flush()
 

@@ -25,7 +25,7 @@ import os
 import re
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.database import SessionLocal
 from app.models.document import Document, DocumentVersion
@@ -43,12 +43,15 @@ from app.services.access_control import (
     build_access_filter,
     can_view_document,
     classify_documents_visibility,
+    get_accessible_stages_for_user,
     has_permission,
     has_stage_access,
 )
 from app.services.access_requests_service import pending_requests_for_reviewer
 from app.services.authorization_context import AuthorizationContext, build_authorization_context
 from app.services.document_lookup import match_documents, normalize_ref, resolve_stage, resolve_team
+from app.services.graph.audit_engine import execute_project_audit
+from app.services.indexing import resolve_grounding_version
 from app.services.pending_approvals import documents_awaiting_approval, reviews_project
 from app.services.query_context import get_query_context
 
@@ -60,6 +63,29 @@ _TEAM_ROLE_RANK = {TeamRole.viewer: 0, TeamRole.contributor: 1, TeamRole.team_le
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+def _scoped_session(user_id: uuid.UUID):
+    """
+    Opens a fresh SessionLocal() and puts it in the same tenant scope
+    app/tools/graph_tools.py's _resolve_caller_auth uses: `documents`,
+    `projects`, `stages`, `teams`, etc. all FORCE ROW LEVEL SECURITY, so a
+    session with no `app.current_tenant_id` GUC set sees zero rows in them
+    (never an error — RLS silently filters everything out), which every one
+    of this module's tools would otherwise misreport as "not_found"/"no
+    access" instead of actually running the query. `users` is RLS-enabled
+    but NOT forced, so the table owner (this app's DB role) can still read a
+    user by id before any tenant is set — that's what bootstraps this.
+    Raises PermissionError if user_id doesn't resolve to a real user.
+    """
+    db = SessionLocal()
+    user = db.query(User).filter(User.user_id == user_id).first()
+    if not user:
+        db.close()
+        raise PermissionError(f"Access denied: user {user_id} not found")
+    db.info["tenant_id"] = str(user.tenant_id)
+    db.execute(text("SET LOCAL app.current_tenant_id = :tid"), {"tid": str(user.tenant_id)})
+    return db
+
 
 def _email(db, user_id: uuid.UUID | None) -> str | None:
     if user_id is None:
@@ -141,7 +167,7 @@ def get_document_info(document_reference: str, stage_reference: str | None = Non
     "ambiguous" -> ask which.
     """
     ctx = get_query_context()
-    db = SessionLocal()
+    db = _scoped_session(ctx.user_id)
     try:
         doc, err = _resolve_visible_document(db, ctx.project_id, ctx.user_id, document_reference, stage_reference)
         if err:
@@ -188,40 +214,63 @@ def get_document_info(document_reference: str, stage_reference: str | None = Non
 @tool
 def get_version_history(document_reference: str, stage_reference: str | None = None) -> dict:
     """Version history of ONE named document: how many versions, each one's
-    created_at and status, and which is current. `document_reference` is the
-    title/filename. `stage_reference` is an optional stage name or stage UUID.
-    "not_found" / "ambiguous" behave as in get_document_info.
+    created_at and status. Reports TWO distinct notions, never conflate
+    them when relaying this: "latest" is the newest version regardless of
+    its state (could be an unapproved draft or a rejected attempt);
+    "live" is the version actually in effect — approved and what Search
+    Agent answers/audits are grounded in. These can be different versions
+    at once (a newer draft can be "latest" while an older approved version
+    is still "live"). `document_reference` is the title/filename.
+    `stage_reference` is an optional stage name or stage UUID. "not_found" /
+    "ambiguous" behave as in get_document_info.
     """
     ctx = get_query_context()
-    db = SessionLocal()
+    db = _scoped_session(ctx.user_id)
     try:
         doc, err = _resolve_visible_document(db, ctx.project_id, ctx.user_id, document_reference, stage_reference)
         if err:
             return err
 
+        # Ordered by created_at, not version_number: version_number is now
+        # only assigned once a version is APPROVED (None until then), so it
+        # no longer reflects true chronological order among unresolved
+        # drafts/rejections sitting between approved versions.
         versions = db.execute(
             select(DocumentVersion)
             .where(DocumentVersion.document_id == doc.document_id)
-            .order_by(DocumentVersion.version_number.asc())
+            .order_by(DocumentVersion.created_at.asc())
         ).scalars().all()
 
-        current_version = None
+        latest_version = None
         if doc.current_version_id is not None:
             cv = db.get(DocumentVersion, doc.current_version_id)
             if cv is not None:
-                current_version = cv.version_number
+                latest_version = cv.version_number
+
+        # The version actually grounding Search Agent answers and audit
+        # rules — can differ from "latest" (document.current_version_id)
+        # when a newer draft/rejection sits unresolved on top of the last
+        # genuinely approved version. Deliberately reported separately, not
+        # collapsed into one "current" concept.
+        live = resolve_grounding_version(db, doc.document_id)
 
         return {
             "status": "found",
             "document": doc.original_filename,
             "version_count": len(versions),
-            "current_version": current_version,
+            "latest_version": latest_version,
+            "live_version": live.version_number if live is not None else None,
             "versions": [
                 {
+                    # None (rather than a number) until this version is
+                    # actually approved — a draft/pending/rejected version
+                    # has no version number.
                     "version": v.version_number,
+                    "approval_outcome": v.approval_outcome.value if v.approval_outcome else None,
                     "created_at": v.created_at.isoformat() if v.created_at else None,
                     "status": v.status.value,
-                    "is_current": v.version_id == doc.current_version_id,
+                    "is_latest": v.version_id == doc.current_version_id,
+                    "is_live": live is not None and v.version_id == live.version_id,
                 }
                 for v in versions
             ],
@@ -242,7 +291,7 @@ def who_can_approve(stage_or_team_reference: str) -> dict:
     instead of naming anyone. "not_found" if it matches no team or stage.
     """
     ctx = get_query_context()
-    db = SessionLocal()
+    db = _scoped_session(ctx.user_id)
     try:
         ref = (stage_or_team_reference or "").strip()
 
@@ -290,7 +339,7 @@ def list_pending_approvals() -> dict:
     "nothing_to_review" means no review role here, or nothing is pending.
     """
     ctx = get_query_context()
-    db = SessionLocal()
+    db = _scoped_session(ctx.user_id)
     try:
         user = db.get(User, ctx.user_id)
         tenant_id = user.tenant_id if user else None
@@ -350,7 +399,7 @@ def check_my_access(stage_or_team_reference: str) -> dict:
     team that grants it). "not_found" if it matches no team or stage.
     """
     ctx = get_query_context()
-    db = SessionLocal()
+    db = _scoped_session(ctx.user_id)
     try:
         ref = (stage_or_team_reference or "").strip()
 
@@ -416,7 +465,7 @@ def get_project_structure() -> dict:
     whether it requires approval) and the teams in it. No arguments.
     """
     ctx = get_query_context()
-    db = SessionLocal()
+    db = _scoped_session(ctx.user_id)
     try:
         project = db.get(Project, ctx.project_id)
         stages = db.execute(
@@ -451,7 +500,7 @@ def get_stage_requirements(stage_reference: str) -> dict:
     Status "not_found" if no matching stage exists in this project.
     """
     ctx = get_query_context()
-    db = SessionLocal()
+    db = _scoped_session(ctx.user_id)
     try:
         ref = (stage_reference or "").strip()
         stage_id = resolve_stage(db, ctx.project_id, ref)
@@ -572,7 +621,7 @@ def get_stage_document_status(stage_reference: str) -> dict:
     Status "not_found" if no matching stage exists in this project.
     """
     ctx = get_query_context()
-    db = SessionLocal()
+    db = _scoped_session(ctx.user_id)
     try:
         ref = (stage_reference or "").strip()
         stage_id = resolve_stage(db, ctx.project_id, ref)
@@ -684,7 +733,7 @@ def list_accessible_documents(stage_reference: str | None = None) -> dict:
     or asks for a list of project documents.
     """
     ctx = get_query_context()
-    db = SessionLocal()
+    db = _scoped_session(ctx.user_id)
     try:
         auth_ctx = build_authorization_context(db, ctx.user_id, ctx.project_id)
         query = db.query(Document).filter(
@@ -720,6 +769,116 @@ def list_accessible_documents(stage_reference: str | None = None) -> dict:
                 }
                 for d in visible
             ],
+        }
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# 10. get_project_readiness
+# ---------------------------------------------------------------------------
+
+@tool
+def get_project_readiness(stage_reference: str | None = None) -> dict:
+    """Whether this project (or one stage of it, if `stage_reference` is given)
+    is READY or NOT_READY for launch/gate, its completeness score, and the
+    top blocking issues from the Intelligence audit — the exact data behind
+    the Intelligence dashboard's "Project Readiness & Gate Status" panel.
+    Call this for questions like "why is this project not ready", "is this
+    project ready to launch", "what's blocking us", "how complete are we".
+    """
+    ctx = get_query_context()
+    db = _scoped_session(ctx.user_id)
+    try:
+        stage_id = None
+        if stage_reference:
+            stage_id = resolve_stage(db, ctx.project_id, stage_reference)
+            if stage_id is None:
+                return {
+                    "status": "not_found",
+                    "message": f"No stage matching '{stage_reference}' exists in this project.",
+                }
+
+        accessible_stages = set(get_accessible_stages_for_user(db, ctx.user_id, ctx.project_id))
+        if stage_id is not None and stage_id not in accessible_stages:
+            return {"status": "not_found", "message": f"No stage matching '{stage_reference}' exists in this project."}
+
+        audit_run = execute_project_audit(db, ctx.project_id, target_stage_id=stage_id)
+        visible_findings = [
+            f for f in audit_run.findings
+            if f.target_stage_id is None or f.target_stage_id in accessible_stages
+        ]
+        visible_blockers = [f for f in visible_findings if f.is_blocker]
+        readiness_status = "READY" if len(visible_blockers) == 0 else "NOT_READY"
+
+        return {
+            "status": "ok",
+            "scope": f"stage '{stage_reference}'" if stage_id else "entire project",
+            "readiness_status": readiness_status,
+            "completeness_score": f"{audit_run.completeness_score}%",
+            "total_blockers": len(visible_blockers),
+            "top_blockers": [
+                {
+                    "rule_code": b.rule_code,
+                    "title": b.title,
+                    "description": b.description,
+                }
+                for b in visible_blockers[:5]
+            ],
+        }
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# 11. get_project_gaps
+# ---------------------------------------------------------------------------
+
+@tool
+def get_project_gaps(stage_reference: str | None = None) -> dict:
+    """The specific compliance gaps behind "What needs attention" on the
+    Intelligence dashboard: missing mandatory requirements, unapproved gate
+    documents, broken dependencies, stale references, cross-stage reference
+    violations, and document contradictions. Optionally scoped to one stage
+    via `stage_reference`. Call this for questions like "what needs
+    attention", "what's missing", "are there any contradictions", "what
+    findings does the audit have".
+    """
+    ctx = get_query_context()
+    db = _scoped_session(ctx.user_id)
+    try:
+        stage_id = None
+        if stage_reference:
+            stage_id = resolve_stage(db, ctx.project_id, stage_reference)
+            if stage_id is None:
+                return {
+                    "status": "not_found",
+                    "message": f"No stage matching '{stage_reference}' exists in this project.",
+                }
+
+        accessible_stages = set(get_accessible_stages_for_user(db, ctx.user_id, ctx.project_id))
+        if stage_id is not None and stage_id not in accessible_stages:
+            return {"status": "not_found", "message": f"No stage matching '{stage_reference}' exists in this project."}
+
+        audit_run = execute_project_audit(db, ctx.project_id, target_stage_id=stage_id)
+        visible_findings = [
+            f for f in audit_run.findings
+            if f.target_stage_id is None or f.target_stage_id in accessible_stages
+        ]
+        visible_blockers = [f for f in visible_findings if f.is_blocker]
+        readiness_status = "READY" if len(visible_blockers) == 0 else "NOT_READY"
+
+        return {
+            "status": "ok",
+            "scope": f"stage '{stage_reference}'" if stage_id else "entire project",
+            "readiness_status": readiness_status,
+            "missing_mandatory_requirements": [f.description for f in visible_findings if f.rule_code == "R001"],
+            "unapproved_gate_documents": [f.description for f in visible_findings if f.rule_code in ("R002", "R009")],
+            "broken_dependencies": [f.description for f in visible_findings if f.rule_code in ("R003", "R005")],
+            "stale_references": [f.description for f in visible_findings if f.rule_code == "R004"],
+            "cross_stage_reference_violations": [f.description for f in visible_findings if f.rule_code == "R006"],
+            "document_contradictions": [f.description for f in visible_findings if f.rule_code == "R008"],
+            "scanner_flagged_versions": [f.description for f in visible_findings if f.rule_code == "R011"],
         }
     finally:
         db.close()

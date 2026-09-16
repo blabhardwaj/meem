@@ -16,6 +16,7 @@ on a passing, unflagged scan.
 
 import uuid
 
+from agno.run.base import RunStatus
 from sqlalchemy.orm import Session
 
 from app.agents.drafting_agent import drafting_agent
@@ -43,11 +44,20 @@ def run_review_turn(db: Session, *, session_id: str, document_id: uuid.UUID, use
           "reformed_content": str | None,
           "injection_flagged": bool | None, "injection_findings": list | None,
           "should_index": bool | None,   # the indexing trigger's verdict, finalize only
+          "failed_criteria": list[str],  # criteria below PER_CRITERION_MINIMUM, finalize only
         }
     """
     prefix = build_context_prefix(session_id)
     before = draft_workspace.read_working_draft(session_id)
     response = drafting_agent.run(prefix + (message or "continue"), session_id=session_id)
+
+    # See the matching check in app/services/document_version_review.py: a
+    # failed LLM call must not fall through to the confirm_draft/finalize
+    # check below, or a stale .tools flag on an error response can trigger
+    # a real finalize against whatever's on disk at that moment.
+    if getattr(response, "status", None) == RunStatus.error:
+        raise RuntimeError(getattr(response, "content", "") or "drafting agent run failed")
+
     after = draft_workspace.read_working_draft(session_id)
     reply = getattr(response, "content", "") or ""
 
@@ -60,6 +70,7 @@ def run_review_turn(db: Session, *, session_id: str, document_id: uuid.UUID, use
         "version_id": None, "version_number": None, "status": None,
         "scan": None, "scan_error": None, "reformed_content": None,
         "injection_flagged": None, "injection_findings": None, "should_index": None,
+        "failed_criteria": [],
     }
 
     if _tool_called(response, "confirm_draft"):
@@ -80,6 +91,7 @@ def run_review_turn(db: Session, *, session_id: str, document_id: uuid.UUID, use
             injection_flagged=outcome["injection_flagged"],
             injection_findings=outcome["injection_findings"],
             should_index=outcome["should_index"],
+            failed_criteria=outcome["failed_criteria"],
         )
         return base
 
