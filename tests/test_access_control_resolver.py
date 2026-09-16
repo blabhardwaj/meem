@@ -9,7 +9,12 @@ from app.models.stage import Stage, TeamStageAccess
 from app.models.team import AccessRequest, AccessRequestScope, AccessRequestStatus, Team, TeamRole, UserTeamMembership
 from app.models.tenant import Tenant
 from app.models.user import User
-from app.services.access_control import resolve_effective_access
+from app.services.access_control import (
+    resolve_effective_access,
+    is_grant_only_confidential_access,
+    classify_document_visibility,
+    DocumentVisibility,
+)
 
 
 class TestResolveEffectiveAccess(unittest.TestCase):
@@ -221,6 +226,58 @@ class TestResolveEffectiveAccess(unittest.TestCase):
         self.db.commit()
         result = resolve_effective_access(self.db, self.viewer.user_id, document_id=self.document.document_id)
         self.assertEqual(result.status, "none")
+
+
+class TestIsGrantOnlyConfidentialAccess(TestResolveEffectiveAccess):
+    def test_internal_document_is_never_grant_only(self):
+        self.document.sensitivity_level = SensitivityLevel.internal
+        self.db.commit()
+        self.assertFalse(is_grant_only_confidential_access(self.db, self.viewer.user_id, self.document))
+
+    def test_team_lead_is_never_grant_only_even_with_a_grant(self):
+        grant = AccessRequest(
+            user_id=self.team_lead.user_id, team_id=self.team.team_id,
+            scope=AccessRequestScope.document, document_id=self.document.document_id,
+            status=AccessRequestStatus.approved,
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=72),
+        )
+        self.db.add(grant)
+        self.db.commit()
+        self.assertFalse(is_grant_only_confidential_access(self.db, self.team_lead.user_id, self.document))
+
+    def test_viewer_with_active_grant_is_grant_only(self):
+        grant = AccessRequest(
+            user_id=self.viewer.user_id, team_id=self.team.team_id,
+            scope=AccessRequestScope.document, document_id=self.document.document_id,
+            status=AccessRequestStatus.approved,
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=72),
+        )
+        self.db.add(grant)
+        self.db.commit()
+        self.assertTrue(is_grant_only_confidential_access(self.db, self.viewer.user_id, self.document))
+
+    def test_viewer_with_no_grant_is_not_grant_only(self):
+        self.assertFalse(is_grant_only_confidential_access(self.db, self.viewer.user_id, self.document))
+
+    def test_classify_document_visibility_still_blocks_ungranted_viewer(self):
+        self.assertEqual(
+            classify_document_visibility(self.db, self.viewer.user_id, self.document),
+            DocumentVisibility.blocked_by_sensitivity,
+        )
+
+    def test_classify_document_visibility_allows_granted_viewer(self):
+        grant = AccessRequest(
+            user_id=self.viewer.user_id, team_id=self.team.team_id,
+            scope=AccessRequestScope.document, document_id=self.document.document_id,
+            status=AccessRequestStatus.approved,
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=72),
+        )
+        self.db.add(grant)
+        self.db.commit()
+        self.assertEqual(
+            classify_document_visibility(self.db, self.viewer.user_id, self.document),
+            DocumentVisibility.fully_allowed,
+        )
 
 
 if __name__ == "__main__":
