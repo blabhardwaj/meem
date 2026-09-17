@@ -51,7 +51,9 @@ router = APIRouter(prefix="/access-requests", tags=["access-requests"])
 
 
 class CreateAccessRequest(BaseModel):
-    team_id: uuid.UUID
+    team_id: uuid.UUID | None = None
+    document_id: uuid.UUID | None = None
+    stage_id: uuid.UUID | None = None
 
 
 class AccessRequestOut(BaseModel):
@@ -168,10 +170,14 @@ def create_access_request(
             db,
             user_id=identity.user_id,
             team_id=body.team_id,
+            document_id=body.document_id,
+            stage_id=body.stage_id,
             expected_tenant_id=identity.tenant_id,
         )
     except AccessRequestError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    except ValueError as exc:  # zero or multiple targets given
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     return _serialize(db, req, requester=db.get(User, identity.user_id))
 
