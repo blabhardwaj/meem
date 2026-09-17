@@ -499,6 +499,11 @@ export const accessRequestsApi = {
   },
   // requests the caller may decide (team_lead on that team / project_admin / org_admin)
   pending: () => request('/access-requests/pending'),
+  // currently-active stage-scope grants the caller may revoke — the Revoke
+  // counterpart to pending(): an approved request drops out of pending()
+  // the moment it's decided, so this is the only place a lead can look one
+  // up again to revoke it.
+  activeGrants: () => request('/access-requests/active-grants'),
   // tier/duration are REQUIRED by the backend for a stage-scope request
   // (422 otherwise) — omit both for document/team-scope approvals, which
   // still use the old fixed-TTL, always-read-only behavior.

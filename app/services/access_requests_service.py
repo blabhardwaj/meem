@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 from app.models.project import Project
 from app.models.team import (
     AccessRequest,
+    AccessRequestScope,
     AccessRequestStatus,
     Team,
     TeamRole,
@@ -85,6 +86,54 @@ def pending_requests_for_reviewer(
 
     out: list[AccessRequest] = []
     for r in rows:
+        team = db.get(Team, r.team_id)
+        project = db.get(Project, team.project_id) if team else None
+        if team is None or project is None or project.tenant_id != tenant_id:
+            continue
+        if project_id is not None and project.project_id != project_id:
+            continue
+        if not has_permission(
+            db, reviewer_id, "approve_access_request", team.team_id, team.project_id
+        ):
+            continue
+        out.append(r)
+    return out
+
+
+def active_stage_grants_for_reviewer(
+    db: Session,
+    *,
+    reviewer_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    project_id: uuid.UUID | None = None,
+) -> list[AccessRequest]:
+    """
+    Every currently-active (approved, unexpired), stage-scope grant
+    `reviewer_id` is allowed to revoke — same tenant/team-permission gate as
+    pending_requests_for_reviewer(), but status == approved and not expired,
+    scope == stage. Only stage-scope grants have a tier/duration and a
+    working Revoke action in the UI (document/team-scope grants keep the
+    original always-read-only, fixed-TTL behavior with no revoke path).
+    Newest-decided first. Optionally narrowed to one project.
+    """
+    from app.services.access_control import has_permission  # avoid import cycle
+
+    now = datetime.now(timezone.utc)
+    rows = db.execute(
+        select(AccessRequest)
+        .where(
+            AccessRequest.status == AccessRequestStatus.approved,
+            AccessRequest.scope == AccessRequestScope.stage,
+        )
+        .order_by(AccessRequest.decided_at.desc())
+    ).scalars().all()
+
+    out: list[AccessRequest] = []
+    for r in rows:
+        if r.expires_at is not None:
+            exp = r.expires_at if r.expires_at.tzinfo else r.expires_at.replace(tzinfo=timezone.utc)
+            if exp < now:
+                continue
         team = db.get(Team, r.team_id)
         project = db.get(Project, team.project_id) if team else None
         if team is None or project is None or project.tenant_id != tenant_id:

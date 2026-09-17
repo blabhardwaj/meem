@@ -28,6 +28,17 @@ const TEAM_ROLE_CHOICES = [
   { label: 'Team Lead', value: 'team_lead' },
 ];
 const TEAM_ROLE_OPTIONS = TEAM_ROLE_CHOICES.slice(1);
+const GRANT_TIER_OPTIONS = [
+  { label: 'Viewer — public/internal docs only', value: 'viewer' },
+  { label: 'Contributor — viewer + edit/upload', value: 'contributor' },
+  { label: 'Contributor + confidential', value: 'contributor_confidential' },
+];
+const GRANT_DURATION_OPTIONS = [
+  { label: '72 hours', value: 'hours_72' },
+  { label: '1 week', value: 'week_1' },
+  { label: '1 month', value: 'month_1' },
+  { label: 'No expiration', value: 'unlimited' },
+];
 const MODE_OPTIONS = [
   { label: 'Team Member', value: 'team_member' },
   { label: 'Project Admin', value: 'project_admin' },
@@ -894,8 +905,10 @@ const ApprovalsTab = ({ projects }) => {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [busyKey, setBusyKey] = useState(null);
+  const [grantChoices, setGrantChoices] = useState({}); // request_id -> { tier, duration }
   const [docsByProject, setDocsByProject] = useState({});
   const [accessReqs, setAccessReqs] = useState([]);
+  const [activeGrants, setActiveGrants] = useState([]);
   const [openProjectId, setOpenProjectId] = useState('');
 
   const projectKey = projects.map((p) => p.project_id).join(',');
@@ -904,16 +917,18 @@ const ApprovalsTab = ({ projects }) => {
     setLoading(true);
     setError('');
     try {
-      const [docLists, reqs] = await Promise.all([
+      const [docLists, reqs, grants] = await Promise.all([
         Promise.all(projects.map((p) =>
           projectsApi.pendingApprovals(p.project_id)
             .then((d) => [p.project_id, d])
             .catch(() => [p.project_id, []]),
         )),
         accessRequestsApi.pending().catch(() => []),
+        accessRequestsApi.activeGrants().catch(() => []),
       ]);
       setDocsByProject(Object.fromEntries(docLists));
       setAccessReqs(Array.isArray(reqs) ? reqs : []);
+      setActiveGrants(Array.isArray(grants) ? grants : []);
     } catch (err) {
       setError(err.message || 'Could not load pending approvals.');
     } finally {
@@ -1035,32 +1050,63 @@ const ApprovalsTab = ({ projects }) => {
                         {team.requests.length > 0 && (
                           <div className="space-y-2">
                             <p className="text-xs uppercase tracking-wide text-gray-500">Confidential-access requests</p>
-                            {team.requests.map((r) => (
-                              <div key={r.request_id} className="flex items-center justify-between gap-3 rounded-md border border-border bg-surface px-3 py-2">
-                                <div className="min-w-0">
-                                  <p className="text-sm text-gray-200 truncate">
-                                    {r.requester_email || r.user_id}{' '}
-                                    {r.scope === 'document' && <>requests access to <span className="font-medium">{r.target_name}</span></>}
-                                    {r.scope === 'stage' && <>requests access to the <span className="font-medium">{r.target_name}</span> stage</>}
-                                    {r.scope === 'team' && <>requests team-wide access</>}
-                                  </p>
-                                  <p className="text-xs text-gray-500">
-                                    Requested {r.requested_at ? new Date(r.requested_at).toLocaleDateString() : '—'}
-                                    {' · '}grants {r.grant_duration_label} if approved
-                                  </p>
+                            {team.requests.map((r) => {
+                              const choice = grantChoices[r.request_id] || {};
+                              const canApprove = r.scope !== 'stage' || (choice.tier && choice.duration);
+                              return (
+                                <div key={r.request_id} className="rounded-md border border-border bg-surface px-3 py-2 space-y-2">
+                                  <div className="flex items-center justify-between gap-3">
+                                    <div className="min-w-0">
+                                      <p className="text-sm text-gray-200 truncate">
+                                        {r.requester_email || r.user_id}
+                                        {r.requester_role && <span className="text-gray-500"> ({r.requester_role})</span>}{' '}
+                                        {r.scope === 'document' && <>requests access to <span className="font-medium">{r.target_name}</span></>}
+                                        {r.scope === 'stage' && <>requests access to the <span className="font-medium">{r.target_name}</span> stage</>}
+                                        {r.scope === 'team' && <>requests team-wide access</>}
+                                      </p>
+                                      <p className="text-xs text-gray-500">
+                                        Requested {r.requested_at ? new Date(r.requested_at).toLocaleDateString() : '—'}
+                                        {' · '}
+                                        {r.tier ? `${r.tier} · ` : ''}{r.grant_duration_label}
+                                      </p>
+                                    </div>
+                                    <div className="flex gap-2 shrink-0">
+                                      <Button size="sm" icon={Check}
+                                        disabled={!canApprove}
+                                        loading={busyKey === `req-approve-${r.request_id}`}
+                                        onClick={() => act(
+                                          `req-approve-${r.request_id}`,
+                                          () => accessRequestsApi.approve(r.request_id, choice),
+                                          'Access request approved.',
+                                        )}
+                                      >Approve</Button>
+                                      <Button size="sm" variant="danger" icon={X}
+                                        loading={busyKey === `req-deny-${r.request_id}`}
+                                        onClick={() => act(`req-deny-${r.request_id}`, () => accessRequestsApi.deny(r.request_id), 'Access request denied.')}
+                                      >Deny</Button>
+                                    </div>
+                                  </div>
+                                  {r.scope === 'stage' && (
+                                    <div className="flex gap-2">
+                                      <Dropdown
+                                        label="Tier"
+                                        options={GRANT_TIER_OPTIONS}
+                                        value={choice.tier || ''}
+                                        onChange={(value) => setGrantChoices((cur) => ({ ...cur, [r.request_id]: { ...cur[r.request_id], tier: value } }))}
+                                        placeholder="Choose a tier"
+                                      />
+                                      <Dropdown
+                                        label="Duration"
+                                        options={GRANT_DURATION_OPTIONS}
+                                        value={choice.duration || ''}
+                                        onChange={(value) => setGrantChoices((cur) => ({ ...cur, [r.request_id]: { ...cur[r.request_id], duration: value } }))}
+                                        placeholder="Choose a duration"
+                                      />
+                                    </div>
+                                  )}
                                 </div>
-                                <div className="flex gap-2 shrink-0">
-                                  <Button size="sm" icon={Check}
-                                    loading={busyKey === `req-approve-${r.request_id}`}
-                                    onClick={() => act(`req-approve-${r.request_id}`, () => accessRequestsApi.approve(r.request_id), 'Access request approved.')}
-                                  >Approve</Button>
-                                  <Button size="sm" variant="danger" icon={X}
-                                    loading={busyKey === `req-deny-${r.request_id}`}
-                                    onClick={() => act(`req-deny-${r.request_id}`, () => accessRequestsApi.deny(r.request_id), 'Access request denied.')}
-                                  >Deny</Button>
-                                </div>
-                              </div>
-                            ))}
+                              );
+                            })}
                           </div>
                         )}
                       </div>
@@ -1070,6 +1116,37 @@ const ApprovalsTab = ({ projects }) => {
               </Card>
             );
           })}
+
+          {activeGrants.length > 0 && (
+            <Card>
+              <p className="font-semibold text-gray-100 mb-3">Active stage-access grants</p>
+              <div className="space-y-2">
+                {activeGrants.map((r) => (
+                  <div key={r.request_id} className="flex items-center justify-between gap-3 rounded-md border border-border bg-surface px-3 py-2">
+                    <div className="min-w-0">
+                      <p className="text-sm text-gray-200 truncate">
+                        {r.requester_email || r.user_id}
+                        {r.requester_role && <span className="text-gray-500"> ({r.requester_role})</span>}{' '}
+                        holds <span className="font-medium">{r.tier}</span> access to the <span className="font-medium">{r.target_name}</span> stage
+                        <span className="text-gray-500"> · {r.team_name}</span>
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        Approved {r.decided_at ? new Date(r.decided_at).toLocaleDateString() : '—'}
+                        {' · '}{r.grant_duration_label}
+                      </p>
+                    </div>
+                    <Button size="sm" variant="danger" icon={X}
+                      loading={busyKey === `req-revoke-${r.request_id}`}
+                      onClick={() => {
+                        if (!window.confirm('Revoke this access grant immediately? This cannot be undone.')) return;
+                        act(`req-revoke-${r.request_id}`, () => accessRequestsApi.revoke(r.request_id), 'Access grant revoked.');
+                      }}
+                    >Revoke</Button>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
         </>
       )}
     </div>
