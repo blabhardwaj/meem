@@ -35,7 +35,8 @@ from app.models.document import (
 from app.models.stage import Stage
 from app.models.user import User
 from app.models.workflow import WorkflowState, WorkflowStatus
-from app.services.access_control import has_permission, has_stage_access, resolve_sensitivity
+from app.models.team import GrantTier
+from app.services.access_control import has_permission, has_stage_access, resolve_sensitivity, resolve_stage_grant
 from app.services.audit import record_audit
 from app.services.document_finalize import failed_criteria
 from app.services.document_parser import parse_document_to_markdown
@@ -108,26 +109,34 @@ class CreatedDocumentFromFile(CreatedDocument):
 def _check_upload_access(
     db: Session, *, user_id: uuid.UUID, team_id: uuid.UUID, project_id: uuid.UUID, stage_id: uuid.UUID,
 ) -> Stage:
-    """Shared gate for both creation paths: has_permission + has_stage_access + a real, active stage."""
-    if not has_permission(db, user_id, "upload", team_id, project_id):
-        raise PermissionDeniedError(
-            "You do not have permission to upload documents as this team."
-        )
-
+    """
+    Shared gate for both creation paths: has_permission + has_stage_access
+    (native team-role path), OR an active contributor/contributor_confidential
+    stage grant whose OWN routing team_id matches the team_id being uploaded
+    as (spec §3.2 — tier and team_id are one entitlement, checked together;
+    a grant never authorizes uploading as an arbitrary team).
+    """
     stage = db.get(Stage, stage_id)
     if stage is None or stage.project_id != project_id or stage.deleted_at is not None:
         raise StageNotFoundError(
             f"Stage {stage_id} does not exist in this project (or has been deleted)."
         )
 
-    # THIRD check (Phase A Part 3), alongside the role/team-project check
-    # above: does the acting team have a team_stage_access grant for this
-    # stage? org_admin/project_admin bypass entirely (has_stage_access()
-    # applies the same bypass has_permission() does above).
-    if not has_stage_access(db, user_id, team_id, stage_id, project_id):
-        raise PermissionDeniedError(
-            f"Team does not have access to upload to the '{stage.name}' stage."
+    native_ok = (
+        has_permission(db, user_id, "upload", team_id, project_id)
+        and has_stage_access(db, user_id, team_id, stage_id, project_id)
+    )
+    if not native_ok:
+        grant = resolve_stage_grant(db, user_id, stage_id)
+        grant_ok = (
+            grant is not None
+            and grant.tier in (GrantTier.contributor, GrantTier.contributor_confidential)
+            and grant.team_id == team_id
         )
+        if not grant_ok:
+            raise PermissionDeniedError(
+                f"You do not have permission to upload to the '{stage.name}' stage as this team."
+            )
 
     return stage
 
