@@ -49,6 +49,7 @@ from app.services.document_persistence import (
     validate_file_magic,
 )
 from app.services.document_diff import diff_summary
+from app.services.document_finalize import GrantOnlyAccessError
 from app.services.document_review_chat import run_review_turn
 from app.services.document_upload_review import upload_and_scan
 from app.services.document_version_review import (
@@ -441,6 +442,8 @@ def review_message(
             db, session_id=body.session_id, document_id=document.document_id,
             user_id=identity.user_id, message=body.message,
         )
+    except GrantOnlyAccessError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 — Groq / rate-limit / parse failures
         raise HTTPException(
             status_code=502,
@@ -593,6 +596,8 @@ def version_review_message(
             db, session_id=body.session_id, document_id=document.document_id,
             user_id=identity.user_id, message=body.message,
         )
+    except GrantOnlyAccessError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 — Groq / rate-limit / parse failures
         raise HTTPException(
             status_code=502,
