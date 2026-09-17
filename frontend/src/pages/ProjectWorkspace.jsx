@@ -16,10 +16,26 @@ import { DOCUMENT_AND_TEAM_SCOPE_REQUESTS_ENABLED } from '../constants/accessReq
 
 const ProjectWorkspace = () => {
   const { projectId } = useParams();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const urlTab = searchParams.get('tab');
   const urlQuery = searchParams.get('q');
   const highlightDocumentId = searchParams.get('highlight');
+
+  // Consumed once by ChatPanel (see onInitialQueryConsumed below), then
+  // dropped from the URL so it can never replay on a later tab switch or
+  // mode change that happens to remount ChatPanel with the same `q` still
+  // present — this was firing an already-answered prompt on whichever tab
+  // happened to remount next (e.g. Search's initialQuery re-sent on Draft).
+  const clearUrlQuery = useCallback(() => {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete('q');
+        return next;
+      },
+      { replace: true },
+    );
+  }, [setSearchParams]);
   const { user } = useAuth();
   const [project, setProject] = useState(null);
   const [documents, setDocuments] = useState([]);
@@ -321,11 +337,12 @@ const ProjectWorkspace = () => {
         <div className="w-full lg:flex-1 shrink-0 flex flex-col h-[70vh] lg:h-full lg:min-h-0 overflow-hidden border-t border-border lg:border-t-0 lg:border-l">
           {!reviewSession && <ChatModeTabs active={chatTab} onChange={setChatTab} />}
           <ChatPanel
-            key={reviewSession ? 'review' : `${chatTab}-${urlQuery || ''}`}
+            key={reviewSession ? 'review' : chatTab}
             projectId={projectId}
             mode={reviewSession ? 'review' : chatTab}
             reviewSession={reviewSession}
             initialQuery={urlQuery}
+            onInitialQueryConsumed={clearUrlQuery}
             onReviewFinalized={handleReviewFinalized}
             onReviewExit={() => setReviewSession(null)}
           />

@@ -3,6 +3,7 @@ import { Outlet } from 'react-router-dom';
 import TopNav from './TopNav';
 import TutorialPopup from './TutorialPopup';
 import { useAuth } from '../../context/AuthContext';
+import { SearchChatProvider } from '../../context/SearchChatContext';
 import PasswordChangePrompt from '../auth/PasswordChangePrompt';
 
 const AppLayout = () => {
@@ -28,16 +29,18 @@ const AppLayout = () => {
   }, [user?.user_id, user?.is_org_admin]);
 
   return (
-    <div className="flex flex-col min-h-screen bg-background">
-      <TopNav />
-      <main className="flex flex-1 min-h-0 flex-col">
-        <Outlet />
-      </main>
-      <TutorialPopup open={tutorialOpen} onClose={() => setTutorialOpen(false)} />
-      {user?.must_change_password && (
-        <PasswordChangePrompt onComplete={refresh} />
-      )}
-    </div>
+    <SearchChatProvider>
+      <div className="flex flex-col min-h-screen bg-background">
+        <TopNav />
+        <main className="flex flex-1 min-h-0 flex-col">
+          <Outlet />
+        </main>
+        <TutorialPopup open={tutorialOpen} onClose={() => setTutorialOpen(false)} />
+        {user?.must_change_password && (
+          <PasswordChangePrompt onComplete={refresh} />
+        )}
+      </div>
+    </SearchChatProvider>
   );
 };
 
