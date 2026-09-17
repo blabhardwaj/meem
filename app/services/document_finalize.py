@@ -34,6 +34,7 @@ from app.models.document import (
     ScanReviewStatus,
 )
 from app.services import draft_workspace
+from app.services.access_control import is_grant_only_confidential_access
 from app.services.audit import record_audit
 from app.services.indexing import index_document, should_index
 from app.services.injection_scan import scan_for_injection
@@ -49,6 +50,15 @@ class DocumentNotFoundError(Exception):
 
 class NoWorkingDraftError(Exception):
     pass
+
+
+class GrantOnlyAccessError(Exception):
+    """
+    The caller's access to this document comes only from a read-only
+    confidential-access grant (not native role-based access) — a grant
+    never confers write/finalize capability, however the document was
+    originally reached.
+    """
 
 
 def failed_criteria(criteria: list[dict] | None) -> list[str]:
@@ -171,6 +181,12 @@ def finalize_document_revision(db: Session, *, document_id: uuid.UUID, user_id: 
     ).scalar_one_or_none()
     if document is None:
         raise DocumentNotFoundError(f"Unknown document: {document_id}")
+
+    if is_grant_only_confidential_access(db, user_id, document):
+        raise GrantOnlyAccessError(
+            "Your access to this document is read-only (granted via a confidential-access "
+            "request, not your team role) — you cannot finalize a revision."
+        )
 
     content = draft_workspace.read_working_draft(session_id)
     if content is None:
