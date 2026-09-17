@@ -161,6 +161,19 @@ def request_confidential_access(
     if len(provided) != 1:
         raise ValueError("Exactly one of team_id, document_id, stage_id must be given")
 
+    # TEMPORARY POLICY RESTRICTION (2026-09-17): only stage-scope requests are
+    # currently permitted — document- and team-scope requests are rejected
+    # here even though their full implementation (below, and in
+    # _derive_document_team / the team-scope branch) is left completely
+    # intact for when this restriction is lifted. Enforced at this single
+    # choke point rather than only in the UI so a direct API/tool call can't
+    # bypass it either.
+    if document_id is not None or team_id is not None:
+        raise AccessRequestError(
+            "Only stage-level confidential-access requests are currently supported.",
+            status_code=403,
+        )
+
     if document_id is not None:
         scope = AccessRequestScope.document
         resolved_team_id = _derive_document_team(db, document_id)
