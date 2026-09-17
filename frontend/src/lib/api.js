@@ -499,8 +499,18 @@ export const accessRequestsApi = {
   },
   // requests the caller may decide (team_lead on that team / project_admin / org_admin)
   pending: () => request('/access-requests/pending'),
-  approve: (id) => request(`/access-requests/${encodeURIComponent(id)}/approve`, { method: 'POST' }),
+  // tier/duration are REQUIRED by the backend for a stage-scope request
+  // (422 otherwise) — omit both for document/team-scope approvals, which
+  // still use the old fixed-TTL, always-read-only behavior.
+  approve: (id, { tier, duration } = {}) =>
+    request(`/access-requests/${encodeURIComponent(id)}/approve`, {
+      method: 'POST',
+      body: tier && duration ? { tier, duration } : {},
+    }),
   deny: (id) => request(`/access-requests/${encodeURIComponent(id)}/deny`, { method: 'POST' }),
+  // approved -> revoked, immediately and permanently — no undo besides the
+  // requester asking again.
+  revoke: (id) => request(`/access-requests/${encodeURIComponent(id)}/revoke`, { method: 'POST' }),
 };
 
 // ---------- Search Agent: REAL — the Search tab ----------
