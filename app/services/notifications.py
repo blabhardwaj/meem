@@ -26,7 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.document import Document, DocumentTeamVisibility
-from app.models.notification import Notification, NotificationType
+from app.models.notification import Notification, NotificationType, NotificationAudience
 from app.models.team import UserTeamMembership, TeamRole
 from app.models.user import User
 from app.services.access_control import _is_org_admin, can_view_document
@@ -42,6 +42,7 @@ def _create(
     resource_type: str | None = None,
     resource_id: uuid.UUID | None = None,
     project_id: uuid.UUID | None = None,
+    audience: NotificationAudience | None = None,
 ) -> None:
     db.add(Notification(
         recipient_user_id=recipient_user_id,
@@ -51,6 +52,7 @@ def _create(
         resource_type=resource_type,
         resource_id=resource_id,
         project_id=project_id,
+        audience=audience,
     ))
 
 
@@ -130,6 +132,7 @@ def notify_access_request_created(
             resource_type="access_request",
             resource_id=request_id,
             project_id=project_id,
+            audience=NotificationAudience.approver,
         )
 
 
@@ -149,6 +152,7 @@ def notify_access_request_decided(
         resource_type="access_request",
         resource_id=request_id,
         project_id=project_id,
+        audience=NotificationAudience.requester,
     )
 
 
@@ -244,6 +248,7 @@ def _serialize(n: Notification) -> dict:
         "project_id": str(n.project_id) if n.project_id else None,
         "read": n.read_at is not None,
         "created_at": n.created_at.isoformat(),
+        "audience": n.audience.value if n.audience else None,
     }
 
 
