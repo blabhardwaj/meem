@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, Pencil, ArrowUp, ArrowDown, ShieldCheck, Trash2, Settings2, Link2, Users, UploadCloud, Lock, ListChecks, X as XIcon } from 'lucide-react';
+import { Plus, Pencil, ArrowUp, ArrowDown, ShieldCheck, Trash2, Settings2, Link2, Users, UploadCloud, ListChecks, X as XIcon } from 'lucide-react';
 import { STAGES } from '../../constants/stages';
 import StageSection from './StageSection';
 import Modal from '../ui/Modal';
@@ -358,16 +358,6 @@ const SourcePanel = ({
           </div>
         </div>
         <p className="text-sm text-gray-400 mt-1">Project documents and evidence</p>
-        {hasRequestableTeams && (
-          <button
-            type="button"
-            onClick={onRequestConfidentialAccess}
-            className="mt-2 flex items-center gap-1.5 text-xs text-primary-light hover:text-primary transition-colors"
-          >
-            <Lock size={12} />
-            Some documents may be confidential — request access
-          </button>
-        )}
       </div>
 
       <div className="p-4">
@@ -381,6 +371,7 @@ const SourcePanel = ({
               <StageSection
                 key={stage.stage_id}
                 stage={stage.name}
+                stageId={stage.stage_id}
                 documents={groupedDocs[stage.name] || []}
                 canReview={canReview}
                 canOverrideScan={canOverrideScan}
