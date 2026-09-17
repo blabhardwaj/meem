@@ -19,6 +19,7 @@ const statusBadge = {
   pending: { variant: 'warning', label: 'Pending review' },
   approved: { variant: 'success', label: 'Granted' },
   denied: { variant: 'danger', label: 'Denied' },
+  revoked: { variant: 'danger', label: 'Revoked' },
 };
 
 const MyAccessRequestsPanel = ({ open, onClose }) => {
@@ -52,7 +53,10 @@ const MyAccessRequestsPanel = ({ open, onClose }) => {
             <div key={r.request_id} className="flex items-center justify-between gap-3 rounded-lg border border-border bg-background px-3 py-2.5">
               <div className="min-w-0">
                 <p className="text-sm text-gray-200 truncate">{r.target_name}</p>
-                <p className="text-xs text-gray-500 capitalize">{r.scope} access · {r.team_name}</p>
+                <p className="text-xs text-gray-500 capitalize">
+                  {r.scope} access · {r.team_name}
+                  {r.tier && <> · {r.tier.replace(/_/g, ' ')}</>}
+                </p>
               </div>
               <div className="flex items-center gap-2 shrink-0">
                 {isExpiredApproved ? (
@@ -60,9 +64,9 @@ const MyAccessRequestsPanel = ({ open, onClose }) => {
                 ) : (
                   <Badge variant={badge.variant}>{badge.label}</Badge>
                 )}
-                {r.active && r.expires_at && (
+                {r.active && (
                   <span className="text-xs text-gray-500 flex items-center gap-1">
-                    <Clock size={11} /> {formatCountdown(r.expires_at)}
+                    <Clock size={11} /> {r.expires_at ? formatCountdown(r.expires_at) : 'no expiration'}
                   </span>
                 )}
               </div>
