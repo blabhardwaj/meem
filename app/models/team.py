@@ -88,12 +88,42 @@ class AccessRequestStatus(str, enum.Enum):
     pending = "pending"
     approved = "approved"
     denied = "denied"
+    revoked = "revoked"
 
 
 class AccessRequestScope(str, enum.Enum):
     document = "document"
     stage = "stage"
     team = "team"
+
+
+class GrantTier(str, enum.Enum):
+    """
+    Approver-chosen capability tier for a STAGE-scope grant only.
+    viewer: see/search public+internal docs in the granted stage.
+    contributor: viewer + create/upload/submit in the granted stage,
+      attributed to the grant's own routing team (AccessRequest.team_id).
+    contributor_confidential: contributor + confidential docs in the
+      granted stage. Document/team-scope grants never set this — it
+      stays None for those, and they remain always-read-only as before.
+    """
+    viewer = "viewer"
+    contributor = "contributor"
+    contributor_confidential = "contributor_confidential"
+
+
+class GrantDuration(str, enum.Enum):
+    """
+    Approver-chosen duration label for a STAGE-scope grant, stored
+    verbatim (not re-derived from expires_at - decided_at) so the UI can
+    display it exactly. hours_72/week_1/month_1 are flat offsets (30 days
+    for month_1, not calendar-month arithmetic); unlimited means
+    expires_at stays None.
+    """
+    hours_72 = "hours_72"
+    week_1 = "week_1"
+    month_1 = "month_1"
+    unlimited = "unlimited"
 
 
 class AccessRequest(Base):
@@ -141,4 +171,16 @@ class AccessRequest(Base):
     )
     expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    tier: Mapped["GrantTier | None"] = mapped_column(
+        Enum(GrantTier, name="grant_tier"), nullable=True
+    )
+    duration: Mapped["GrantDuration | None"] = mapped_column(
+        Enum(GrantDuration, name="grant_duration"), nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=True
     )
