@@ -4,6 +4,7 @@ from app.models.project import Project
 from app.models.team import Team, UserTeamMembership, ProjectAdmin, AccessRequest
 from app.models.stage import Stage, StageReference, TeamStageAccess
 from app.models.required_document import RequiredDocument
+from app.models.requirement_satisfaction import RequirementSatisfaction
 from app.models.document import (
     Document,
     DocumentVersion,
@@ -39,6 +40,7 @@ __all__ = [
     "Stage",
     "TeamStageAccess",
     "RequiredDocument",
+    "RequirementSatisfaction",
     "Document",
     "DocumentVersion",
     "DocumentScan",
