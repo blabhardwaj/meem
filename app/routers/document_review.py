@@ -35,8 +35,8 @@ from sqlalchemy.orm import Session
 
 from app.models.document import Document, DocumentVersion
 from app.models.project import Project
-from app.models.team import Team
-from app.services.access_control import can_edit_document, can_view_document, has_permission
+from app.models.team import GrantTier, Team
+from app.services.access_control import can_edit_document, can_view_document, has_permission, resolve_stage_grant
 from app.services.auth import ResolvedIdentity
 from app.services.document_parser import DocumentParseError, UnsupportedDocumentTypeError
 from app.services.document_persistence import (
@@ -416,6 +416,32 @@ def view_document(
     return DocumentViewResponse(**data)
 
 
+def _check_revision_permission(db: Session, user_id: uuid.UUID, document: Document) -> None:
+    """
+    Same bar as uploading: the acting user must have "upload" rights on
+    this document's team (org_admin/project_admin bypass, as everywhere
+    else), OR an active contributor/contributor_confidential stage grant
+    routed through that exact team (spec §3.2 — tier and team_id checked
+    together). Deliberately not scoped to "only the original uploader" —
+    any teammate (native or grant-derived) with upload rights on this
+    stage/team can continue the review. Raises HTTPException(403) if
+    neither applies.
+    """
+    if has_permission(db, user_id, "upload", document.uploaded_as_team_id, document.project_id):
+        return
+    grant = resolve_stage_grant(db, user_id, document.stage_id)
+    grant_ok = (
+        grant is not None
+        and grant.tier in (GrantTier.contributor, GrantTier.contributor_confidential)
+        and grant.team_id == document.uploaded_as_team_id
+    )
+    if not grant_ok:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to revise documents for this team.",
+        )
+
+
 @router.post("/review/message", response_model=ReviewMessageResponse)
 def review_message(
     body: ReviewMessageRequest,
@@ -428,15 +454,7 @@ def review_message(
     if document is None or document.tenant_id != identity.tenant_id:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    # Same bar as uploading: the acting user must still have "upload" rights
-    # on this document's team (org_admin/project_admin bypass, as everywhere
-    # else). Deliberately not scoped to "only the original uploader" — any
-    # teammate with upload rights on this stage/team can continue the review.
-    if not has_permission(db, identity.user_id, "upload", document.uploaded_as_team_id, document.project_id):
-        raise HTTPException(
-            status_code=403,
-            detail="You do not have permission to revise documents for this team.",
-        )
+    _check_revision_permission(db, identity.user_id, document)
 
     try:
         turn = run_review_turn(
