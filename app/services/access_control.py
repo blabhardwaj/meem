@@ -29,7 +29,7 @@ import uuid
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.user import User
@@ -41,6 +41,7 @@ from app.models.team import (
     AccessRequest,
     AccessRequestScope,
     AccessRequestStatus,
+    GrantTier,
 )
 from app.models.document import Document, DocumentTeamVisibility, SensitivityLevel
 from app.models.stage import Stage, TeamStageAccess
@@ -212,15 +213,105 @@ def get_accessible_stages_for_user(db: Session, user_id: UUID, project_id: UUID)
             UserTeamMembership.project_id == project_id,
         )
     ).scalars())
-    if not team_ids:
-        return []
 
-    return list(db.execute(
-        select(TeamStageAccess.stage_id)
-        .join(Stage, Stage.stage_id == TeamStageAccess.stage_id)
-        .where(TeamStageAccess.team_id.in_(team_ids), Stage.deleted_at.is_(None))
-        .distinct()
-    ).scalars())
+    native_stage_ids: set[UUID] = set()
+    if team_ids:
+        native_stage_ids = set(db.execute(
+            select(TeamStageAccess.stage_id)
+            .join(Stage, Stage.stage_id == TeamStageAccess.stage_id)
+            .where(TeamStageAccess.team_id.in_(team_ids), Stage.deleted_at.is_(None))
+            .distinct()
+        ).scalars())
+
+    # Stage grants (spec §1.2/§4): a viewer/contributor/contributor_confidential
+    # grant makes its stage visible even with zero native TeamStageAccess.
+    # get_active_stage_grants_for_user() is not project-scoped (it's a
+    # per-user lookup), so its result is re-filtered to THIS project here.
+    grant_stage_ids = set(get_active_stage_grants_for_user(db, user_id).keys())
+    if grant_stage_ids:
+        grant_stage_ids = set(db.execute(
+            select(Stage.stage_id).where(
+                Stage.stage_id.in_(grant_stage_ids),
+                Stage.project_id == project_id,
+                Stage.deleted_at.is_(None),
+            )
+        ).scalars())
+
+    return list(native_stage_ids | grant_stage_ids)
+
+
+@dataclass
+class StageGrant:
+    """
+    tier + team_id together are the grant's full entitlement (spec §3.2):
+    the tier is only ever exercised AS this specific team, never any
+    other team the grant holder might separately belong to. Any code
+    checking `tier` for a mutation must also check `team_id` against
+    the team the mutation is being attributed to — never one without
+    the other.
+    """
+    tier: GrantTier
+    team_id: UUID
+    expires_at: datetime | None
+    request_id: UUID
+
+
+def get_active_stage_grants_for_user(db: Session, user_id: UUID) -> dict[UUID, "StageGrant"]:
+    """
+    stage_id -> StageGrant for every stage where user_id currently holds
+    an active grant. The single source every consumer reads from.
+
+    "Active" means: the LATEST terminal event (approval or revocation,
+    ranked by COALESCE(revoked_at, decided_at) DESC, request_id DESC as
+    a deterministic tie-breaker) for this (user, stage) is itself an
+    approval, and that approval is not expired, and the stage itself is
+    not soft-deleted.
+
+    Deliberately does NOT simply filter to status == approved and take
+    the newest such row — an older approved row must not "reactivate"
+    after a newer grant covering the same stage is revoked. Ranking by
+    the latest EVENT (regardless of whether that event was an approval
+    or a revocation) and only then checking whether it was an approval
+    is what makes revocation permanent instead of a fallback to
+    whatever was approved before it.
+    """
+    rows = db.execute(
+        select(AccessRequest)
+        .join(Stage, Stage.stage_id == AccessRequest.stage_id)
+        .where(
+            AccessRequest.user_id == user_id,
+            AccessRequest.scope == AccessRequestScope.stage,
+            AccessRequest.tier.is_not(None),
+            AccessRequest.status.in_([AccessRequestStatus.approved, AccessRequestStatus.revoked]),
+            Stage.deleted_at.is_(None),
+        )
+        .order_by(
+            func.coalesce(AccessRequest.revoked_at, AccessRequest.decided_at).desc(),
+            AccessRequest.request_id.desc(),
+        )
+    ).scalars().all()
+
+    now = datetime.now(timezone.utc)
+    result: dict[UUID, StageGrant] = {}
+    seen_stage_ids: set[UUID] = set()
+    for r in rows:
+        if r.stage_id in seen_stage_ids:
+            continue  # a later (in this ordering) row already settled this stage
+        seen_stage_ids.add(r.stage_id)
+        if r.status != AccessRequestStatus.approved:
+            continue  # the latest terminal event for this stage was a revocation
+        if r.expires_at is not None:
+            exp = r.expires_at if r.expires_at.tzinfo else r.expires_at.replace(tzinfo=timezone.utc)
+            if exp < now:
+                continue
+        result[r.stage_id] = StageGrant(
+            tier=r.tier, team_id=r.team_id, expires_at=r.expires_at, request_id=r.request_id,
+        )
+    return result
+
+
+def resolve_stage_grant(db: Session, user_id: UUID, stage_id: UUID) -> "StageGrant | None":
+    return get_active_stage_grants_for_user(db, user_id).get(stage_id)
 
 
 @dataclass
