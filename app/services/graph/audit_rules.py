@@ -23,46 +23,111 @@ logger = logging.getLogger(__name__)
 SEMANTIC_EVIDENCE_SIMILARITY_THRESHOLD = 0.72
 
 
-def _has_semantic_evidence(
+def _resolve_requirement_evidence(
+    db: Session,
     tenant_id: uuid.UUID,
     project_id: uuid.UUID,
+    req_node: Node,
+    req: RequiredDocument,
     stage_ids: Set[uuid.UUID],
-    requirement_name: str,
-    requirement_description: Optional[str],
-) -> bool:
+) -> Optional[Tuple[uuid.UUID, str]]:
     """
-    Nearest-neighbor fallback for R001 when no REFERENCES/EVIDENCES-style
-    graph edge names an evidence document — reuses the EXISTING RAG Qdrant
+    The SINGLE source of truth for "does evidence exist for this
+    requirement, and from which document" — supersedes the old
+    _has_semantic_evidence (which only returned a bool). Two independent
+    consumers read this per audit run via execute_project_audit's
+    precomputed evidence_by_requirement map: evaluate_r001_missing_
+    mandatory_requirements (which only needs presence/absence) and
+    RequirementSatisfaction persistence (which needs the document_id too).
+    The two can never disagree about what counts as evidence, because
+    neither computes it independently anymore.
+
+    Callers MUST have already confirmed a Node exists for this requirement
+    (source_table="required_documents") before calling this — a requirement
+    with no node yet (sync_project_graph hasn't run since it was created) is
+    a "not yet evaluable" state, distinct from "evaluated, no evidence
+    found," and is the caller's responsibility to handle (mirrors R001's own
+    pre-existing "skip silently" behavior for this case, unchanged by this
+    refactor).
+
+    Returns (document_id, matched_via) for the deterministically-chosen
+    evidence, or None if no evidence exists. matched_via is "graph_edge" or
+    "semantic".
+
+    Graph-edge branch: edges are ordered by confidence DESC, created_at ASC
+    (highest-confidence edge wins; ties broken by extraction order) rather
+    than incidental database row order — this ordering was never previously
+    given an explicit, meaningful definition.
+
+    Semantic branch (Master Plan v2, item 7): reuses the EXISTING RAG Qdrant
     infrastructure (same collection, same dense embedding model) rather than
     adding pgvector or a second embedding pipeline. This is what actually
     fixes "1 doc vs 100 docs shows the same 100%": a stage with a placeholder
     file has no chunk that's actually ABOUT the requirement, so nothing
-    clears the threshold, and the requirement still shows missing.
+    clears the threshold, and the requirement still shows missing. Qdrant's
+    own similarity ranking (highest cosine score, limit=1) is already the
+    correct deterministic "first hit" for this branch.
 
-    No separate workflow-state/approval check is needed here: index_document()
-    (app/services/indexing.py) only ever runs after should_index() has
-    confirmed the version is Scanner-passed AND approved-if-the-stage-
-    requires-it — the exact same "counts as evidence" bar the graph-edge
-    branch above checks explicitly. A chunk existing in Qdrant at all already
-    proves its document cleared that bar.
+    No separate workflow-state/approval check is needed for the semantic
+    branch: index_document() (app/services/indexing.py) only ever runs after
+    should_index() has confirmed the version is Scanner-passed AND approved-
+    if-the-stage-requires-it — the exact same "counts as evidence" bar the
+    graph-edge branch checks explicitly. A chunk existing in Qdrant at all
+    already proves its document cleared that bar.
     """
-    if not stage_ids:
-        return False
+    evidence_edges = (
+        db.query(Edge)
+        .filter(
+            Edge.tenant_id == tenant_id,
+            Edge.project_id == project_id,
+            Edge.target_node_id == req_node.node_id,
+            Edge.edge_type.in_(["ESTABLISHES", "IMPLEMENTS", "VALIDATES", "EVIDENCES"]),
+            # Item 9: regex-found edges are always 0.85-0.95 (unaffected).
+            # A low-confidence LLM-found edge (0.5-0.7) must not count as
+            # direct evidence — only surfaced for manual review elsewhere.
+            Edge.confidence >= DIRECT_FACT_CONFIDENCE_FLOOR,
+        )
+        .order_by(Edge.confidence.desc(), Edge.created_at.asc())
+        .all()
+    )
 
-    query_text = requirement_name
-    if requirement_description:
-        query_text = f"{requirement_name}\n{requirement_description}"
+    for edge in evidence_edges:
+        doc_node = db.query(Node).filter(Node.node_id == edge.source_node_id).first()
+        if not doc_node or doc_node.source_table != "documents":
+            continue
+        doc = db.query(Document).filter(Document.document_id == doc_node.source_id).first()
+        if not doc:
+            continue
+        wf = db.query(WorkflowState).filter(WorkflowState.document_id == doc.document_id).first()
+        stage = db.query(Stage).filter(Stage.stage_id == doc.stage_id).first()
+        current_wf_state = wf.state.value if (wf and hasattr(wf.state, "value")) else (wf.state if wf else "draft")
+        if (stage and not stage.requires_approval) or current_wf_state == "approved":
+            return (doc.document_id, "graph_edge")
+
+    # Semantic fallback: no regex/pattern-derived graph edge names a
+    # document as evidence, but a document's CONTENT can still satisfy the
+    # requirement without ever mentioning its filename/UUID (which is all
+    # relationship_extractor.py can currently detect). Scoped to the same
+    # evaluated_stage_ids as the rest of this audit run, matching the
+    # graph-edge branch's own lack of per-requirement stage scoping for
+    # evidence docs.
+    if not stage_ids:
+        return None
+
+    query_text = req.name
+    if req.description:
+        query_text = f"{req.name}\n{req.description}"
 
     try:
         query_vector = embed_dense([query_text])[0]
     except Exception:
-        logger.exception("R001 semantic evidence check: embedding failed, treating as no match")
-        return False
+        logger.exception("Evidence resolution: embedding failed, treating as no match")
+        return None
 
     client = get_qdrant_client()
     collection = collection_name_for_tenant(tenant_id)
     if not client.collection_exists(collection):
-        return False  # nothing indexed yet for this tenant at all
+        return None  # nothing indexed yet for this tenant at all
 
     response = client.query_points(
         collection_name=collection,
@@ -77,9 +142,14 @@ def _has_semantic_evidence(
         ),
         limit=1,
         score_threshold=SEMANTIC_EVIDENCE_SIMILARITY_THRESHOLD,
-        with_payload=False,
+        with_payload=True,
     )
-    return len(response.points) > 0
+    if not response.points:
+        return None
+    doc_id_raw = response.points[0].payload.get("document_id")
+    if not doc_id_raw:
+        return None
+    return (uuid.UUID(doc_id_raw), "semantic")
 
 
 class FindingSpec:
@@ -114,6 +184,7 @@ def evaluate_r001_missing_mandatory_requirements(
     project_id: uuid.UUID,
     evaluated_stage_ids: List[uuid.UUID],
     stage_name_map: Dict[uuid.UUID, str],
+    evidence_by_requirement: Dict[uuid.UUID, Optional[Tuple[uuid.UUID, str]]],
 ) -> List[FindingSpec]:
     """
     R001: Missing Mandatory Requirement Evidence.
@@ -122,11 +193,22 @@ def evaluate_r001_missing_mandatory_requirements(
     Prevents downstream contamination (a requirement originating downstream cannot contaminate upstream).
     Flags when an applicable mandatory requirement has zero approved satisfying/evidentiary documents.
 
-    Master Plan v2, item 7: evidence is no longer graph-edges-only. If no
-    REFERENCES/EVIDENCES-style edge names a document, _has_semantic_evidence()
-    falls back to a Qdrant nearest-neighbor search against the requirement's
-    name+description — this is what makes "1 doc vs 100 docs" actually
-    reflect real content coverage instead of just document count.
+    Evidence resolution itself (graph-edge or Master Plan v2 item 7's Qdrant
+    semantic fallback) is no longer done inline here — this function is now
+    purely a CONSUMER of `evidence_by_requirement`, precomputed once per
+    requirement by execute_project_audit via the shared
+    _resolve_requirement_evidence() (app/services/graph/audit_rules.py),
+    which is also what populates the RequirementSatisfaction table. The two
+    can never disagree about what counts as evidence, because neither
+    computes it independently anymore. A requirement_id absent from the map
+    (vs. present with a None-equivalent "no evidence" value) means its graph
+    Node doesn't exist yet — treated as "not yet evaluable," exactly as this
+    function has always silently skipped that case (see the `continue` below).
+
+    This IS the one deliberate exception to every other RULE_REGISTRY entry
+    sharing an identical signature (see RULE_REGISTRY's own comment in
+    audit_engine.py) — R001 is the only rule with a second consumer needing
+    its evaluation-time byproduct.
     """
     findings: List[FindingSpec] = []
     if not evaluated_stage_ids:
@@ -237,59 +319,34 @@ def evaluate_r001_missing_mandatory_requirements(
         if not req_node:
             continue
 
-        evidence_edges = (
-            db.query(Edge)
-            .filter(
-                Edge.tenant_id == tenant_id,
-                Edge.project_id == project_id,
-                Edge.target_node_id == req_node.node_id,
-                Edge.edge_type.in_(["ESTABLISHES", "IMPLEMENTS", "VALIDATES", "EVIDENCES"]),
-                # Item 9: regex-found edges are always 0.85-0.95 (unaffected).
-                # A low-confidence LLM-found edge (0.5-0.7) must not count as
-                # direct evidence — only surfaced for manual review elsewhere.
-                Edge.confidence >= DIRECT_FACT_CONFIDENCE_FLOOR,
-            )
-            .all()
-        )
-
-        has_approved_evidence = False
-        evidence_doc_titles = []
-
-        for edge in evidence_edges:
-            doc_node = db.query(Node).filter(Node.node_id == edge.source_node_id).first()
-            if doc_node and doc_node.source_table == "documents":
-                doc = db.query(Document).filter(Document.document_id == doc_node.source_id).first()
-                if doc:
-                    evidence_doc_titles.append(doc.original_filename)
-                    wf = (
-                        db.query(WorkflowState)
-                        .filter(WorkflowState.document_id == doc.document_id)
-                        .first()
-                    )
-                    stage = db.query(Stage).filter(Stage.stage_id == doc.stage_id).first()
-                    current_wf_state = wf.state.value if (wf and hasattr(wf.state, "value")) else (wf.state if wf else "draft")
-                    if stage and not stage.requires_approval:
-                        has_approved_evidence = True
-                        break
-                    elif current_wf_state == "approved":
-                        has_approved_evidence = True
-                        break
-
-        semantic_evidence = False
-        if not has_approved_evidence:
-            # Semantic fallback (item 7): no regex/pattern-derived graph edge
-            # names a document as evidence, but a document's CONTENT can
-            # still satisfy the requirement without ever mentioning its
-            # filename/UUID (which is all relationship_extractor.py can
-            # currently detect). Scoped to the same evaluated_stage_ids as
-            # the rest of this audit run, matching the graph-edge branch's
-            # own lack of per-requirement stage scoping for evidence docs.
-            semantic_evidence = _has_semantic_evidence(
-                tenant_id, project_id, set(evaluated_stage_ids), req.name, req.description,
-            )
-            has_approved_evidence = semantic_evidence
+        has_approved_evidence = evidence_by_requirement.get(req.requirement_id) is not None
 
         if not has_approved_evidence:
+            # Unapproved-but-graph-linked documents, shown to a human
+            # reviewing the finding as "here's what exists but isn't
+            # sufficient" — a display-only re-query of the same edges (no
+            # LLM/Qdrant call), independent of the shared evidence-resolution
+            # decision above. Preserved from the pre-refactor behavior;
+            # AuditFindingDrawer.jsx renders this field.
+            evidence_doc_titles = []
+            evidence_edges = (
+                db.query(Edge)
+                .filter(
+                    Edge.tenant_id == tenant_id,
+                    Edge.project_id == project_id,
+                    Edge.target_node_id == req_node.node_id,
+                    Edge.edge_type.in_(["ESTABLISHES", "IMPLEMENTS", "VALIDATES", "EVIDENCES"]),
+                    Edge.confidence >= DIRECT_FACT_CONFIDENCE_FLOOR,
+                )
+                .all()
+            )
+            for edge in evidence_edges:
+                doc_node = db.query(Node).filter(Node.node_id == edge.source_node_id).first()
+                if doc_node and doc_node.source_table == "documents":
+                    doc = db.query(Document).filter(Document.document_id == doc_node.source_id).first()
+                    if doc:
+                        evidence_doc_titles.append(doc.original_filename)
+
             for t_stage_id in target_stages_in_scope:
                 stage_name = stage_name_map.get(t_stage_id, "Unknown Stage")
                 findings.append(
