@@ -96,17 +96,34 @@ def access_status(
     in one call, via the same resolver document visibility and mutation
     enforcement use. The frontend renders this verdict directly — it never
     reconstructs scope/target/grant-precedence logic itself.
+
+    For a stage target specifically: resolve_effective_access() only
+    reports "granted" when the active grant is confidential-unlocking
+    (contributor_confidential tier) — correct for its own purpose, but this
+    endpoint also needs to reflect a plain viewer/contributor grant, which
+    IS an active grant even though it confers no confidential access. When
+    resolve_stage_grant() finds one and resolve_effective_access() didn't
+    already report "granted" via some other path, this reports "granted"
+    too, using that grant's own expires_at/request_id.
     """
     provided = [x for x in (document_id, stage_id, team_id) if x is not None]
     if len(provided) != 1:
         raise HTTPException(
             status_code=422, detail="Exactly one of document_id, stage_id, team_id is required."
         )
-    from app.services.access_control import resolve_effective_access
+    from app.services.access_control import resolve_effective_access, resolve_stage_grant
 
     result = resolve_effective_access(
         db, identity.user_id, document_id=document_id, stage_id=stage_id, team_id=team_id,
     )
+    if result.status != "granted" and stage_id is not None:
+        stage_grant = resolve_stage_grant(db, identity.user_id, stage_id)
+        if stage_grant is not None:
+            return EffectiveAccessOut(
+                status="granted", via_grant=True,
+                expires_at=stage_grant.expires_at.isoformat() if stage_grant.expires_at else None,
+                request_id=str(stage_grant.request_id),
+            )
     return EffectiveAccessOut(
         status=result.status,
         via_grant=result.via_grant,
