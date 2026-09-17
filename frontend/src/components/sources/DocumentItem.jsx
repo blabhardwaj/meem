@@ -9,6 +9,7 @@ import VersionDiffModal, { DiffStats } from './VersionDiffModal';
 import Dropdown from '../ui/Dropdown';
 import { documentsApi, accessRequestsApi } from '../../lib/api';
 import { sensitivityLabel } from '../../constants/docTypes';
+import { DOCUMENT_AND_TEAM_SCOPE_REQUESTS_ENABLED } from '../../constants/accessRequests';
 
 const LockedDocumentRow = ({ document }) => {
   const [state, setState] = useState('loading'); // loading | none | pending | granted | denied | expired
@@ -46,11 +47,14 @@ const LockedDocumentRow = ({ document }) => {
       </div>
       <div className="shrink-0">
         {state === 'loading' && <span className="text-xs text-gray-600">…</span>}
-        {state === 'none' || state === 'denied' || state === 'expired' ? (
+        {DOCUMENT_AND_TEAM_SCOPE_REQUESTS_ENABLED && (state === 'none' || state === 'denied' || state === 'expired') ? (
           <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" loading={busy} onClick={handleRequest}>
             Request access
           </Button>
         ) : null}
+        {!DOCUMENT_AND_TEAM_SCOPE_REQUESTS_ENABLED && (state === 'none' || state === 'denied' || state === 'expired') && (
+          <span className="text-xs text-gray-600">Request access for this stage instead</span>
+        )}
         {state === 'pending' && <Badge variant="warning">Pending review</Badge>}
         {state === 'granted' && <Badge variant="success">Granted</Badge>}
       </div>
