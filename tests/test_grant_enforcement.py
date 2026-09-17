@@ -12,6 +12,7 @@ from app.models.user import User
 from app.services import draft_workspace
 from app.services.document_delete import PermissionDeniedError, delete_version
 from app.services.document_finalize import GrantOnlyAccessError, finalize_document_revision
+from app.services.workflow import WorkflowPermissionError, submit_for_review
 
 
 class TestFinalizeGrantEnforcement(unittest.TestCase):
@@ -129,6 +130,37 @@ class TestDeleteVersionGrantEnforcement(TestFinalizeGrantEnforcement):
             delete_version(
                 self.db, document_id=self.document.document_id, version_id=second_version_id,
                 actor_id=self.contributor.user_id, is_admin=False,
+            )
+
+
+class TestSubmitGrantEnforcement(TestFinalizeGrantEnforcement):
+    def tearDown(self):
+        # The base tearDown deletes the Document, which would otherwise hit
+        # workflow_state's FK constraint given the WorkflowState row this
+        # class's test adds — clear it first, then defer to the base cleanup.
+        from app.models.workflow import WorkflowState
+        self.db.query(WorkflowState).filter(WorkflowState.document_id == self.document.document_id).delete()
+        self.db.commit()
+        super().tearDown()
+
+    def test_grant_only_contributor_cannot_submit_for_review(self):
+        from app.models.workflow import WorkflowState, WorkflowStatus
+        self.db.add(WorkflowState(document_id=self.document.document_id, state=WorkflowStatus.draft))
+        self.db.commit()
+
+        grant = AccessRequest(
+            user_id=self.contributor.user_id, team_id=self.team.team_id,
+            scope=AccessRequestScope.document, document_id=self.document.document_id,
+            status=AccessRequestStatus.approved,
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=72),
+        )
+        self.db.add(grant)
+        self.db.commit()
+
+        with self.assertRaises(WorkflowPermissionError):
+            submit_for_review(
+                self.db, self.document.document_id, self.contributor.user_id,
+                self.team.team_id, self.project.project_id, "contributor",
             )
 
 
