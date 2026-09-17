@@ -38,6 +38,7 @@ from app.services.audit import record_audit
 from app.services.notifications import notify_access_request_created
 
 GRANT_TTL_DAYS = 90
+DOCUMENT_GRANT_TTL_HOURS = 72
 
 
 class AccessRequestError(Exception):
