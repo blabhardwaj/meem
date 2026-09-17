@@ -153,6 +153,58 @@ class TestScopedAccessRequests(unittest.TestCase):
         self.assertEqual(req.scope, AccessRequestScope.team)
         self.assertEqual(req.team_id, self.engineering.team_id)
 
+    def test_stage_scope_active_grant_does_not_block_a_new_request(self):
+        from datetime import timedelta
+        from app.models.team import AccessRequestStatus, GrantTier
+
+        self.db.add(UserTeamMembership(
+            user_id=self.contributor.user_id, team_id=self.engineering.team_id,
+            project_id=self.project.project_id, role=TeamRole.contributor,
+        ))
+        self.db.add(TeamStageAccess(team_id=self.engineering.team_id, stage_id=self.stage.stage_id))
+        self.db.commit()
+
+        # contributor_confidential specifically, not viewer: a viewer-tier
+        # grant is already excluded from resolve_effective_access()'s
+        # "granted" path by Task 4's tier-gating, so it wouldn't exercise
+        # this task's fix on its own — contributor_confidential is the tier
+        # that still reads as "granted" and needs the stage-scope dedup
+        # bypass added here to allow a fresh request past it.
+        existing_grant = AccessRequest(
+            user_id=self.contributor.user_id, team_id=self.engineering.team_id,
+            scope=AccessRequestScope.stage, stage_id=self.stage.stage_id,
+            tier=GrantTier.contributor_confidential, status=AccessRequestStatus.approved,
+            decided_at=datetime.now(timezone.utc), expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+        )
+        self.db.add(existing_grant)
+        self.db.commit()
+
+        req = request_confidential_access(
+            self.db, user_id=self.contributor.user_id, stage_id=self.stage.stage_id,
+            expected_tenant_id=self.tenant.tenant_id,
+        )
+        self.assertEqual(req.scope, AccessRequestScope.stage)
+        self.assertEqual(req.status, AccessRequestStatus.pending)
+
+    def test_stage_scope_pending_request_still_blocks_a_duplicate(self):
+        self.db.add(UserTeamMembership(
+            user_id=self.contributor.user_id, team_id=self.engineering.team_id,
+            project_id=self.project.project_id, role=TeamRole.contributor,
+        ))
+        self.db.add(TeamStageAccess(team_id=self.engineering.team_id, stage_id=self.stage.stage_id))
+        self.db.commit()
+
+        request_confidential_access(
+            self.db, user_id=self.contributor.user_id, stage_id=self.stage.stage_id,
+            expected_tenant_id=self.tenant.tenant_id,
+        )
+        with self.assertRaises(AccessRequestError) as ctx:
+            request_confidential_access(
+                self.db, user_id=self.contributor.user_id, stage_id=self.stage.stage_id,
+                expected_tenant_id=self.tenant.tenant_id,
+            )
+        self.assertEqual(ctx.exception.status_code, 409)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -209,18 +209,38 @@ def request_confidential_access(
             "You already have confidential access on this team.", status_code=409
         )
 
-    from app.services.access_control import resolve_effective_access
-    effective = resolve_effective_access(
-        db, user_id,
-        document_id=document_id if scope == AccessRequestScope.document else None,
-        stage_id=stage_id if scope == AccessRequestScope.stage else None,
-        team_id=resolved_team_id if scope == AccessRequestScope.team else None,
-    )
-    if effective.status in ("granted", "pending"):
-        raise AccessRequestError(
-            f"You already have a {effective.status} confidential-access request for this target.",
-            status_code=409,
+    if scope == AccessRequestScope.stage:
+        # Stage-scope dedup (spec §5.1): only a duplicate PENDING request is
+        # blocked here — an existing ACTIVE grant (any tier) no longer blocks
+        # a fresh request, since the whole point of tiers is requesting an
+        # upgrade without waiting for the current grant to expire. Task 1's
+        # partial unique index (uq_access_requests_one_pending_stage_request)
+        # backs this up against a race between two simultaneous requests.
+        existing_pending = db.execute(
+            select(AccessRequest).where(
+                AccessRequest.user_id == user_id,
+                AccessRequest.scope == AccessRequestScope.stage,
+                AccessRequest.stage_id == stage_id,
+                AccessRequest.status == AccessRequestStatus.pending,
+            )
+        ).scalar_one_or_none()
+        if existing_pending is not None:
+            raise AccessRequestError(
+                "You already have a pending confidential-access request for this target.",
+                status_code=409,
+            )
+    else:
+        from app.services.access_control import resolve_effective_access
+        effective = resolve_effective_access(
+            db, user_id,
+            document_id=document_id if scope == AccessRequestScope.document else None,
+            team_id=resolved_team_id if scope == AccessRequestScope.team else None,
         )
+        if effective.status in ("granted", "pending"):
+            raise AccessRequestError(
+                f"You already have a {effective.status} confidential-access request for this target.",
+                status_code=409,
+            )
 
     req = AccessRequest(
         user_id=user_id, team_id=resolved_team_id, scope=scope,
