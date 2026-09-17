@@ -20,6 +20,8 @@ a confirmation that a tool did not return.
 import time
 import uuid
 
+from sqlalchemy import text
+
 from app.database import SessionLocal
 from app.models.document import Document, DocumentTeamVisibility
 from app.models.stage import Stage
@@ -42,7 +44,7 @@ from app.services.document_lookup import (
 from app.services.indexing import resolve_grounding_version
 from app.services.rag.generation import GenerationError, generate_answer, summarize_full_document
 from app.services.rag.retrieval import NoProjectAccessError, retrieve
-from app.services.rag_context import get_rag_context
+from app.services.rag_context import RagContext, get_rag_context
 
 from agno.tools import tool
 
@@ -50,6 +52,37 @@ from agno.tools import tool
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+def _tenant_scoped_session(ctx: RagContext):
+    """
+    A fresh SessionLocal() with app.current_tenant_id already SET LOCAL —
+    every table these tools touch (documents, stages, teams, chat_*, etc.)
+    FORCE ROW LEVEL SECURITY, so an unscoped session silently sees ZERO rows
+    rather than erroring, which used to surface as every user (including
+    org_admin/project_admin) getting a false "you don't have access to this
+    project" from search_documents. db.info["tenant_id"] alone only takes
+    effect starting the session's NEXT transaction (see app/database.py's
+    after_begin listener) — an explicit SET LOCAL is required for the very
+    first statement too. Mirrors the established pattern in
+    app/tools/graph_tools.py.
+
+    ctx.tenant_id is set by every live caller (run_search_turn); the `users`
+    table lookup fallback exists only for the legacy, currently-unreachable
+    run_rag_turn() path, which doesn't have a tenant_id to pass through —
+    it's safe because `users` has RLS enabled but NOT forced.
+    """
+    db = SessionLocal()
+    tenant_id = ctx.tenant_id
+    if tenant_id is None:
+        user = db.query(User).filter(User.user_id == ctx.user_id).first()
+        if user is None:
+            db.close()
+            raise NoProjectAccessError(f"User {ctx.user_id} does not exist")
+        tenant_id = user.tenant_id
+    db.info["tenant_id"] = str(tenant_id)
+    db.execute(text("SET LOCAL app.current_tenant_id = :tid"), {"tid": str(tenant_id)})
+    return db
+
 
 def _stage_name_map(db, project_id: uuid.UUID, stage_ids: set[uuid.UUID]) -> dict[uuid.UUID, str]:
     if not stage_ids:
@@ -157,7 +190,7 @@ def _run_search(query: str, stage_id: str | None = None) -> dict:
     (status + payload); search_documents renders it to the final user string.
     """
     ctx = get_rag_context()
-    db = SessionLocal()
+    db = _tenant_scoped_session(ctx)
     try:
         resolved_stage: uuid.UUID | None = None
         if stage_id:
@@ -288,7 +321,7 @@ def summarize_document(document_reference: str, stage_reference: str | None = No
         - "error": summarisation failed.
     """
     ctx = get_rag_context()
-    db = SessionLocal()
+    db = _tenant_scoped_session(ctx)
     try:
         ref = (document_reference or "").strip()
         if not ref:
@@ -396,7 +429,7 @@ def request_confidential_access(team_id: str) -> dict:
           request, or is not on that team. Relay the message as-is.
     """
     ctx = get_rag_context()
-    db = SessionLocal()
+    db = _tenant_scoped_session(ctx)
     try:
         team_uuid = _resolve_team(db, ctx.project_id, team_id)
         if team_uuid is None:
@@ -442,7 +475,7 @@ def list_accessible_documents(stage_reference: str | None = None) -> dict:
     or asks for a list of project documents.
     """
     ctx = get_rag_context()
-    db = SessionLocal()
+    db = _tenant_scoped_session(ctx)
     try:
         from app.services.authorization_context import build_authorization_context
         from app.services.access_control import classify_documents_visibility, DocumentVisibility
