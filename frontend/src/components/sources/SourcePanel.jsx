@@ -22,8 +22,6 @@ const SourcePanel = ({
   canManageStages = false,
   onStagesChanged,
   onDocumentUploaded,
-  hasRequestableTeams = false,
-  onRequestConfidentialAccess,
   highlightDocumentId = null,
   canEditAny = false,
   currentUserId = null,

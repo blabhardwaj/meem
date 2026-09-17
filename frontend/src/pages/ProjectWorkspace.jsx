@@ -267,6 +267,16 @@ const ProjectWorkspace = () => {
           </span>
         </div>
 
+        {requestableTeams.length > 0 && (
+          <button
+            type="button"
+            onClick={() => { setReqNotice(''); setReqError(''); setAccessOpen(true); }}
+            title="Request access to confidential documents shared with a team"
+            className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-2.5 py-1 text-xs font-medium text-gray-300 hover:border-primary/50 hover:text-gray-100 transition-colors shrink-0"
+          >
+            Team access
+          </button>
+        )}
 
         <div className="flex-1" />
       </div>
@@ -289,8 +299,6 @@ const ProjectWorkspace = () => {
             canManageStages={canManageStages}
             onStagesChanged={() => load({ silent: true })}
             onDocumentUploaded={handleDocumentUploaded}
-            hasRequestableTeams={requestableTeams.length > 0}
-            onRequestConfidentialAccess={() => { setReqNotice(''); setReqError(''); setAccessOpen(true); }}
             highlightDocumentId={highlightDocumentId}
           />
         </div>
@@ -366,8 +374,8 @@ const ProjectWorkspace = () => {
       <Modal
         open={accessOpen}
         onClose={() => setAccessOpen(false)}
-        title="Request confidential access"
-        description="Confidential documents need clearance. Ask the team lead for a grant — it lasts 90 days."
+        title="Team access"
+        description="Request access to every confidential document shared with a team — the broadest option. For a single document or one stage, use the Request access action on that document or stage instead."
       >
         <div className="space-y-3">
           {reqNotice && <p className="text-sm text-emerald-400">{reqNotice}</p>}
