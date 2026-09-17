@@ -40,7 +40,7 @@ from sqlalchemy.orm import Session
 
 from app.models.document import Document, DocumentScan, DocumentStatus, DocumentVersion, VersionApprovalOutcome
 from app.models.workflow import WorkflowState, WorkflowStatus
-from app.services.access_control import has_permission
+from app.services.access_control import has_permission, is_grant_only_confidential_access
 from app.services.audit import record_audit
 from app.services.indexing import index_document, should_index, unindex_document
 from app.services.notifications import (
@@ -174,6 +174,12 @@ def submit_for_review(
         raise WorkflowPermissionError(
             "You do not have permission to submit documents for review on this team."
         )
+    document = db.get(Document, document_id)
+    if document is not None and is_grant_only_confidential_access(db, user_id, document):
+        raise WorkflowPermissionError(
+            "Your access to this document is read-only (granted via a confidential-access "
+            "request, not your team role) — you cannot submit it for review."
+        )
     if state.state not in (WorkflowStatus.draft, WorkflowStatus.rejected):
         raise WorkflowError(
             f"Document is '{state.state.value}' — only a 'draft' or a "
@@ -186,7 +192,6 @@ def submit_for_review(
         db, actor_id=user_id, action="SUBMIT_DOCUMENT", resource_type="document",
         resource_id=document_id, details={"state": "pending_review"},
     )
-    document = db.get(Document, document_id)
     if document is not None:
         notify_pending_review(db, document=document, team_id=team_id)
     db.commit()
@@ -259,12 +264,22 @@ def approve_document(
         raise WorkflowPermissionError(
             "You do not have permission to approve documents on this team."
         )
+    document = db.get(Document, document_id)
+    # Currently unreachable in practice: 'approve' already requires
+    # team_lead+ (has_permission above), and team_lead+ always has native —
+    # never grant-only — access, so this can never actually trigger today.
+    # Kept for defense in depth in case the required role for 'approve'
+    # ever changes; the message itself must stay plain and user-facing.
+    if document is not None and is_grant_only_confidential_access(db, approver_id, document):
+        raise WorkflowPermissionError(
+            "Your access to this document is read-only (granted via a confidential-access "
+            "request, not your team role) — you cannot approve it."
+        )
     if state.state != WorkflowStatus.pending_review:
         raise WorkflowError(
             f"Document is '{state.state.value}', not 'pending_review' — cannot approve."
         )
     scan_detail, override_used = _check_scan_passed(db, document_id, role, override)
-    document = db.get(Document, document_id)
     if override_used:
         record_audit(
             db, actor_id=approver_id, action="APPROVE_OVERRIDE_SCAN", resource_type="document",
@@ -342,6 +357,13 @@ def reset_to_draft_if_approved(
     state = get_workflow_state(db, document_id)
     if state is None or state.state != WorkflowStatus.approved:
         return False
+    document = db.get(Document, document_id)
+    if document is not None and is_grant_only_confidential_access(db, triggered_by, document):
+        raise WorkflowPermissionError(
+            "Your access to this document is read-only (granted via a confidential-access "
+            "request, not your team role) — you cannot revise it in a way that resets its "
+            "approval state."
+        )
     previous_approver = state.approved_by
     state.state = WorkflowStatus.draft
     state.approved_by = None
@@ -380,13 +402,20 @@ def reject_document(
         raise WorkflowPermissionError(
             "You do not have permission to reject documents on this team."
         )
+    document = db.get(Document, document_id)
+    # Same defense-in-depth note as approve_document above: currently
+    # unreachable since 'reject' also requires team_lead+.
+    if document is not None and is_grant_only_confidential_access(db, approver_id, document):
+        raise WorkflowPermissionError(
+            "Your access to this document is read-only (granted via a confidential-access "
+            "request, not your team role) — you cannot reject it."
+        )
     if state.state != WorkflowStatus.pending_review:
         raise WorkflowError(
             f"Document is '{state.state.value}', not 'pending_review' — cannot reject."
         )
     state.state = WorkflowStatus.rejected
     state.rejection_reason = reason.strip()
-    document = db.get(Document, document_id)
     if document is not None and document.current_version_id is not None:
         current_version = db.get(DocumentVersion, document.current_version_id)
         if current_version is not None and current_version.approval_outcome is None:

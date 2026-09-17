@@ -330,6 +330,14 @@ def delete_stage(
     _load_project(db, identity, project_id)
     _require_project_admin(identity, project_id)
 
+    # No grant-only enforcement is needed on the bulk document reassignment
+    # below: this endpoint is already gated to org_admin/project_admin only
+    # (the check above), and is_grant_only_confidential_access() always
+    # returns False for both — native access, unconditional first branch.
+    # The actor here can never be grant-only for any document, so the
+    # "grant-only actor bulk-reassigning documents they can't fully see"
+    # concern doesn't apply through this endpoint as it exists today.
+
     stages = _active_stages(db, project_id)
     stage = next((s for s in stages if s.stage_id == stage_id), None)
     if stage is None:

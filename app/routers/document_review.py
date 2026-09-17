@@ -62,6 +62,7 @@ from app.services.document_version_review import (
 )
 from app.services.graph.audit_engine import extract_sync_and_audit_document
 from app.services.indexing import resolve_grounding_version
+from app.services.workflow import WorkflowPermissionError
 from app.services.document_delete import (
     DocumentNotFoundError as DeleteDocumentNotFoundError,
     PermissionDeniedError as DeletePermissionDeniedError,
@@ -597,6 +598,8 @@ def version_review_message(
             user_id=identity.user_id, message=body.message,
         )
     except GrantOnlyAccessError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except WorkflowPermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 — Groq / rate-limit / parse failures
         raise HTTPException(
