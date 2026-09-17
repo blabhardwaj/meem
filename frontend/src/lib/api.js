@@ -144,6 +144,7 @@ function mapDocs(rows, project) {
     project_id: project?.project_id || null,
     created_at: null,
     members: undefined,
+    locked: Boolean(d.locked),
   }));
 }
 
@@ -482,6 +483,20 @@ export const accessRequestsApi = {
   mine: () => request('/access-requests/mine'),
   // create a pending request for one team
   create: (teamId) => request('/access-requests', { method: 'POST', body: { team_id: teamId } }),
+  createForDocument: (documentId) =>
+    request('/access-requests', { method: 'POST', body: { document_id: documentId } }),
+  createForStage: (stageId) =>
+    request('/access-requests', { method: 'POST', body: { stage_id: stageId } }),
+  // Effective-state lookup for one exact target — the server resolves
+  // native/grant/pending/terminal precedence; the caller only renders the
+  // returned verdict, never re-derives it.
+  status: ({ documentId, stageId, teamId } = {}) => {
+    const params = new URLSearchParams();
+    if (documentId) params.set('document_id', documentId);
+    if (stageId) params.set('stage_id', stageId);
+    if (teamId) params.set('team_id', teamId);
+    return request(`/access-requests/status?${params.toString()}`);
+  },
   // requests the caller may decide (team_lead on that team / project_admin / org_admin)
   pending: () => request('/access-requests/pending'),
   approve: (id) => request(`/access-requests/${encodeURIComponent(id)}/approve`, { method: 'POST' }),
