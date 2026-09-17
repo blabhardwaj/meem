@@ -32,10 +32,12 @@ from app.models.team import (
     AccessRequest,
     AccessRequestScope,
     AccessRequestStatus,
+    GrantDuration,
+    GrantTier,
     Team,
 )
 from app.models.user import User
-from app.services.access_control import has_permission
+from app.services.access_control import _get_team_membership, has_permission
 from app.services.access_requests_service import (
     AccessRequestError,
     GRANT_TTL_DAYS as _GRANT_TTL_DAYS,
@@ -49,6 +51,19 @@ from app.services.notifications import notify_access_request_decided
 
 router = APIRouter(prefix="/access-requests", tags=["access-requests"])
 
+_DURATION_LABELS: dict[GrantDuration, str] = {
+    GrantDuration.hours_72: "72 hours",
+    GrantDuration.week_1: "1 week",
+    GrantDuration.month_1: "1 month",
+    GrantDuration.unlimited: "no expiration",
+}
+_EXPIRES_AT_FOR_DURATION = {
+    GrantDuration.hours_72: lambda now: now + timedelta(hours=72),
+    GrantDuration.week_1: lambda now: now + timedelta(days=7),
+    GrantDuration.month_1: lambda now: now + timedelta(days=30),
+    GrantDuration.unlimited: lambda now: None,
+}
+
 
 class CreateAccessRequest(BaseModel):
     team_id: uuid.UUID | None = None
@@ -56,10 +71,16 @@ class CreateAccessRequest(BaseModel):
     stage_id: uuid.UUID | None = None
 
 
+class ApproveAccessRequestBody(BaseModel):
+    tier: GrantTier | None = None
+    duration: GrantDuration | None = None
+
+
 class AccessRequestOut(BaseModel):
     request_id: str
     user_id: str
     requester_email: str | None
+    requester_role: str | None  # the requester's TeamRole on `team_id` — approver visibility
     team_id: str
     team_name: str
     project_id: str
@@ -67,7 +88,8 @@ class AccessRequestOut(BaseModel):
     scope: str  # "document" | "stage" | "team"
     target_id: str  # document_id, stage_id, or team_id, matching `scope`
     target_name: str  # filename, stage name, or team name, matching `scope`
-    grant_duration_label: str  # "72 hours" | "90 days" — what approving THIS request grants
+    tier: str | None  # GrantTier value — set only on a decided stage-scope request
+    grant_duration_label: str  # human-readable duration, or a prompt to choose one if still pending
     status: str
     requested_at: str | None
     decided_at: str | None
@@ -140,6 +162,7 @@ def _serialize(db: Session, r: AccessRequest, *, team=None, project=None, reques
     team = team or db.get(Team, r.team_id)
     project = project or (db.get(Project, team.project_id) if team else None)
     requester = requester or db.get(User, r.user_id)
+    requester_membership = _get_team_membership(db, r.user_id, r.team_id)
 
     if r.scope == AccessRequestScope.document:
         target_id = str(r.document_id)
@@ -150,7 +173,10 @@ def _serialize(db: Session, r: AccessRequest, *, team=None, project=None, reques
         target_id = str(r.stage_id)
         stage = db.get(Stage, r.stage_id)
         target_name = stage.name if stage else "(deleted stage)"
-        grant_duration_label = f"{GRANT_TTL_DAYS} days"
+        grant_duration_label = (
+            _DURATION_LABELS[r.duration] if r.duration is not None
+            else "Approver chooses tier & duration"
+        )
     else:
         target_id = str(r.team_id)
         target_name = team.name if team else "(unknown)"
@@ -160,6 +186,7 @@ def _serialize(db: Session, r: AccessRequest, *, team=None, project=None, reques
         request_id=str(r.request_id),
         user_id=str(r.user_id),
         requester_email=requester.email if requester else None,
+        requester_role=requester_membership.role.value if requester_membership else None,
         team_id=str(r.team_id),
         team_name=team.name if team else "(unknown)",
         project_id=str(team.project_id) if team else "",
@@ -167,6 +194,7 @@ def _serialize(db: Session, r: AccessRequest, *, team=None, project=None, reques
         scope=r.scope.value,
         target_id=target_id,
         target_name=target_name,
+        tier=r.tier.value if r.tier else None,
         grant_duration_label=grant_duration_label,
         status=r.status.value,
         requested_at=r.requested_at.isoformat() if r.requested_at else None,
@@ -230,7 +258,10 @@ def pending_access_requests(
     return [_serialize(db, r) for r in rows]
 
 
-def _decide(db: Session, identity: ResolvedIdentity, request_id: uuid.UUID, *, approve: bool) -> AccessRequestOut:
+def _decide(
+    db: Session, identity: ResolvedIdentity, request_id: uuid.UUID, *,
+    approve: bool, tier: GrantTier | None = None, duration: GrantDuration | None = None,
+) -> AccessRequestOut:
     r = db.get(AccessRequest, request_id)
     team = db.get(Team, r.team_id) if r else None
     project = db.get(Project, team.project_id) if team else None
@@ -245,6 +276,12 @@ def _decide(db: Session, identity: ResolvedIdentity, request_id: uuid.UUID, *, a
     if r.status != AccessRequestStatus.pending:
         raise HTTPException(status_code=409, detail=f"This request has already been {r.status.value}.")
 
+    if approve and r.scope == AccessRequestScope.stage and (tier is None or duration is None):
+        raise HTTPException(
+            status_code=422,
+            detail="Approving a stage-scope request requires both tier and duration.",
+        )
+
     from app.services.access_requests_service import DOCUMENT_GRANT_TTL_HOURS
 
     now = datetime.now(timezone.utc)
@@ -252,10 +289,15 @@ def _decide(db: Session, identity: ResolvedIdentity, request_id: uuid.UUID, *, a
     r.decided_by = identity.user_id
     r.decided_at = now
     if approve:
-        r.expires_at = (
-            now + timedelta(hours=DOCUMENT_GRANT_TTL_HOURS) if r.scope == AccessRequestScope.document
-            else now + timedelta(days=_GRANT_TTL_DAYS)
-        )
+        if r.scope == AccessRequestScope.stage:
+            r.tier = tier
+            r.duration = duration
+            r.expires_at = _EXPIRES_AT_FOR_DURATION[duration](now)
+        else:
+            r.expires_at = (
+                now + timedelta(hours=DOCUMENT_GRANT_TTL_HOURS) if r.scope == AccessRequestScope.document
+                else now + timedelta(days=_GRANT_TTL_DAYS)
+            )
     else:
         r.expires_at = None
     record_audit(
@@ -276,10 +318,11 @@ def _decide(db: Session, identity: ResolvedIdentity, request_id: uuid.UUID, *, a
 @router.post("/{request_id}/approve", response_model=AccessRequestOut)
 def approve_access_request(
     request_id: uuid.UUID,
+    body: ApproveAccessRequestBody = ApproveAccessRequestBody(),
     identity: ResolvedIdentity = Depends(get_current_user),
     db: Session = Depends(get_db_with_tenant),
 ):
-    return _decide(db, identity, request_id, approve=True)
+    return _decide(db, identity, request_id, approve=True, tier=body.tier, duration=body.duration)
 
 
 @router.post("/{request_id}/deny", response_model=AccessRequestOut)
@@ -289,3 +332,47 @@ def deny_access_request(
     db: Session = Depends(get_db_with_tenant),
 ):
     return _decide(db, identity, request_id, approve=False)
+
+
+@router.post("/{request_id}/revoke", response_model=AccessRequestOut)
+def revoke_access_request(
+    request_id: uuid.UUID,
+    identity: ResolvedIdentity = Depends(get_current_user),
+    db: Session = Depends(get_db_with_tenant),
+):
+    """
+    approved -> revoked, immediately and permanently (spec §5.3 — a later
+    older grant for the same stage does NOT reactivate; see
+    get_active_stage_grants_for_user()'s docstring). Row-locked via
+    SELECT ... FOR UPDATE so two concurrent revoke calls can't both pass
+    the status check and double-write the audit trail.
+    """
+    r = db.execute(
+        select(AccessRequest).where(AccessRequest.request_id == request_id).with_for_update()
+    ).scalar_one_or_none()
+    team = db.get(Team, r.team_id) if r else None
+    project = db.get(Project, team.project_id) if team else None
+    if r is None or team is None or project is None or project.tenant_id != identity.tenant_id:
+        raise HTTPException(status_code=404, detail="Request not found")
+    if not has_permission(
+        db, identity.user_id, "approve_access_request", team.team_id, team.project_id
+    ):
+        raise HTTPException(
+            status_code=403, detail=f"You cannot review access requests for team '{team.name}'"
+        )
+    if r.status != AccessRequestStatus.approved:
+        raise HTTPException(
+            status_code=409, detail=f"This request is {r.status.value}, not approved — nothing to revoke."
+        )
+
+    r.status = AccessRequestStatus.revoked
+    r.revoked_at = datetime.now(timezone.utc)
+    r.revoked_by = identity.user_id
+    record_audit(
+        db, actor_id=identity.user_id, action="REVOKE_ACCESS_GRANT",
+        resource_type="access_request", resource_id=r.request_id,
+        details={"team": team.name, "requester_id": str(r.user_id)},
+    )
+    db.commit()
+    db.refresh(r)
+    return _serialize(db, r, team=team, project=project)
