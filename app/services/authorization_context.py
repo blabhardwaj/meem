@@ -5,8 +5,9 @@ Eliminates N+1 query loops across ABAC and RAG retrieval by pre-loading:
   - User identity, tenant_id, clearance, org-admin status
   - Project-admin status
   - All team memberships and roles for (user_id, project_id)
-  - All accessible stage IDs
-  - Active confidential access grants for the user's teams
+  - All accessible stage IDs (native TeamStageAccess + active stage grants)
+  - Active confidential access grants for the user's teams/documents
+  - Active stage grant tiers, for confidential unlock within a stage grant
 
 Authoritative decisions remain in PostgreSQL. This context is strictly internal
 and NEVER exposed as an argument to LLMs.
@@ -26,6 +27,7 @@ from app.models.team import (
     AccessRequest,
     AccessRequestScope,
     AccessRequestStatus,
+    GrantTier,
     ProjectAdmin,
     TeamRole,
     UserTeamMembership,
@@ -49,7 +51,11 @@ class AuthorizationContext:
     clearance_level: SensitivityLevel | str | None = None
     active_confidential_grant_team_ids: set[uuid.UUID] = field(default_factory=set)
     active_confidential_grant_document_ids: set[uuid.UUID] = field(default_factory=set)
-    active_confidential_grant_stage_ids: set[uuid.UUID] = field(default_factory=set)
+    # stage_id -> GrantTier for every active stage grant this user holds in
+    # this project. Replaces the old tier-blind active_confidential_grant_stage_ids
+    # set — confidential unlock now requires tier == contributor_confidential,
+    # checked by the caller (classify_documents_visibility), not here.
+    stage_grant_tiers: dict[uuid.UUID, GrantTier] = field(default_factory=dict)
 
     @property
     def is_admin(self) -> bool:
@@ -63,7 +69,7 @@ def build_authorization_context(
 ) -> AuthorizationContext:
     """
     Constructs a request-scoped AuthorizationContext for (user_id, project_id)
-    in a small, bounded number of queries (maximum 4).
+    in a small, bounded number of queries (no N+1 over documents).
     """
     user = db.get(User, user_id)
     if not user:
@@ -92,7 +98,12 @@ def build_authorization_context(
     team_ids = {m.team_id for m in memberships}
     team_roles = {m.team_id: m.role for m in memberships}
 
-    # 3. Accessible stages
+    # 3. Accessible stages — native TeamStageAccess, plus stage grants of
+    # any tier (imported lazily to avoid a circular import with
+    # access_control.py, which imports AuthorizationContext from here).
+    from app.services.access_control import get_active_stage_grants_for_user
+
+    stage_grant_tiers: dict[uuid.UUID, GrantTier] = {}
     if is_org_admin or is_project_admin:
         stage_rows = db.execute(
             select(Stage.stage_id).where(
@@ -101,32 +112,42 @@ def build_authorization_context(
             )
         ).scalars().all()
         accessible_stage_ids = set(stage_rows)
-    elif team_ids:
-        stage_rows = db.execute(
-            select(TeamStageAccess.stage_id)
-            .join(Stage, Stage.stage_id == TeamStageAccess.stage_id)
-            .where(
-                TeamStageAccess.team_id.in_(team_ids),
-                Stage.deleted_at.is_(None),
-            )
-            .distinct()
-        ).scalars().all()
-        accessible_stage_ids = set(stage_rows)
     else:
         accessible_stage_ids = set()
+        if team_ids:
+            stage_rows = db.execute(
+                select(TeamStageAccess.stage_id)
+                .join(Stage, Stage.stage_id == TeamStageAccess.stage_id)
+                .where(
+                    TeamStageAccess.team_id.in_(team_ids),
+                    Stage.deleted_at.is_(None),
+                )
+                .distinct()
+            ).scalars().all()
+            accessible_stage_ids = set(stage_rows)
 
-    # 4. Active non-expired confidential grants of ANY scope for this user —
-    # one query, partitioned in memory by scope, mirroring
-    # resolve_effective_access()'s single-target query shape but as a bulk
-    # precompute for the N-document batch case (classify_documents_visibility
-    # below) so this stays the "no N+1 queries" path its own docstring
-    # promises. Team-scope grants are still narrowed to this project's teams;
-    # document/stage-scope grants are fetched unfiltered by team since a
-    # grant's own document_id/stage_id is the only thing that needs to match
-    # later, per-document, in classify_documents_visibility.
+        stage_grants = get_active_stage_grants_for_user(db, user_id)
+        if stage_grants:
+            grant_stage_ids_in_project = set(db.execute(
+                select(Stage.stage_id).where(
+                    Stage.stage_id.in_(stage_grants.keys()),
+                    Stage.project_id == project_id,
+                    Stage.deleted_at.is_(None),
+                )
+            ).scalars())
+            accessible_stage_ids |= grant_stage_ids_in_project
+            stage_grant_tiers = {
+                sid: grant.tier for sid, grant in stage_grants.items()
+                if sid in grant_stage_ids_in_project
+            }
+
+    # 4. Active non-expired confidential grants of document/team scope for
+    # this user — stage-scope grants are handled entirely above via
+    # stage_grant_tiers, which is tier-aware and revocation-safe in a way
+    # this simpler per-row scan is not (see get_active_stage_grants_for_user's
+    # docstring for why a plain "status == approved" scan is insufficient).
     active_confidential_grant_team_ids = set()
     active_confidential_grant_document_ids = set()
-    active_confidential_grant_stage_ids = set()
     if not (is_org_admin or is_project_admin):
         grants = db.execute(
             select(AccessRequest).where(
@@ -150,8 +171,6 @@ def build_authorization_context(
                 active_confidential_grant_team_ids.add(g.team_id)
             elif g.scope == AccessRequestScope.document and g.document_id is not None:
                 active_confidential_grant_document_ids.add(g.document_id)
-            elif g.scope == AccessRequestScope.stage and g.stage_id is not None:
-                active_confidential_grant_stage_ids.add(g.stage_id)
 
     return AuthorizationContext(
         user_id=user_id,
@@ -165,5 +184,5 @@ def build_authorization_context(
         clearance_level=clearance,
         active_confidential_grant_team_ids=active_confidential_grant_team_ids,
         active_confidential_grant_document_ids=active_confidential_grant_document_ids,
-        active_confidential_grant_stage_ids=active_confidential_grant_stage_ids,
+        stage_grant_tiers=stage_grant_tiers,
     )
