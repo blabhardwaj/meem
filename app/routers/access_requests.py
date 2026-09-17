@@ -30,6 +30,7 @@ from app.api.dependencies import get_current_user, get_db_with_tenant
 from app.models.project import Project
 from app.models.team import (
     AccessRequest,
+    AccessRequestScope,
     AccessRequestStatus,
     Team,
 )
@@ -61,6 +62,10 @@ class AccessRequestOut(BaseModel):
     team_name: str
     project_id: str
     project_name: str
+    scope: str  # "document" | "stage" | "team"
+    target_id: str  # document_id, stage_id, or team_id, matching `scope`
+    target_name: str  # filename, stage name, or team name, matching `scope`
+    grant_duration_label: str  # "72 hours" | "90 days" — what approving THIS request grants
     status: str
     requested_at: str | None
     decided_at: str | None
@@ -109,9 +114,29 @@ def access_status(
 
 
 def _serialize(db: Session, r: AccessRequest, *, team=None, project=None, requester=None) -> AccessRequestOut:
+    from app.models.document import Document
+    from app.models.stage import Stage
+    from app.services.access_requests_service import DOCUMENT_GRANT_TTL_HOURS, GRANT_TTL_DAYS
+
     team = team or db.get(Team, r.team_id)
     project = project or (db.get(Project, team.project_id) if team else None)
     requester = requester or db.get(User, r.user_id)
+
+    if r.scope == AccessRequestScope.document:
+        target_id = str(r.document_id)
+        doc = db.get(Document, r.document_id)
+        target_name = doc.original_filename if doc else "(deleted document)"
+        grant_duration_label = f"{DOCUMENT_GRANT_TTL_HOURS} hours"
+    elif r.scope == AccessRequestScope.stage:
+        target_id = str(r.stage_id)
+        stage = db.get(Stage, r.stage_id)
+        target_name = stage.name if stage else "(deleted stage)"
+        grant_duration_label = f"{GRANT_TTL_DAYS} days"
+    else:
+        target_id = str(r.team_id)
+        target_name = team.name if team else "(unknown)"
+        grant_duration_label = f"{GRANT_TTL_DAYS} days"
+
     return AccessRequestOut(
         request_id=str(r.request_id),
         user_id=str(r.user_id),
@@ -120,6 +145,10 @@ def _serialize(db: Session, r: AccessRequest, *, team=None, project=None, reques
         team_name=team.name if team else "(unknown)",
         project_id=str(team.project_id) if team else "",
         project_name=project.name if project else "(unknown)",
+        scope=r.scope.value,
+        target_id=target_id,
+        target_name=target_name,
+        grant_duration_label=grant_duration_label,
         status=r.status.value,
         requested_at=r.requested_at.isoformat() if r.requested_at else None,
         decided_at=r.decided_at.isoformat() if r.decided_at else None,
@@ -193,11 +222,19 @@ def _decide(db: Session, identity: ResolvedIdentity, request_id: uuid.UUID, *, a
     if r.status != AccessRequestStatus.pending:
         raise HTTPException(status_code=409, detail=f"This request has already been {r.status.value}.")
 
+    from app.services.access_requests_service import DOCUMENT_GRANT_TTL_HOURS
+
     now = datetime.now(timezone.utc)
     r.status = AccessRequestStatus.approved if approve else AccessRequestStatus.denied
     r.decided_by = identity.user_id
     r.decided_at = now
-    r.expires_at = now + timedelta(days=_GRANT_TTL_DAYS) if approve else None
+    if approve:
+        r.expires_at = (
+            now + timedelta(hours=DOCUMENT_GRANT_TTL_HOURS) if r.scope == AccessRequestScope.document
+            else now + timedelta(days=_GRANT_TTL_DAYS)
+        )
+    else:
+        r.expires_at = None
     record_audit(
         db, actor_id=identity.user_id,
         action="APPROVE_ACCESS_REQUEST" if approve else "DENY_ACCESS_REQUEST",
