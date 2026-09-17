@@ -10,6 +10,7 @@ import UploadToProjectModal from './UploadToProjectModal';
 import { agentsApi, chatApi, searchApi, documentReviewApi } from '../../lib/api';
 import { draftTitle } from '../../lib/markdown';
 import { saveBlob } from '../../lib/download';
+import { useSearchChatContext } from '../../context/SearchChatContext';
 
 const DRAFT_SUGGESTIONS = [
   'Draft a test plan for the login flow: happy path, wrong password, lockout.',
@@ -57,18 +58,43 @@ const buildReviewSeedMessage = (reviewSession) => ({
   failedCriteria: reviewSession.failedCriteria || [],
 });
 
-const ChatPanel = ({ projectId, mode = 'search', reviewSession = null, initialQuery = null, onReviewFinalized, onReviewExit }) => {
+const ChatPanel = ({ projectId, mode = 'search', reviewSession = null, initialQuery = null, onReviewFinalized, onReviewExit, onInitialQueryConsumed }) => {
   const isDraft = mode === 'draft';
   const isReview = mode === 'review';
   const isSearch = mode === 'rag' || mode === 'search';
   const hasHistory = isSearch || isDraft;
 
-  const [messages, setMessages] = useState([]);
-  const [sessions, setSessions] = useState([]);
-  const [sessionId, setSessionId] = useState(null);
+  // Search mode's session/message/list state lives in SearchChatContext,
+  // shared across every ChatPanel instance for this project (Workspace's
+  // Search tab, Intelligence's Search slide-over) so it survives navigating
+  // between those routes instead of resetting on every remount — see
+  // SearchChatContext.jsx for why. Draft and Review keep their own local
+  // state exactly as before (draft already persists a per-visit session id;
+  // review is one conversation per upload, never resumed across visits).
+  const searchChat = useSearchChatContext();
+  const searchEntry = isSearch && projectId ? searchChat?.getEntry(projectId) : null;
+
+  const [localMessages, setLocalMessages] = useState([]);
+  const [localSessions, setLocalSessions] = useState([]);
+  const [localSessionId, setLocalSessionId] = useState(null);
+  const [localHistoryLoading, setLocalHistoryLoading] = useState(true);
+
+  const messages = isSearch ? (searchEntry?.messages ?? []) : localMessages;
+  const sessions = isSearch ? (searchEntry?.sessions ?? []) : localSessions;
+  const sessionId = isSearch ? (searchEntry?.sessionId ?? null) : localSessionId;
+  const historyLoading = isSearch
+    ? Boolean(searchEntry && !searchEntry.historyLoaded)
+    : localHistoryLoading;
+
+  const setMessages = isSearch
+    ? (updater) => searchChat.setMessages(projectId, updater)
+    : setLocalMessages;
+  const setSessions = isSearch ? (val) => searchChat.setSessions(projectId, val) : setLocalSessions;
+  const setSessionId = isSearch ? (val) => searchChat.setSessionId(projectId, val) : setLocalSessionId;
+  const setHistoryLoading = isSearch ? () => {} : setLocalHistoryLoading;
+
   // Drafting: one session_id per project visit, sent with every message.
   const [draftSessionId, setDraftSessionId] = useState(newSessionId);
-  const [historyLoading, setHistoryLoading] = useState(true);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   // Finalized draft opened in the in-app viewer (Part 1).
@@ -146,7 +172,15 @@ const ChatPanel = ({ projectId, mode = 'search', reviewSession = null, initialQu
       // Seeded with the upload's auto-scan result, not blank — the review
       // session_id itself is the conversation key (one per uploaded document).
       setMessages(reviewSession ? [buildReviewSeedMessage(reviewSession)] : []);
-      setHistoryLoading(false);
+      return undefined;
+    }
+    if (isSearch) {
+      // State (and its loading) lives in SearchChatContext, shared across
+      // every ChatPanel instance for this project — see searchEntry above.
+      // ensureHistoryLoaded() is idempotent per project: the first mount
+      // (of either the Workspace tab or the Intelligence slide-over) fetches
+      // once, and later mounts just read what's already there.
+      if (projectId) searchChat.ensureHistoryLoaded(projectId);
       return undefined;
     }
     if (!hasHistory || !projectId) {
@@ -156,28 +190,24 @@ const ChatPanel = ({ projectId, mode = 'search', reviewSession = null, initialQu
       return undefined;
     }
 
-    // Search and Draft: reload conversations for this user+project+mode so
-    // past conversations can be viewed and resumed.
+    // Draft: reload conversations for this user+project so past
+    // conversations can be viewed and resumed.
     let cancelled = false;
     setHistoryLoading(true);
     setMessages([]);
     setSessionId(null);
 
-    const historyMode = isSearch ? 'search' : 'draft';
-
-    chatApi.sessions(projectId, historyMode)
+    chatApi.sessions(projectId, 'draft')
       .then((items) => {
         if (cancelled) return [];
         setSessions(items);
         if (items[0]) {
           const firstId = items[0].session_id;
           setSessionId(firstId);
-          if (isDraft) setDraftSessionId(firstId);
+          setDraftSessionId(firstId);
           return chatApi.messages(firstId);
         }
-        if (isDraft) {
-          setDraftSessionId(newSessionId());
-        }
+        setDraftSessionId(newSessionId());
         return [];
       })
       .then((items) => {
@@ -199,6 +229,11 @@ const ChatPanel = ({ projectId, mode = 'search', reviewSession = null, initialQu
   }, [projectId, mode, reviewSession?.sessionId]);
 
   const selectSession = async (id) => {
+    if (isSearch) {
+      setHistoryOpen(false);
+      await searchChat.selectConversation(projectId, id);
+      return;
+    }
     setSessionId(id);
     if (isDraft) setDraftSessionId(id);
     setIsTyping(true);
@@ -218,6 +253,11 @@ const ChatPanel = ({ projectId, mode = 'search', reviewSession = null, initialQu
   };
 
   const startNewChat = () => {
+    if (isSearch) {
+      searchChat.startNewConversation(projectId);
+      setHistoryOpen(false);
+      return;
+    }
     setSessionId(null);
     if (isDraft) setDraftSessionId(newSessionId());
     setMessages([]);
@@ -225,6 +265,10 @@ const ChatPanel = ({ projectId, mode = 'search', reviewSession = null, initialQu
   };
 
   const deleteSession = async (id) => {
+    if (isSearch) {
+      await searchChat.removeConversation(projectId, id);
+      return;
+    }
     await chatApi.removeSession(id);
     const next = sessions.filter((session) => session.session_id !== id);
     setSessions(next);
@@ -336,7 +380,7 @@ const ChatPanel = ({ projectId, mode = 'search', reviewSession = null, initialQu
       }]);
       // A brand-new conversation just got a server id — surface it in history.
       if (!hadSession) {
-        chatApi.sessions(projectId, 'search').then(setSessions).catch(() => {});
+        searchChat.refreshSessionList(projectId);
       }
     } catch (err) {
       setMessages((prev) => [
@@ -352,6 +396,10 @@ const ChatPanel = ({ projectId, mode = 'search', reviewSession = null, initialQu
     if (initialQuery && !historyLoading && !isTyping && !initialQuerySentRef.current) {
       initialQuerySentRef.current = true;
       handleSend(initialQuery);
+      // Let the caller drop the query from wherever it's stored (e.g. a URL
+      // param) so a later remount — a tab switch, a mode change reusing the
+      // same stored value — can never replay it a second time.
+      onInitialQueryConsumed?.();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialQuery, historyLoading, isTyping]);
