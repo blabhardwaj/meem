@@ -52,6 +52,7 @@ from app.models.document import (
 )
 from app.models.graph import Node
 from app.models.workflow import WorkflowState
+from app.services.access_control import is_grant_only_confidential_access
 from app.services.audit import record_audit
 from app.services.indexing import resolve_grounding_version, unindex_document
 
@@ -113,6 +114,12 @@ def delete_version(
     if document is None:
         raise DocumentNotFoundError(f"Document {document_id} not found")
 
+    if is_grant_only_confidential_access(db, actor_id, document):
+        raise PermissionDeniedError(
+            "Your access to this document is read-only (granted via a confidential-access "
+            "request, not your team role) — you cannot delete a version."
+        )
+
     version = db.get(DocumentVersion, version_id)
     if version is None or version.document_id != document_id:
         raise VersionNotFoundError(f"Version {version_id} not found on document {document_id}")
@@ -156,6 +163,12 @@ def delete_document(db: Session, *, document_id: uuid.UUID, actor_id: uuid.UUID)
     document = db.get(Document, document_id)
     if document is None:
         raise DocumentNotFoundError(f"Document {document_id} not found")
+
+    if is_grant_only_confidential_access(db, actor_id, document):
+        raise PermissionDeniedError(
+            "Your access to this document is read-only (granted via a confidential-access "
+            "request, not your team role) — you cannot delete this document."
+        )
 
     unindex_document(db, document_id)
 
