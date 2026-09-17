@@ -647,8 +647,9 @@ def classify_documents_visibility(
     for doc_id, document in doc_map.items():
         visible_teams = doc_visible_teams.get(doc_id, set())
         overlapping_teams = visible_teams & auth_context.team_ids
+        stage_tier = auth_context.stage_grant_tiers.get(document.stage_id)
 
-        if not overlapping_teams:
+        if not overlapping_teams and stage_tier is None:
             out[doc_id] = DocumentVisibility.not_visible
             continue
 
@@ -667,11 +668,13 @@ def classify_documents_visibility(
                 out[doc_id] = DocumentVisibility.fully_allowed
                 continue
 
-            # Active approved grant of ANY scope — document, stage, or team.
+            # Active approved grant: document/team scope (tier-less, always
+            # confidential-read), or a stage grant specifically at the
+            # contributor_confidential tier.
             if (
                 doc_id in auth_context.active_confidential_grant_document_ids
-                or document.stage_id in auth_context.active_confidential_grant_stage_ids
                 or overlapping_teams & auth_context.active_confidential_grant_team_ids
+                or stage_tier == GrantTier.contributor_confidential
             ):
                 out[doc_id] = DocumentVisibility.fully_allowed
                 continue

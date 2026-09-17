@@ -329,7 +329,7 @@ class TestBatchVisibilityGrants(TestResolveEffectiveAccess):
         grant = AccessRequest(
             user_id=self.viewer.user_id, team_id=self.team.team_id,
             scope=AccessRequestScope.stage, stage_id=self.stage.stage_id,
-            status=AccessRequestStatus.approved,
+            tier=GrantTier.contributor_confidential, status=AccessRequestStatus.approved,
             expires_at=datetime.now(timezone.utc) + timedelta(days=90),
         )
         self.db.add(grant)
