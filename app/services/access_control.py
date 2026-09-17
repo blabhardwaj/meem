@@ -131,11 +131,21 @@ def is_grant_only_confidential_access(db: Session, user_id: UUID, document) -> b
     regardless of their normal team role. Thin wrapper over
     resolve_effective_access() (the single shared resolver) — never
     re-derives native-vs-grant precedence independently.
+
+    The one exception: a stage-scope grant at the contributor_confidential
+    tier is explicitly NOT read-only (that tier's entire point is to allow
+    writes) — every other kind of grant-derived confidential access
+    (document/team-scope, or a stage grant at any other tier reaching this
+    function some other way) stays read-only, exactly as before.
     """
     if document.sensitivity_level != SensitivityLevel.confidential:
         return False
     result = resolve_effective_access(db, user_id, document_id=document.document_id)
-    return result.status == "granted" and result.via_grant
+    if not (result.status == "granted" and result.via_grant):
+        return False
+    if result.scope == AccessRequestScope.stage and result.tier == GrantTier.contributor_confidential:
+        return False
+    return True
 
 
 def has_any_project_access(db: Session, user_id: UUID, project_id: UUID) -> bool:
@@ -327,6 +337,8 @@ class EffectiveAccessResult:
     via_grant: bool = False  # only meaningful when status == "granted"
     expires_at: datetime | None = None
     request_id: UUID | None = None
+    scope: "AccessRequestScope | None" = None  # the winning grant's scope, when via_grant
+    tier: "GrantTier | None" = None  # the winning grant's tier, when it's a stage-scope grant
 
 
 def resolve_effective_access(
@@ -464,12 +476,23 @@ def resolve_effective_access(
         by_scope = {AccessRequestScope.document: [], AccessRequestScope.stage: [], AccessRequestScope.team: []}
         for r in active_grants:
             by_scope[r.scope].append(r)
+        # A stage-scope grant only confers CONFIDENTIAL access — this
+        # resolver's only concern — when its approver chose the
+        # contributor_confidential tier. viewer/contributor stage grants
+        # make the stage itself visible (get_accessible_stages_for_user)
+        # but never unlock confidential documents through this path.
+        # Document/team-scope grants have no tier concept and remain
+        # always-confidential-read as originally implemented.
+        by_scope[AccessRequestScope.stage] = [
+            r for r in by_scope[AccessRequestScope.stage] if r.tier == GrantTier.contributor_confidential
+        ]
         for scope in (AccessRequestScope.document, AccessRequestScope.stage, AccessRequestScope.team):
             if by_scope[scope]:
                 winner = by_scope[scope][0]
                 return EffectiveAccessResult(
                     status="granted", via_grant=True,
                     expires_at=winner.expires_at, request_id=winner.request_id,
+                    scope=winner.scope, tier=winner.tier,
                 )
 
     pending = [r for r in rows if r.status == AccessRequestStatus.pending]

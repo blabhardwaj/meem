@@ -6,7 +6,7 @@ from app.database import SessionLocal
 from app.models.document import Document, DocumentTeamVisibility, SensitivityLevel
 from app.models.project import Project
 from app.models.stage import Stage, TeamStageAccess
-from app.models.team import AccessRequest, AccessRequestScope, AccessRequestStatus, Team, TeamRole, UserTeamMembership
+from app.models.team import AccessRequest, AccessRequestScope, AccessRequestStatus, GrantTier, Team, TeamRole, UserTeamMembership
 from app.models.tenant import Tenant
 from app.models.user import User
 from app.services.access_control import (
@@ -121,7 +121,7 @@ class TestResolveEffectiveAccess(unittest.TestCase):
         stage_grant = AccessRequest(
             user_id=self.viewer.user_id, team_id=self.team.team_id,
             scope=AccessRequestScope.stage, stage_id=self.stage.stage_id,
-            status=AccessRequestStatus.approved,
+            tier=GrantTier.contributor_confidential, status=AccessRequestStatus.approved,
             expires_at=datetime.now(timezone.utc) + timedelta(days=90),
         )
         self.db.add_all([denied, stage_grant])
@@ -280,6 +280,35 @@ class TestIsGrantOnlyConfidentialAccess(TestResolveEffectiveAccess):
             classify_document_visibility(self.db, self.viewer.user_id, self.document),
             DocumentVisibility.fully_allowed,
         )
+
+    def test_viewer_tier_stage_grant_does_not_unlock_confidential(self):
+        grant = AccessRequest(
+            user_id=self.viewer.user_id, team_id=self.team.team_id,
+            scope=AccessRequestScope.stage, stage_id=self.stage.stage_id,
+            tier=GrantTier.viewer, status=AccessRequestStatus.approved,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=90),
+        )
+        self.db.add(grant)
+        self.db.commit()
+        result = resolve_effective_access(self.db, self.viewer.user_id, document_id=self.document.document_id)
+        self.assertEqual(result.status, "none")
+        self.assertFalse(is_grant_only_confidential_access(self.db, self.viewer.user_id, self.document))
+
+    def test_contributor_confidential_stage_grant_is_not_read_only(self):
+        grant = AccessRequest(
+            user_id=self.viewer.user_id, team_id=self.team.team_id,
+            scope=AccessRequestScope.stage, stage_id=self.stage.stage_id,
+            tier=GrantTier.contributor_confidential, status=AccessRequestStatus.approved,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=90),
+        )
+        self.db.add(grant)
+        self.db.commit()
+        result = resolve_effective_access(self.db, self.viewer.user_id, document_id=self.document.document_id)
+        self.assertEqual(result.status, "granted")
+        self.assertEqual(result.tier, GrantTier.contributor_confidential)
+        # The whole point of this tier: it must NOT be read-only, unlike
+        # every other kind of grant-derived confidential access.
+        self.assertFalse(is_grant_only_confidential_access(self.db, self.viewer.user_id, self.document))
 
 
 class TestBatchVisibilityGrants(TestResolveEffectiveAccess):
