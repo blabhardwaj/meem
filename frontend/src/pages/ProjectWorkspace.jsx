@@ -9,8 +9,10 @@ import Badge from '../components/ui/Badge';
 import Modal from '../components/ui/Modal';
 import Button from '../components/ui/Button';
 import Input from '../components/ui/Input';
+import MyAccessRequestsPanel from '../components/access/MyAccessRequestsPanel';
 import { projectsApi, workspaceApi, accessRequestsApi, teamsApi } from '../lib/api';
 import { useAuth } from '../context/AuthContext';
+import { DOCUMENT_AND_TEAM_SCOPE_REQUESTS_ENABLED } from '../constants/accessRequests';
 
 const ProjectWorkspace = () => {
   const { projectId } = useParams();
@@ -53,6 +55,7 @@ const ProjectWorkspace = () => {
   const [reqBusy, setReqBusy] = useState(null); // team_id in flight
   const [reqNotice, setReqNotice] = useState('');
   const [reqError, setReqError] = useState('');
+  const [myRequestsPanelOpen, setMyRequestsPanelOpen] = useState(false);
 
   // Teams modal — manage the teams that exist in this project (not user assignment)
   const [teamsOpen, setTeamsOpen] = useState(false);
@@ -267,7 +270,7 @@ const ProjectWorkspace = () => {
           </span>
         </div>
 
-        {requestableTeams.length > 0 && (
+        {DOCUMENT_AND_TEAM_SCOPE_REQUESTS_ENABLED && requestableTeams.length > 0 && (
           <button
             type="button"
             onClick={() => { setReqNotice(''); setReqError(''); setAccessOpen(true); }}
@@ -277,6 +280,15 @@ const ProjectWorkspace = () => {
             Team access
           </button>
         )}
+
+        <button
+          type="button"
+          onClick={() => setMyRequestsPanelOpen(true)}
+          title="My access requests"
+          className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-2.5 py-1 text-xs font-medium text-gray-300 hover:border-primary/50 hover:text-gray-100 transition-colors shrink-0"
+        >
+          My requests
+        </button>
 
         <div className="flex-1" />
       </div>
@@ -408,6 +420,8 @@ const ProjectWorkspace = () => {
           })}
         </div>
       </Modal>
+
+      <MyAccessRequestsPanel open={myRequestsPanelOpen} onClose={() => setMyRequestsPanelOpen(false)} />
     </div>
   );
 };
