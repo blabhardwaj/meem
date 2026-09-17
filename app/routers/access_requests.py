@@ -68,6 +68,46 @@ class AccessRequestOut(BaseModel):
     active: bool  # approved and not expired — i.e. currently grants clearance
 
 
+class EffectiveAccessOut(BaseModel):
+    status: str  # "none" | "pending" | "granted" | "denied" | "expired"
+    via_grant: bool
+    expires_at: str | None
+    request_id: str | None
+
+
+@router.get("/status", response_model=EffectiveAccessOut)
+def access_status(
+    document_id: uuid.UUID | None = None,
+    stage_id: uuid.UUID | None = None,
+    team_id: uuid.UUID | None = None,
+    identity: ResolvedIdentity = Depends(get_current_user),
+    db: Session = Depends(get_db_with_tenant),
+):
+    """
+    Effective-state endpoint, not a raw request-row lookup: resolves current
+    grant coverage AND pending/terminal request state for the exact target
+    in one call, via the same resolver document visibility and mutation
+    enforcement use. The frontend renders this verdict directly — it never
+    reconstructs scope/target/grant-precedence logic itself.
+    """
+    provided = [x for x in (document_id, stage_id, team_id) if x is not None]
+    if len(provided) != 1:
+        raise HTTPException(
+            status_code=422, detail="Exactly one of document_id, stage_id, team_id is required."
+        )
+    from app.services.access_control import resolve_effective_access
+
+    result = resolve_effective_access(
+        db, identity.user_id, document_id=document_id, stage_id=stage_id, team_id=team_id,
+    )
+    return EffectiveAccessOut(
+        status=result.status,
+        via_grant=result.via_grant,
+        expires_at=result.expires_at.isoformat() if result.expires_at else None,
+        request_id=str(result.request_id) if result.request_id else None,
+    )
+
+
 def _serialize(db: Session, r: AccessRequest, *, team=None, project=None, requester=None) -> AccessRequestOut:
     team = team or db.get(Team, r.team_id)
     project = project or (db.get(Project, team.project_id) if team else None)
