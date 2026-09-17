@@ -25,7 +25,7 @@
 
 **Files:**
 - Modify: `app/models/team.py:87-144` (`AccessRequestStatus`, new enums, `AccessRequest` class)
-- Create: `alembic/versions/a1b2c3d4e5f6_tiered_stage_access_grants.py`
+- Create: `alembic/versions/f9a8b7c6d5e4_tiered_stage_access_grants.py`
 - Test: `tests/test_tiered_grant_migration.py`
 
 **Interfaces:**
@@ -116,12 +116,12 @@ Then add four new columns to the `AccessRequest` class, immediately after the ex
 
 - [ ] **Step 3: Write the migration**
 
-Create `alembic/versions/a1b2c3d4e5f6_tiered_stage_access_grants.py`:
+Create `alembic/versions/f9a8b7c6d5e4_tiered_stage_access_grants.py`:
 
 ```python
 """tiered stage access grants
 
-Revision ID: a1b2c3d4e5f6
+Revision ID: f9a8b7c6d5e4
 Revises: d0e1f2a3b4c5
 Create Date: 2026-09-17 00:00:00.000000
 
@@ -132,7 +132,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "a1b2c3d4e5f6"
+revision: str = "f9a8b7c6d5e4"
 down_revision: Union[str, None] = "d0e1f2a3b4c5"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -201,13 +201,14 @@ def downgrade() -> None:
 
 - [ ] **Step 4: Apply the migration**
 
-Run: `cd "D:\Ra\DocFlowAI\meem_salvage" && "C:\Users\blabh\AppData\Local\Programs\Python\Python312\python.exe" -m alembic upgrade head`
+Run: `cd "D:\Ra\DocFlowAI\meem_salvage" && "C:\Users\blabh\AppData\Local\Programs\Python\Python312\python.exe" -m alembic upgrade f9a8b7c6d5e4`
+(Not `alembic upgrade head` — with two pre-existing heads, per Global Constraints, the bare `head` keyword is ambiguous and alembic refuses it outright with "Multiple head revisions are present." Target this migration's own revision ID explicitly.)
 Expected: applies cleanly, no error. (If it errors on the `ALTER TYPE ... ADD VALUE` line being combined with later statements in one transaction, split the migration into two separate `op.execute()` calls further apart, or consult Alembic's `transactional_ddl` setting for this project — check `alembic/env.py` first for how transactions are configured before changing anything.)
 
 - [ ] **Step 5: Confirm the new head and schema**
 
 Run: `cd "D:\Ra\DocFlowAI\meem_salvage" && "C:\Users\blabh\AppData\Local\Programs\Python\Python312\python.exe" -m alembic heads`
-Expected: `a1b2c3d4e5f6 (head)` and `e2f3a4b5c6d7 (head)` — the pre-existing stray head is still there (untouched, expected), and `a1b2c3d4e5f6` has replaced `d0e1f2a3b4c5` as the tip of the real chain.
+Expected: `f9a8b7c6d5e4 (head)` and `e2f3a4b5c6d7 (head)` — the pre-existing stray head is still there (untouched, expected), and `f9a8b7c6d5e4` has replaced `d0e1f2a3b4c5` as the tip of the real chain.
 
 - [ ] **Step 6: Write the schema-verification test**
 
@@ -268,7 +269,7 @@ Expected: `test_access_control_resolver.py` fully passes (18 passed); `test_acce
 - [ ] **Step 9: Commit**
 
 ```bash
-git add app/models/team.py alembic/versions/a1b2c3d4e5f6_tiered_stage_access_grants.py tests/test_tiered_grant_migration.py
+git add app/models/team.py alembic/versions/f9a8b7c6d5e4_tiered_stage_access_grants.py tests/test_tiered_grant_migration.py
 git commit -m "feat(access): add tier/duration columns and revoked status for stage grants"
 ```
 
@@ -3127,7 +3128,7 @@ Expected failures, and ONLY these: the 3 pre-existing `test_access_requests_scop
 - [ ] **Step 2: Single new alembic head**
 
 Run: `cd "D:\Ra\DocFlowAI\meem_salvage" && "C:\Users\blabh\AppData\Local\Programs\Python\Python312\python.exe" -m alembic heads`
-Expected: `a1b2c3d4e5f6 (head)` and `e2f3a4b5c6d7 (head)` — exactly the two named in Global Constraints, nothing else.
+Expected: `f9a8b7c6d5e4 (head)` and `e2f3a4b5c6d7 (head)` — exactly the two named in Global Constraints, nothing else.
 
 - [ ] **Step 3: Clean frontend build**
 
