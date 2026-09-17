@@ -10,6 +10,7 @@ from app.models.team import AccessRequest, AccessRequestScope, AccessRequestStat
 from app.models.tenant import Tenant
 from app.models.user import User
 from app.services import draft_workspace
+from app.services.document_delete import PermissionDeniedError, delete_version
 from app.services.document_finalize import GrantOnlyAccessError, finalize_document_revision
 
 
@@ -98,6 +99,36 @@ class TestFinalizeGrantEnforcement(unittest.TestCase):
             finalize_document_revision(
                 self.db, document_id=self.document.document_id,
                 user_id=self.contributor.user_id, session_id=self.session_id,
+            )
+
+
+class TestDeleteVersionGrantEnforcement(TestFinalizeGrantEnforcement):
+    def test_grant_only_contributor_cannot_delete_their_own_non_live_version(self):
+        # A second, later version the contributor uploaded themselves — the
+        # normal can_delete_version() rule (own version, after live) would
+        # otherwise allow this.
+        second_version_id = uuid.uuid4()
+        second_version = DocumentVersion(
+            version_id=second_version_id, document_id=self.document.document_id,
+            file_data=b"newer draft", file_size_bytes=11, uploaded_by=self.contributor.user_id,
+            status=DocumentStatus.pending_review,
+        )
+        self.db.add(second_version)
+        self.db.commit()
+
+        grant = AccessRequest(
+            user_id=self.contributor.user_id, team_id=self.team.team_id,
+            scope=AccessRequestScope.document, document_id=self.document.document_id,
+            status=AccessRequestStatus.approved,
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=72),
+        )
+        self.db.add(grant)
+        self.db.commit()
+
+        with self.assertRaises(PermissionDeniedError):
+            delete_version(
+                self.db, document_id=self.document.document_id, version_id=second_version_id,
+                actor_id=self.contributor.user_id, is_admin=False,
             )
 
 
