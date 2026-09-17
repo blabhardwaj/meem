@@ -1038,9 +1038,15 @@ const ApprovalsTab = ({ projects }) => {
                             {team.requests.map((r) => (
                               <div key={r.request_id} className="flex items-center justify-between gap-3 rounded-md border border-border bg-surface px-3 py-2">
                                 <div className="min-w-0">
-                                  <p className="text-sm text-gray-200 truncate">{r.requester_email || r.user_id}</p>
+                                  <p className="text-sm text-gray-200 truncate">
+                                    {r.requester_email || r.user_id}{' '}
+                                    {r.scope === 'document' && <>requests access to <span className="font-medium">{r.target_name}</span></>}
+                                    {r.scope === 'stage' && <>requests access to the <span className="font-medium">{r.target_name}</span> stage</>}
+                                    {r.scope === 'team' && <>requests team-wide access</>}
+                                  </p>
                                   <p className="text-xs text-gray-500">
                                     Requested {r.requested_at ? new Date(r.requested_at).toLocaleDateString() : '—'}
+                                    {' · '}grants {r.grant_duration_label} if approved
                                   </p>
                                 </div>
                                 <div className="flex gap-2 shrink-0">
