@@ -23,6 +23,14 @@ from dataclasses import dataclass, field
 class RagContext:
     user_id: uuid.UUID
     project_id: uuid.UUID
+    # The tenant to SET LOCAL app.current_tenant_id to on the RAG tools' own
+    # SessionLocal() sessions (see app/tools/rag_tools.py's _run_search). Optional
+    # only because the legacy, currently-unreachable run_rag_turn() (rag_chat.py)
+    # doesn't have it in scope to pass — every LIVE caller (run_search_turn,
+    # search_chat.py) always provides it. When None, callers fall back to an
+    # unscoped User lookup (safe: `users` has RLS enabled but not FORCED) to
+    # derive it, rather than running fully unscoped against FORCE-RLS tables.
+    tenant_id: uuid.UUID | None = None
     telemetry: dict = field(default_factory=dict)
 
 
@@ -31,8 +39,10 @@ _ctx: contextvars.ContextVar[RagContext | None] = contextvars.ContextVar(
 )
 
 
-def set_rag_context(*, user_id: uuid.UUID, project_id: uuid.UUID) -> contextvars.Token:
-    return _ctx.set(RagContext(user_id=user_id, project_id=project_id, telemetry={}))
+def set_rag_context(
+    *, user_id: uuid.UUID, project_id: uuid.UUID, tenant_id: uuid.UUID | None = None
+) -> contextvars.Token:
+    return _ctx.set(RagContext(user_id=user_id, project_id=project_id, tenant_id=tenant_id, telemetry={}))
 
 
 def reset_rag_context(token: contextvars.Token) -> None:

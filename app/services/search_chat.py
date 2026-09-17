@@ -102,7 +102,7 @@ def run_search_turn(
         db.commit()  # the user's turn is recorded even if the agent call fails
 
         t_turn_start = time.perf_counter()
-        rag_token = set_rag_context(user_id=user_id, project_id=project_id)
+        rag_token = set_rag_context(user_id=user_id, project_id=project_id, tenant_id=tenant_id)
         query_token = set_query_context(user_id=user_id, project_id=project_id)
         telemetry = {}
         try:

@@ -93,12 +93,20 @@ class DraftMessageResponse(BaseModel):
 def draft_message(
     body: DraftMessageRequest,
     identity: ResolvedIdentity = Depends(get_current_user),
+    db: Session = Depends(get_db_with_tenant),
 ):
     # session_id is the caller's own opaque conversation id (a UUID from the
     # frontend). It scopes the on-disk working file — see draft_workspace.
     safe_id = Path(body.session_id).name
     if safe_id != body.session_id:
         raise HTTPException(status_code=422, detail="Invalid session_id")
+
+    # Close this request's DB connection before the slow LLM turn below —
+    # same reasoning as search_message's identical fix just above: this
+    # session (shared with get_current_user via _request_db) would otherwise
+    # sit open and idle-in-transaction for the whole run_draft_turn() call,
+    # doubling the pool connections pinned per concurrent Draft request.
+    db.close()
 
     try:
         turn = run_draft_turn(
@@ -236,6 +244,21 @@ def search_message(
         raise HTTPException(status_code=404, detail="Project not found")
     if not has_any_project_access(db, identity.user_id, body.project_id):
         raise HTTPException(status_code=403, detail="You don't have access to this project")
+
+    # Close this request's DB connection now, before the slow part. This
+    # endpoint's session is shared with get_current_user (see
+    # api/dependencies.py's _request_db) and would otherwise sit open and
+    # idle-in-transaction for the entire run_search_turn() call below — a
+    # multi-second-to-multi-minute Groq LLM turn that itself opens its own
+    # separate SessionLocal() (in search_chat.py), plus one more per RAG/
+    # Query tool call. Holding this connection open the whole time doubled
+    # (or worse) the pool connections pinned per concurrent Search request;
+    # under real traffic that exhausted the pool (pool_size=5+max_overflow=5)
+    # and starved unrelated requests, some of which then failed ABAC/RLS
+    # checks in ways that looked like access bugs but were actually
+    # pool-exhaustion-induced failures. db.close() here is safe: nothing
+    # below uses `db` or a live object bound to it again.
+    db.close()
 
     try:
         turn = run_search_turn(
