@@ -190,3 +190,19 @@ class TestApproveAndRevokeStageGrant(unittest.TestCase):
     def test_revoke_on_a_pending_request_is_409(self):
         resp = self.client.post(f"/access-requests/{self.request.request_id}/revoke")
         self.assertEqual(resp.status_code, 409)
+
+    def test_active_grants_lists_an_approved_stage_grant(self):
+        self.client.post(
+            f"/access-requests/{self.request.request_id}/approve",
+            json={"tier": "contributor", "duration": "unlimited"},
+        )
+        resp = self.client.get("/access-requests/active-grants")
+        self.assertEqual(resp.status_code, 200)
+        ids = [row["request_id"] for row in resp.json()]
+        self.assertIn(str(self.request.request_id), ids)
+
+    def test_active_grants_excludes_pending_requests(self):
+        resp = self.client.get("/access-requests/active-grants")
+        self.assertEqual(resp.status_code, 200)
+        ids = [row["request_id"] for row in resp.json()]
+        self.assertNotIn(str(self.request.request_id), ids)

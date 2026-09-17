@@ -41,6 +41,7 @@ from app.services.access_control import _get_team_membership, has_permission
 from app.services.access_requests_service import (
     AccessRequestError,
     GRANT_TTL_DAYS as _GRANT_TTL_DAYS,
+    active_stage_grants_for_reviewer,
     is_expired as _is_expired,
     pending_requests_for_reviewer,
     request_confidential_access,
@@ -253,6 +254,24 @@ def pending_access_requests(
     db: Session = Depends(get_db_with_tenant),
 ):
     rows = pending_requests_for_reviewer(
+        db, reviewer_id=identity.user_id, tenant_id=identity.tenant_id
+    )
+    return [_serialize(db, r) for r in rows]
+
+
+@router.get("/active-grants", response_model=list[AccessRequestOut])
+def active_access_grants(
+    identity: ResolvedIdentity = Depends(get_current_user),
+    db: Session = Depends(get_db_with_tenant),
+):
+    """
+    Every currently-active stage-scope grant the caller may revoke — the
+    Revoke counterpart to /pending: without this, an approved grant is
+    unreachable from the Pending Approvals UI (it drops out of /pending the
+    moment it's decided, and there is otherwise no surface a team_lead can
+    use to look up an existing grant to revoke it from).
+    """
+    rows = active_stage_grants_for_reviewer(
         db, reviewer_id=identity.user_id, tenant_id=identity.tenant_id
     )
     return [_serialize(db, r) for r in rows]
