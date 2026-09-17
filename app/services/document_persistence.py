@@ -29,7 +29,6 @@ from app.models.document import (
     DocumentScan,
     DocumentVersion,
     DocumentTeamVisibility,
-    DocumentStatus,
     SensitivityLevel,
 )
 from app.models.stage import Stage
@@ -38,7 +37,7 @@ from app.models.workflow import WorkflowState, WorkflowStatus
 from app.models.team import GrantTier
 from app.services.access_control import has_permission, has_stage_access, resolve_sensitivity, resolve_stage_grant
 from app.services.audit import record_audit
-from app.services.document_finalize import failed_criteria
+from app.services.document_finalize import failed_criteria, _meets_quality_bar
 from app.services.document_parser import parse_document_to_markdown
 
 from pathlib import Path
@@ -418,7 +417,15 @@ def get_document_view_data(db: Session, document_id: uuid.UUID) -> dict:
         "created_at": version.created_at.isoformat(),
         "scan_overall_score": scan.overall_score if scan else None,
         "scan_criteria": scan.criteria if scan else None,
-        "scan_passed": (version.status == DocumentStatus.indexed) if scan else None,
+        # Recomputed from the persisted score/criteria, NOT from
+        # version.status == indexed — a version only becomes indexed AFTER
+        # approval, so reading status here would make every not-yet-approved
+        # document look scan-failed regardless of its actual score, forcing
+        # "Override & approve" even when the real quality bar was met.
+        "scan_passed": (
+            _meets_quality_bar({"overall_score": scan.overall_score, "criteria": scan.criteria})
+            and not scan.injection_flagged
+        ) if scan else None,
         "injection_flagged": scan.injection_flagged if scan else None,
         "failed_criteria": failed_criteria(scan.criteria) if scan else [],
         "coherence_issues": coherence_issues,

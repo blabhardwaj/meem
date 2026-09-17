@@ -107,9 +107,24 @@ def _check_scan_passed(
 ) -> tuple[dict | None, bool]:
     """
     Raises WorkflowScanNotPassedError unless the document's current version
-    is Scanner-`indexed` (see app/services/indexing.py's should_index
-    docstring — `indexed` is the single canonical "Scanner satisfied" flag,
-    covering both the structural score threshold and the injection check).
+    genuinely passed the Structure/Injection Scanner.
+
+    Recomputes pass/fail from the persisted DocumentScan (via
+    _meets_quality_bar + injection_flagged) rather than trusting
+    DocumentVersion.status == indexed directly — a version that was
+    uploaded by someone without auto-approve rights and then reached
+    pending_review via submit_for_review() (which never runs the Scanner-
+    driven finalize step) can score a genuine pass while still sitting at
+    status=pending_review, since nothing promoted it. Recomputing here means
+    a team_lead's ordinary Approve isn't blocked on a scan that actually
+    passed. If the recomputed result says pass and the version isn't
+    already `indexed`, this promotes it — should_index() (app/services/
+    indexing.py) independently re-checks version.status == indexed, so
+    without this the version would stay stuck at pending_review even after
+    WorkflowState flips to approved, and would never actually get indexed.
+    A version that never got a DocumentScan at all (e.g. a total Groq
+    failure at finalize) still requires override — there is no scan to
+    recompute a pass from.
 
     Returns (scan_detail, override_used). override_used is True only when
     the scan had actually failed and an org_admin/project_admin's
@@ -118,6 +133,8 @@ def _check_scan_passed(
     team_lead cannot override — intentionally a higher bar than ordinary
     approval.
     """
+    from app.services.document_finalize import _meets_quality_bar
+
     document = db.get(Document, document_id)
     scan_detail = _latest_scan_detail(db, document) if document else None
 
@@ -126,7 +143,16 @@ def _check_scan_passed(
         if document and document.current_version_id
         else None
     )
+
     scan_ok = version is not None and version.status == DocumentStatus.indexed
+    if not scan_ok and version is not None and scan_detail is not None:
+        scan_ok = (
+            _meets_quality_bar({"overall_score": scan_detail["overall_score"], "criteria": scan_detail["criteria"]})
+            and not scan_detail["injection_flagged"]
+        )
+        if scan_ok:
+            version.status = DocumentStatus.indexed
+
     if scan_ok:
         return scan_detail, False
 
