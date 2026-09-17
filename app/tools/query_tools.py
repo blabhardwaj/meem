@@ -462,7 +462,11 @@ def check_my_access(stage_or_team_reference: str) -> dict:
 @tool
 def get_project_structure() -> dict:
     """Structural overview of this project: its stages in order (each with
-    whether it requires approval) and the teams in it. No arguments.
+    whether it requires approval) and the teams in it. Takes NO arguments —
+    not even a stage. For a stage's document CHECKLIST/requirements, use
+    get_stage_requirements instead (its `stage_reference` argument is
+    optional: omit it for a project-wide requirements list across every
+    stage, or pass one to scope to a single stage).
     """
     ctx = get_query_context()
     db = _scoped_session(ctx.user_id)
@@ -493,16 +497,47 @@ def get_project_structure() -> dict:
 # ---------------------------------------------------------------------------
 
 @tool
-def get_stage_requirements(stage_reference: str) -> dict:
-    """Checklist requirements for a specific stage from the required_documents
+def get_stage_requirements(stage_reference: str | None = None) -> dict:
+    """Checklist requirements for this project from the required_documents
     table: document names, descriptions, and which are mandatory.
-    `stage_reference` is a stage name or UUID.
-    Status "not_found" if no matching stage exists in this project.
+    `stage_reference` (a stage name or UUID) is OPTIONAL — omit it (or pass
+    an empty string) for a project-wide requirements list grouped by every
+    stage; pass it to scope the list to one specific stage.
+    Status "not_found" if `stage_reference` is given but matches no stage.
     """
     ctx = get_query_context()
     db = _scoped_session(ctx.user_id)
     try:
         ref = (stage_reference or "").strip()
+
+        if not ref:
+            stages = db.execute(
+                select(Stage)
+                .where(Stage.project_id == ctx.project_id, Stage.deleted_at.is_(None))
+                .order_by(Stage.order_index.asc())
+            ).scalars().all()
+            by_stage = []
+            for stage in stages:
+                reqs = db.execute(
+                    select(RequiredDocument)
+                    .where(RequiredDocument.stage_id == stage.stage_id)
+                    .order_by(RequiredDocument.created_at.asc())
+                ).scalars().all()
+                by_stage.append({
+                    "stage": stage.name,
+                    "requirements": [
+                        {
+                            "name": r.name,
+                            "description": r.description or "",
+                            "mandatory": r.is_mandatory,
+                        }
+                        for r in reqs
+                    ],
+                    "mandatory_count": sum(1 for r in reqs if r.is_mandatory),
+                    "total_count": len(reqs),
+                })
+            return {"status": "ok", "scope": "entire project", "stages": by_stage}
+
         stage_id = resolve_stage(db, ctx.project_id, ref)
         if stage_id is None:
             return {
@@ -615,9 +650,10 @@ def match_document_to_requirement(req_name: str, filename: str) -> tuple[bool, s
 
 @tool
 def get_stage_document_status(stage_reference: str) -> dict:
-    """Document completeness status for a stage: which required documents
-    exist, which are missing, coverage percentage, and satisfied mandatory items.
-    `stage_reference` is a stage name or UUID.
+    """Document completeness status for ONE SPECIFIC stage: which required
+    documents exist, which are missing, coverage percentage, and satisfied
+    mandatory items. `stage_reference` (a stage name or UUID) is required —
+    for a project-wide readiness picture instead, use get_project_gaps.
     Status "not_found" if no matching stage exists in this project.
     """
     ctx = get_query_context()
