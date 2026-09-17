@@ -38,9 +38,11 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 _TITLE_MAX = 80
 
-# Frontend tab id -> stored ChatSession.mode. The Search tab historically sent
-# "search"; the stored discriminator is "rag".
-_MODE_ALIASES = {"search": "rag", "rag": "rag", "query": "query", "draft": "draft"}
+# Frontend tab id -> stored ChatSession.mode. run_search_turn() (see
+# app/services/search_chat.py) stamps new sessions with mode="search"; "rag"
+# is kept as an alias only for any session rows written before the merged
+# Search tab replaced the separate RAG tab.
+_MODE_ALIASES = {"search": "search", "rag": "search", "query": "query", "draft": "draft"}
 
 
 class ChatSessionOut(BaseModel):
