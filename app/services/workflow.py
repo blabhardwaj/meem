@@ -40,7 +40,8 @@ from sqlalchemy.orm import Session
 
 from app.models.document import Document, DocumentScan, DocumentStatus, DocumentVersion, VersionApprovalOutcome
 from app.models.workflow import WorkflowState, WorkflowStatus
-from app.services.access_control import has_permission, is_grant_only_confidential_access
+from app.models.team import GrantTier
+from app.services.access_control import has_permission, is_grant_only_confidential_access, resolve_stage_grant
 from app.services.audit import record_audit
 from app.services.indexing import index_document, should_index, unindex_document
 from app.services.notifications import (
@@ -166,15 +167,27 @@ def submit_for_review(
 ) -> WorkflowState:
     """
     draft -> pending_review, or rejected -> pending_review (resubmission after
-    addressing the feedback). Requires 'submit' (contributor+). On resubmission
-    from 'rejected', the stale rejection_reason is cleared.
+    addressing the feedback). Requires 'submit' (contributor+), OR an active
+    contributor/contributor_confidential stage grant routed through team_id
+    (spec §3.2 — same OR pattern as upload/revision). On resubmission from
+    'rejected', the stale rejection_reason is cleared.
     """
     state = _require_state(db, document_id)
-    if not has_permission(db, user_id, "submit", team_id, project_id):
-        raise WorkflowPermissionError(
-            "You do not have permission to submit documents for review on this team."
-        )
     document = db.get(Document, document_id)
+
+    native_ok = has_permission(db, user_id, "submit", team_id, project_id)
+    if not native_ok:
+        grant = resolve_stage_grant(db, user_id, document.stage_id) if document is not None else None
+        grant_ok = (
+            grant is not None
+            and grant.tier in (GrantTier.contributor, GrantTier.contributor_confidential)
+            and grant.team_id == team_id
+        )
+        if not grant_ok:
+            raise WorkflowPermissionError(
+                "You do not have permission to submit documents for review on this team."
+            )
+
     if document is not None and is_grant_only_confidential_access(db, user_id, document):
         raise WorkflowPermissionError(
             "Your access to this document is read-only (granted via a confidential-access "
