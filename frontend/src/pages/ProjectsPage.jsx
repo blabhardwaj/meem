@@ -57,7 +57,7 @@ const ProjectsPage = () => {
 
   useEffect(() => {
     loadProjects();
-    const interval = window.setInterval(loadProjects, 15 * 1000);
+    const interval = window.setInterval(loadProjects, 140 * 1000);
     const refreshOnFocus = () => loadProjects();
     window.addEventListener('focus', refreshOnFocus);
     return () => {
