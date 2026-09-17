@@ -22,7 +22,7 @@ from app.models.document import Document
 from app.models.project import Project
 from app.models.team import Team
 from app.models.workflow import WorkflowState
-from app.services.access_control import build_access_filter, can_view_document
+from app.services.access_control import build_access_filter, classify_document_visibility, DocumentVisibility
 from app.services.auth import ResolvedIdentity
 from app.services.document_persistence import (
     PermissionDeniedError,
@@ -66,6 +66,7 @@ class DocumentListItem(BaseModel):
     # Current approval state, or null if the stage doesn't require approval.
     workflow_state: str | None
     uploaded_by: str
+    locked: bool = False
 
 
 # --- endpoints -----------------------------------------------------------
@@ -136,9 +137,16 @@ def list_documents(
         select(Document).where(access_filter, Document.project_id == project_id)
     ).scalars().all()
 
-    # Row-level refine: build_access_filter is a coarse pre-filter; the final
-    # authority (esp. for confidential) is can_view_document().
-    visible = [d for d in rows if can_view_document(db, identity.user_id, d)]
+    # Three-way classification instead of the old boolean can_view_document()
+    # filter: blocked_by_sensitivity documents are now surfaced as redacted
+    # locked stubs (spec §13.D) instead of being silently dropped — a viewer
+    # can otherwise never discover a confidential document exists before
+    # requesting access to it. not_visible documents are still dropped
+    # entirely; no trace of those should ever reach the client.
+    visibility = {
+        d.document_id: classify_document_visibility(db, identity.user_id, d) for d in rows
+    }
+    visible = [d for d in rows if visibility[d.document_id] != DocumentVisibility.not_visible]
 
     wf_by_doc = {
         w.document_id: w.state.value
@@ -160,16 +168,21 @@ def list_documents(
             if wf_by_doc.get(d.document_id) != "draft" or d.uploaded_by == identity.user_id
         ]
 
-    return [
-        DocumentListItem(
+    out = []
+    for d in visible:
+        locked = visibility[d.document_id] == DocumentVisibility.blocked_by_sensitivity
+        out.append(DocumentListItem(
             document_id=str(d.document_id),
             original_filename=d.original_filename,
             project_id=str(d.project_id),
             stage_id=str(d.stage_id),
             sensitivity_level=d.sensitivity_level.name,
             uploaded_as_team_id=str(d.uploaded_as_team_id),
-            workflow_state=wf_by_doc.get(d.document_id),
-            uploaded_by=str(d.uploaded_by),
-        )
-        for d in visible
-    ]
+            # Locked stubs omit lifecycle/authorship detail — a user who
+            # can't open the document shouldn't see its approval state or
+            # who uploaded it either.
+            workflow_state=None if locked else wf_by_doc.get(d.document_id),
+            uploaded_by="" if locked else str(d.uploaded_by),
+            locked=locked,
+        ))
+    return out
