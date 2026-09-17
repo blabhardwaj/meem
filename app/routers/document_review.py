@@ -817,3 +817,5 @@ def delete_document_endpoint(
         delete_document(db, document_id=document_id, actor_id=identity.user_id)
     except DeleteDocumentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except DeletePermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
