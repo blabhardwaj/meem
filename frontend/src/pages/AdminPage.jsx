@@ -10,6 +10,7 @@ import Badge from '../components/ui/Badge';
 import Card from '../components/ui/Card';
 import Modal from '../components/ui/Modal';
 import BackButton from '../components/ui/BackButton';
+import DocumentReviewModal from '../components/sources/DocumentReviewModal';
 
 const TABS = [
   { id: 'users', label: 'Users & Access', icon: Users },
@@ -149,7 +150,7 @@ const AdminPage = () => {
       </div>
 
       {tab === 'users' && canManageUsers && <UsersTab currentUser={user} initialProjectId={requestedProjectId} />}
-      {tab === 'approvals' && hasApprovalAccess && <ApprovalsTab projects={visibleProjects} />}
+      {tab === 'approvals' && hasApprovalAccess && <ApprovalsTab projects={visibleProjects} canOverrideScan={isOrgAdmin} />}
       {tab === 'audit' && canViewAudit && <AuditTab />}
       {tab === 'activity' && canViewActivity && <ProjectActivityTab />}
       {tab === 'rbac' && canManageUsers && <RbacTab />}
@@ -900,7 +901,7 @@ const UsersTab = ({ currentUser, initialProjectId = '' }) => {
 //   • documents awaiting workflow approval (submit -> approve/reject)
 //   • confidential-access requests (approve/deny)
 // Every action refreshes the whole view so counts stay accurate.
-const ApprovalsTab = ({ projects }) => {
+const ApprovalsTab = ({ projects, canOverrideScan = false }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -910,6 +911,7 @@ const ApprovalsTab = ({ projects }) => {
   const [accessReqs, setAccessReqs] = useState([]);
   const [activeGrants, setActiveGrants] = useState([]);
   const [openProjectId, setOpenProjectId] = useState('');
+  const [reviewDoc, setReviewDoc] = useState(null); // the doc row currently open in DocumentReviewModal, or null
 
   const projectKey = projects.map((p) => p.project_id).join(',');
 
@@ -951,12 +953,6 @@ const ApprovalsTab = ({ projects }) => {
     } finally {
       setBusyKey(null);
     }
-  };
-
-  const handleReject = (documentId) => {
-    const reason = window.prompt('Rejection reason (min 5 characters):');
-    if (!reason || reason.trim().length < 5) return;
-    act(`doc-reject-${documentId}`, () => documentsApi.reject(documentId, reason.trim()), 'Document rejected.');
   };
 
   const countFor = (pid) =>
@@ -1033,14 +1029,9 @@ const ApprovalsTab = ({ projects }) => {
                                   </p>
                                 </div>
                                 <div className="flex gap-2 shrink-0">
-                                  <Button size="sm" icon={Check}
-                                    loading={busyKey === `doc-approve-${d.document_id}`}
-                                    onClick={() => act(`doc-approve-${d.document_id}`, () => documentsApi.approve(d.document_id), 'Document approved.')}
-                                  >Approve</Button>
-                                  <Button size="sm" variant="danger" icon={X}
-                                    loading={busyKey === `doc-reject-${d.document_id}`}
-                                    onClick={() => handleReject(d.document_id)}
-                                  >Reject</Button>
+                                  <Button size="sm" icon={ClipboardList} onClick={() => setReviewDoc(d)}>
+                                    Review &amp; decide
+                                  </Button>
                                 </div>
                               </div>
                             ))}
@@ -1148,6 +1139,26 @@ const ApprovalsTab = ({ projects }) => {
             </Card>
           )}
         </>
+      )}
+
+      {reviewDoc && (
+        <DocumentReviewModal
+          document={reviewDoc}
+          canOverrideScan={canOverrideScan}
+          onApprove={async (override) => {
+            await documentsApi.approve(reviewDoc.document_id, { override });
+            setReviewDoc(null);
+            setNotice('Document approved.');
+            await load();
+          }}
+          onReject={async (reason) => {
+            await documentsApi.reject(reviewDoc.document_id, reason);
+            setReviewDoc(null);
+            setNotice('Document rejected.');
+            await load();
+          }}
+          onClose={() => setReviewDoc(null)}
+        />
       )}
     </div>
   );
