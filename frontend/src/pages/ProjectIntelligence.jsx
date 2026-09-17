@@ -1054,7 +1054,7 @@ const ProjectIntelligence = () => {
         <>
           <button
             type="button"
-            aria-label="Close Search"
+            aria-label="Dismiss"
             onClick={() => setSearchPanelOpen(false)}
             className="fixed inset-0 z-40 bg-background/50"
           />
