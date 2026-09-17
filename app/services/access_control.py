@@ -546,7 +546,11 @@ def classify_document_visibility(db: Session, user_id: UUID, document: Document)
     """
     The full ABAC decision for viewing a specific document — bypass, team
     visibility, and sensitivity clearance — as a three-way outcome rather
-    than can_view_document()'s bool. Same logic, same order, nothing added.
+    than can_view_document()'s bool.
+
+    A stage grant (any tier) overrides the team-visibility check for
+    documents in its own stage only (spec §1.2) — it does NOT change what
+    DocumentTeamVisibility means for any other stage or any other user.
     """
     if _is_org_admin(db, user_id):
         return DocumentVisibility.fully_allowed
@@ -564,8 +568,10 @@ def classify_document_visibility(db: Session, user_id: UUID, document: Document)
         if m is not None
     ]
 
-    if not memberships:
-        return DocumentVisibility.not_visible  # not on any team this document is visible to
+    stage_grant = resolve_stage_grant(db, user_id, document.stage_id) if document.stage_id else None
+
+    if not memberships and stage_grant is None:
+        return DocumentVisibility.not_visible  # not on any team this document is visible to, and no stage grant either
 
     # Sensitivity clearance
     if document.sensitivity_level in (SensitivityLevel.public, SensitivityLevel.internal):
@@ -712,8 +718,13 @@ def build_access_filter(db: Session, user_id: UUID, project_id: UUID):
     get_accessible_stages_for_user — while the document itself, wrongly,
     remained visible). Now also requires the document's stage_id be in the
     caller's accessible-stages set.
+
+    A stage grant (any tier) overrides the DocumentTeamVisibility
+    requirement for documents in its own stage only (spec §1.2) — the
+    document must still fall within accessible_stage_ids, which already
+    includes grant stages via get_accessible_stages_for_user().
     """
-    from sqlalchemy import and_
+    from sqlalchemy import and_, or_
 
     user = db.get(User, user_id)
 
@@ -723,7 +734,8 @@ def build_access_filter(db: Session, user_id: UUID, project_id: UUID):
     if _is_project_admin(db, user_id, project_id):
         return and_(Document.tenant_id == user.tenant_id, Document.project_id == project_id)
 
-    # Regular user: must be on a team the document is visible to
+    # Regular user: must be on a team the document is visible to, OR the
+    # document's stage must be one this user holds an active grant for.
     user_team_ids = [
         row.team_id for row in db.execute(
             select(UserTeamMembership).where(
@@ -732,7 +744,8 @@ def build_access_filter(db: Session, user_id: UUID, project_id: UUID):
             )
         ).scalars()
     ]
-    if not user_team_ids:
+    grant_stage_ids = list(get_active_stage_grants_for_user(db, user_id).keys())
+    if not user_team_ids and not grant_stage_ids:
         return Document.document_id == None  # no access — matches nothing
 
     accessible_stage_ids = get_accessible_stages_for_user(db, user_id, project_id)
@@ -747,7 +760,10 @@ def build_access_filter(db: Session, user_id: UUID, project_id: UUID):
     return and_(
         Document.tenant_id == user.tenant_id,
         Document.project_id == project_id,
-        Document.document_id.in_(visible_doc_ids_subquery),
+        or_(
+            Document.document_id.in_(visible_doc_ids_subquery),
+            Document.stage_id.in_(grant_stage_ids),
+        ),
         Document.stage_id.in_(accessible_stage_ids),
         # NOTE: no sensitivity condition — every doc visible to the user's
         # teams (public, internal AND confidential) passes through here;
