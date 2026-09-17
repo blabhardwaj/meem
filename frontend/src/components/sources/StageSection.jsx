@@ -2,11 +2,53 @@ import React, { useEffect, useState } from 'react';
 import { ChevronDown, ShieldCheck, Settings2 } from 'lucide-react';
 import Badge from '../ui/Badge';
 import DocumentItem from './DocumentItem';
+import { accessRequestsApi } from '../../lib/api';
+
+const StageAccessLink = ({ stageId }) => {
+  const [state, setState] = useState('loading');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    accessRequestsApi.status({ stageId })
+      .then((r) => { if (!cancelled) setState(r.status); })
+      .catch(() => { if (!cancelled) setState('none'); });
+    return () => { cancelled = true; };
+  }, [stageId]);
+
+  if (state === 'loading' || state === 'granted') return null;
+
+  const handleClick = async () => {
+    setBusy(true);
+    try {
+      await accessRequestsApi.createForStage(stageId);
+      setState('pending');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (state === 'pending') {
+    return <p className="text-xs text-gray-500 py-1 px-1">Stage access requested — pending review.</p>;
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={handleClick}
+      disabled={busy}
+      className="text-xs text-primary-light hover:text-primary transition-colors py-1 px-1"
+    >
+      Need access to more documents in this stage? Request stage access.
+    </button>
+  );
+};
 
 // One stage grouping in the Sources panel. Renders even when it has no
 // documents (so newly created / empty stages are visible and manageable).
 const StageSection = ({
   stage,
+  stageId = null,
   documents = [],
   canReview,
   canOverrideScan = false,
@@ -96,6 +138,9 @@ const StageSection = ({
               </div>
             ) : (
               <p className="text-xs text-gray-600 py-1">No documents in this stage yet.</p>
+            )}
+            {documents.some((d) => d.locked) && stageId && (
+              <StageAccessLink stageId={stageId} />
             )}
           </div>
         </div>
