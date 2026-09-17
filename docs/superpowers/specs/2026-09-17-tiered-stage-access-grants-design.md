@@ -105,7 +105,8 @@ New Alembic revision:
 @dataclass
 class StageGrant:
     tier: GrantTier
-    team_id: UUID          # the grant's own routing team (from _derive_stage_team at request time)
+    team_id: UUID          # the grant's own routing team (from _derive_stage_team at request time) —
+                            # see §3.2: this is entitlement data, not an upload-specific validation detail.
     expires_at: datetime | None
     request_id: UUID
 
@@ -121,11 +122,21 @@ def get_active_stage_grants_for_user(db: Session, user_id: UUID) -> dict[UUID, S
     """
 ```
 
-Query: all `AccessRequest` rows for `user_id` where `scope == stage`, `tier IS NOT NULL`, `status IN (approved, revoked)`, joined to `Stage` on `stage_id` with `Stage.deleted_at IS NULL` (a soft-deleted stage never has an active grant, regardless of the row's own status/expiry — the `TeamStageAccess` cleanup `delete_stage()` already does doesn't touch `AccessRequest`, so this join is the enforcement point, not a data cleanup). Group by `stage_id`; within each group, take the row with the latest `COALESCE(revoked_at, decided_at)` — **this is the fix for the revoke-then-fallback bug** (see below) — and include it in the result only if that latest-event row's `status == approved` and it is not expired.
+Query: all `AccessRequest` rows for `user_id` where `scope == stage`, `tier IS NOT NULL`, `status IN (approved, revoked)`, joined to `Stage` on `stage_id` with `Stage.deleted_at IS NULL` (a soft-deleted stage never has an active grant, regardless of the row's own status/expiry — the `TeamStageAccess` cleanup `delete_stage()` already does doesn't touch `AccessRequest`, so this join is the enforcement point, not a data cleanup). Group by `stage_id`; within each group, order by:
+
+```sql
+ORDER BY COALESCE(revoked_at, decided_at) DESC, request_id DESC
+```
+
+and take the first row — the `request_id DESC` tie-breaker makes the ordering fully deterministic even if two rows for the same (user, stage) somehow share an identical `COALESCE(revoked_at, decided_at)` timestamp (e.g. a bulk-approval script, or timestamp-precision collisions), rather than leaving the outcome to whatever order the database happens to return equal-timestamp rows in. Include the winning row in the result only if its `status == approved` and it is not expired.
 
 **The bug this avoids:** an earlier draft of this resolver picked "the latest row with `status == approved`," which is wrong. Example: a `viewer` grant is approved in January, a `contributor` grant is approved in February (superseding it per §4.1), then the February grant is revoked in March. Querying "latest approved row" would find the January row (still `status == approved`, and now the *only* row matching that filter) and incorrectly reactivate it as `viewer` access. Querying "latest terminal event regardless of status, then checking whether that event was an approval" correctly finds March's revocation as the latest event and returns no grant at all — an explicitly revoked grant never falls back to an older one. **This must stay true even if the resolver is later refactored — it is a deliberate security property, not an implementation detail.**
 
 `resolve_stage_grant(db, user_id, stage_id) -> StageGrant | None` is `get_active_stage_grants_for_user(db, user_id).get(stage_id)`.
+
+### 3.2 `team_id` is entitlement data, not an upload-specific validation detail
+
+`StageGrant.team_id` is part of *what the grant means*, not a check invented at the upload call site. A stage grant's entitlement is precisely "contributor-tier capability, exercised as the grant's own routing team, and no other" — the routing team is the same team `_derive_stage_team()` picked as the approver at request time, i.e. a team that genuinely has `TeamStageAccess` to this stage. Any code that checks `grant.tier` to authorize a mutation **must** also check `grant.team_id == <the team_id the mutation is being attributed to>` as part of that same authorization decision, every time, with no exceptions — never treat tier and team_id as independently satisfiable conditions. This is called out explicitly so that a future write path (anything added after `document_persistence.py` and `workflow.py`'s `submit_for_review`, both already specified this way in §4) doesn't reintroduce "stage grant → contributor capability" while quietly dropping the team_id match, which would let a grant holder attribute mutations to a team they have no relationship to at all.
 
 ## 4. Enforcement — every consumer
 
@@ -192,7 +203,7 @@ Per §3's "latest terminal event" resolution, approving a new stage request when
 ## 7. Testing / verification plan
 
 1. Migration: apply, confirm single alembic head, confirm `grant_tier`/`grant_duration` enum types exist, confirm `access_request_status` has 4 values, confirm both new indexes exist.
-2. `get_active_stage_grants_for_user()` / `resolve_stage_grant()`: no grant → empty/`None`; approved+unexpired → returned; approved+expired → not returned; two approved rows for the same (user, stage) → only the one with the latest `decided_at` (not `requested_at`) is returned; **the revoke-then-fallback case** — approve grant A, approve grant B (superseding A), revoke B, confirm the result is `None`, not a reactivated A; a grant on a soft-deleted stage → not returned.
+2. `get_active_stage_grants_for_user()` / `resolve_stage_grant()`: no grant → empty/`None`; approved+unexpired → returned; approved+expired → not returned; two approved rows for the same (user, stage) → only the one with the latest `decided_at` (not `requested_at`) is returned; **the revoke-then-fallback case** — approve grant A, approve grant B (superseding A), revoke B, confirm the result is `None`, not a reactivated A; a grant on a soft-deleted stage → not returned; **the tie-breaker case** — construct two rows for the same (user, stage) with an identical `COALESCE(revoked_at, decided_at)` timestamp (set it explicitly in the test, don't rely on wall-clock timing to ever collide naturally) and confirm the one with the higher `request_id` wins, deterministically, on repeated runs.
 3. Concurrency: two simultaneous requests for the same (user, stage) with no existing pending request — confirm exactly one succeeds and the other gets a clean 409/integrity error, not two pending rows.
 4. Visibility override (§1.2): a user whose team has `TeamStageAccess` to a stage but no `DocumentTeamVisibility` for most of its documents, granted `viewer` tier, now sees *every* public/internal document in that stage (not just their own team's uploads) via `classify_document_visibility`, `classify_documents_visibility` (batch/RAG path), and `build_access_filter` (list) — all three agree. Confidential documents in that stage still render as locked stubs for this user.
 5. Upload/submit path: same user granted `contributor` creates a document attributed to the grant's routing `team_id`, then submits it for review — both succeed; a direct API call with a *different* `team_id` is rejected even with an active contributor grant.
