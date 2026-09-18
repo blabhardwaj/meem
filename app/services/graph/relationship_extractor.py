@@ -22,7 +22,21 @@ logger = logging.getLogger(__name__)
 # extraction run actually covers, so a cached 1.0.0 run must not be treated
 # as equivalent to a 2.0.0 one — see extract_document_relationships's
 # idempotency check.
-EXTRACTOR_VERSION = "2.0.0"
+#
+# Bumped again, 2.0.0 -> 2.1.0: the requirement-evidence title match (step 4
+# below) only matched a requirement's title against a filename/content using
+# a literal-space word boundary (`\bBusiness Case\b`), which never matches a
+# real filename like "01-instant-payouts-business-case.md" (hyphen-
+# separated, not space-separated) — a correctly-named, correctly-present
+# document was silently never linked to its requirement, showing as
+# "missing" in every downstream reader (R001, RequirementSatisfaction, the
+# requirements checklist). Fixed to accept any run of whitespace/hyphen/
+# underscore/dot between the title's words on either side of the match. A
+# cached 2.0.0 run reflects the OLD, buggy matching and must not be treated
+# as equivalent — this bump is what makes existing documents get
+# re-extracted with the fix instead of silently keeping their stale (wrong)
+# edges forever.
+EXTRACTOR_VERSION = "2.1.0"
 
 ALLOWED_EDGE_TYPES: Set[str] = {
     "PRECEDES",
@@ -216,9 +230,20 @@ def extract_document_relationships(
             for req in reqs:
                 req_title = req.name.strip()
                 req_escaped = re.escape(req_title)
+                # Filename-vs-title word-separator mismatch: a real filename
+                # like "01-instant-payouts-business-case.md" uses hyphens
+                # where the requirement's title ("Business Case") uses a
+                # literal space — `\bBusiness Case\b` never matches
+                # "business-case" as written, so a correctly-named,
+                # correctly-present document was silently never linked to
+                # its requirement. Build a pattern that accepts any run of
+                # non-alphanumeric separators (space, hyphen, underscore,
+                # dot) between the title's words, matching either form.
+                req_words = [re.escape(w) for w in req_title.split()]
+                title_pattern = r"[\s\-_.]+".join(req_words) if req_words else req_escaped
                 # Match against document filename or content
-                doc_name_match = bool(re.search(rf"\b{req_escaped}\b", doc_label, re.IGNORECASE))
-                content_match = bool(re.search(rf"(?:satisfies|implements|fulfills|validates|establishes)\s+[^.\n]*\b{req_escaped}\b", content, re.IGNORECASE))
+                doc_name_match = bool(re.search(rf"\b{title_pattern}\b", doc_label, re.IGNORECASE))
+                content_match = bool(re.search(rf"(?:satisfies|implements|fulfills|validates|establishes)\s+[^.\n]*\b{title_pattern}\b", content, re.IGNORECASE))
 
                 if doc_name_match or content_match:
                     req_node = _upsert_node(
