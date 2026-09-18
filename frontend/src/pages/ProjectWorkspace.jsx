@@ -174,6 +174,11 @@ const ProjectWorkspace = () => {
   // Our model: team_lead+ or project_admin can review (the backend still checks
   // the document's *specific* team and returns a clear 403 otherwise).
   const canReview = ['org_admin', 'project_admin', 'team_lead'].includes(role);
+  // can_edit_document (access_control.py) now allows contributor+ (not just
+  // team_lead+/uploader) to edit a document's content or upload a new
+  // version — same best-effort per-project approximation as canReview; the
+  // backend still checks the document's specific team.
+  const canContribute = ['org_admin', 'project_admin', 'team_lead', 'contributor'].includes(role);
   // Only org_admin/project_admin may force through a document that failed
   // the scan (approve_document() re-checks this server-side regardless).
   const canOverrideScan = ['org_admin', 'project_admin'].includes(role);
@@ -318,7 +323,7 @@ const ProjectWorkspace = () => {
             canReview={canReview}
             canOverrideScan={canOverrideScan}
             canDelete={user?.is_org_admin}
-            canEditAny={canReview}
+            canEditAny={canContribute}
             currentUserId={user?.user_id}
             onChanged={load}
             projectId={projectId}

@@ -321,17 +321,19 @@ const DocumentItem = ({ document, canReview, canOverrideScan = false, canDelete,
         description={document.filename}
       >
         <div className="space-y-4">
-          <div className="flex items-center justify-between gap-3 border-b border-border pb-4">
-            <div>
-              <p className="text-sm font-medium text-gray-200">Upload a new version</p>
-              <p className="text-xs text-gray-500 mt-1">The document identity and access rules stay the same.</p>
+          {canEdit && (
+            <div className="flex items-center justify-between gap-3 border-b border-border pb-4">
+              <div>
+                <p className="text-sm font-medium text-gray-200">Upload a new version</p>
+                <p className="text-xs text-gray-500 mt-1">The document identity and access rules stay the same.</p>
+              </div>
+              <label className="cursor-pointer shrink-0">
+                <span className="inline-flex items-center gap-1.5 h-8 px-3 text-xs font-medium rounded-md bg-surface-hover text-gray-200 hover:bg-border transition-colors"><Upload size={13} /> Choose</span>
+                <input ref={versionInputRef} type="file" className="hidden" onChange={(event) => setVersionFile(event.target.files?.[0] || null)} />
+              </label>
             </div>
-            <label className="cursor-pointer shrink-0">
-              <span className="inline-flex items-center gap-1.5 h-8 px-3 text-xs font-medium rounded-md bg-surface-hover text-gray-200 hover:bg-border transition-colors"><Upload size={13} /> Choose</span>
-              <input ref={versionInputRef} type="file" className="hidden" onChange={(event) => setVersionFile(event.target.files?.[0] || null)} />
-            </label>
-          </div>
-          {versionFile && (
+          )}
+          {canEdit && versionFile && (
             <div className="flex items-center justify-between gap-3 rounded-lg bg-background p-3 text-sm">
               <span className="truncate text-gray-300">{versionFile.name}</span>
               <Button size="sm" onClick={uploadVersion} loading={versionBusy}>Upload</Button>

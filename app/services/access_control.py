@@ -110,16 +110,25 @@ def has_permission(db: Session, user_id: UUID, action: str, team_id: UUID, proje
 
 def can_edit_document(db: Session, user_id: UUID, document) -> bool:
     """
-    UI_FIXES_2026-09-15.md: who may edit a document's CONTENT (the chat-based
-    revision flow — start_version_review / start_version_review_from_current
-    — not the plain "upload"/"submit" actions, which stay at contributor).
-    Deliberately narrower than has_permission(..., "upload", ...): the
-    document's own uploader, or team_lead+ on the document's team (which
-    org_admin/project_admin bypass to, same as has_permission).
+    Who may edit a document's CONTENT (the chat-based revision flow —
+    start_version_review / start_version_review_from_current). Same bar as
+    _check_revision_permission (continuing an in-progress review) and as
+    plain "upload": any contributor+ with access to this document, native or
+    grant-derived — the document's own uploader, contributor+ on the
+    document's team (org_admin/project_admin bypass via has_permission), or
+    an active contributor/contributor_confidential stage grant routed
+    through that same team. Not restricted to the uploader or team_lead+.
     """
     if document.uploaded_by == user_id:
         return True
-    return has_permission(db, user_id, "manage_team_members", document.uploaded_as_team_id, document.project_id)
+    if has_permission(db, user_id, "upload", document.uploaded_as_team_id, document.project_id):
+        return True
+    grant = resolve_stage_grant(db, user_id, document.stage_id)
+    return (
+        grant is not None
+        and grant.tier in (GrantTier.contributor, GrantTier.contributor_confidential)
+        and grant.team_id == document.uploaded_as_team_id
+    )
 
 
 def is_grant_only_confidential_access(db: Session, user_id: UUID, document) -> bool:
