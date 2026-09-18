@@ -30,9 +30,14 @@ from app.api.dependencies import get_current_user, get_db_with_tenant
 from app.models.document import Document
 from app.models.project import Project
 from app.models.required_document import RequiredDocument, RequirementSource
+from app.models.requirement_satisfaction import RequirementSatisfaction
 from app.models.stage import Stage, StageReference, TeamStageAccess
 from app.models.team import Team
-from app.services.access_control import get_accessible_stages_for_user
+from app.services.access_control import (
+    DocumentVisibility,
+    classify_document_visibility,
+    get_accessible_stages_for_user,
+)
 from app.services.audit import record_audit
 from app.services.auth import ResolvedIdentity
 from app.services.graph.audit_engine import sync_and_audit_project
@@ -85,6 +90,16 @@ class RequiredDocumentOut(BaseModel):
     is_mandatory: bool
     source: str
     created_at: str
+    # Whether the requirement currently has resolved evidence, per the audit
+    # engine's RequirementSatisfaction table (see app/services/graph/
+    # audit_engine.py) — NOT a filename match, the real graph-edge/semantic
+    # evidence resolution R001 also uses. satisfied_by is ABAC-filtered: it
+    # names the satisfying document ONLY if the caller can actually see it
+    # (classify_document_visibility == fully_allowed); otherwise satisfied
+    # can still be true while satisfied_by is null, so a contributor without
+    # clearance never learns even the confidential document's filename.
+    satisfied: bool = False
+    satisfied_by: dict | None = None
 
 
 class CreateRequiredDocumentRequest(BaseModel):
@@ -525,7 +540,42 @@ def set_team_access(
 
 # --- required documents (stage completion checklist) -----------------------
 
-def _serialize_requirement(r: RequiredDocument) -> RequiredDocumentOut:
+def _serialize_requirement(
+    r: RequiredDocument,
+    db: Session,
+    identity: ResolvedIdentity,
+    project_id: uuid.UUID,
+    satisfaction: RequirementSatisfaction | None = None,
+) -> RequiredDocumentOut:
+    """
+    satisfaction: the RequirementSatisfaction row for this requirement, if
+    the caller already has it (list_requirements batches this lookup for
+    all requirements at once — see below). Callers serializing a single
+    just-created/just-edited requirement (create_requirement,
+    update_requirement) correctly omit it — a brand-new or freshly-edited
+    requirement has no satisfaction record yet until the next audit run
+    (already scheduled by those endpoints via sync_and_audit_project), so
+    satisfied=False/satisfied_by=None here is the accurate current state,
+    not a placeholder.
+    """
+    satisfied_by = None
+    if satisfaction is not None:
+        # Tenant/project-scoped in the query itself — defense-in-depth, not
+        # relying solely on classify_document_visibility downstream. If this
+        # somehow finds nothing (a stale/mismatched row), satisfied_by stays
+        # null exactly as it would for a genuinely inaccessible document.
+        doc = db.execute(
+            select(Document).where(
+                Document.document_id == satisfaction.document_id,
+                Document.project_id == project_id,
+                Document.tenant_id == identity.tenant_id,
+            )
+        ).scalar_one_or_none()
+        if doc is not None:
+            visibility = classify_document_visibility(db, identity.user_id, doc)
+            if visibility == DocumentVisibility.fully_allowed:
+                satisfied_by = {"document_id": str(doc.document_id), "filename": doc.original_filename}
+
     return RequiredDocumentOut(
         requirement_id=str(r.requirement_id),
         stage_id=str(r.stage_id),
@@ -534,6 +584,8 @@ def _serialize_requirement(r: RequiredDocument) -> RequiredDocumentOut:
         is_mandatory=r.is_mandatory,
         source=r.source.value,
         created_at=r.created_at.isoformat(),
+        satisfied=satisfaction is not None,
+        satisfied_by=satisfied_by,
     )
 
 
@@ -567,7 +619,18 @@ def list_requirements(
         .where(RequiredDocument.stage_id == stage_id)
         .order_by(RequiredDocument.created_at.asc())
     ).scalars().all()
-    return [_serialize_requirement(r) for r in requirements]
+
+    satisfaction_rows = db.execute(
+        select(RequirementSatisfaction).where(
+            RequirementSatisfaction.requirement_id.in_([r.requirement_id for r in requirements])
+        )
+    ).scalars().all() if requirements else []
+    satisfaction_map = {s.requirement_id: s for s in satisfaction_rows}
+
+    return [
+        _serialize_requirement(r, db, identity, project_id, satisfaction_map.get(r.requirement_id))
+        for r in requirements
+    ]
 
 
 @router.post(
@@ -614,7 +677,10 @@ def create_requirement(
     db.refresh(requirement)
 
     background_tasks.add_task(sync_and_audit_project, project_id, project.tenant_id, identity.user_id)
-    return _serialize_requirement(requirement)
+    # A brand-new requirement has no satisfaction record yet — the audit
+    # scheduled above hasn't run. satisfaction=None here is accurate, not a
+    # placeholder.
+    return _serialize_requirement(requirement, db, identity, project_id, None)
 
 
 @router.patch(
@@ -656,8 +722,18 @@ def update_requirement(
         changed["is_mandatory"] = body.is_mandatory
         requirement.is_mandatory = body.is_mandatory
 
+    # Either branch below may be reporting an ALREADY-satisfied requirement
+    # (e.g. toggling is_mandatory on one that was satisfied by a prior audit
+    # run) — look up its real current satisfaction rather than assuming None,
+    # unlike create_requirement's genuinely-brand-new case above.
+    existing_satisfaction = db.execute(
+        select(RequirementSatisfaction).where(
+            RequirementSatisfaction.requirement_id == requirement.requirement_id
+        )
+    ).scalar_one_or_none()
+
     if not changed:
-        return _serialize_requirement(requirement)
+        return _serialize_requirement(requirement, db, identity, project_id, existing_satisfaction)
 
     record_audit(
         db, actor_id=identity.user_id, action="UPDATE_REQUIRED_DOCUMENT",
@@ -669,7 +745,7 @@ def update_requirement(
     db.refresh(requirement)
 
     background_tasks.add_task(sync_and_audit_project, project_id, project.tenant_id, identity.user_id)
-    return _serialize_requirement(requirement)
+    return _serialize_requirement(requirement, db, identity, project_id, existing_satisfaction)
 
 
 @router.delete("/{project_id}/stages/{stage_id}/requirements/{requirement_id}")
