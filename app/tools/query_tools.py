@@ -874,9 +874,9 @@ def get_project_readiness(stage_reference: str | None = None) -> dict:
 def get_project_gaps(stage_reference: str | None = None) -> dict:
     """The specific compliance gaps behind "What needs attention" on the
     Intelligence dashboard: missing mandatory requirements, unapproved gate
-    documents, broken dependencies, stale references, cross-stage reference
-    violations, and document contradictions. Optionally scoped to one stage
-    via `stage_reference`. Call this for questions like "what needs
+    documents, broken dependencies, stale references, document
+    contradictions, and Scanner-flagged versions. Optionally scoped to one
+    stage via `stage_reference`. Call this for questions like "what needs
     attention", "what's missing", "are there any contradictions", "what
     findings does the audit have".
     """
@@ -909,12 +909,11 @@ def get_project_gaps(stage_reference: str | None = None) -> dict:
             "scope": f"stage '{stage_reference}'" if stage_id else "entire project",
             "readiness_status": readiness_status,
             "missing_mandatory_requirements": [f.description for f in visible_findings if f.rule_code == "R001"],
-            "unapproved_gate_documents": [f.description for f in visible_findings if f.rule_code in ("R002", "R009")],
+            "unapproved_gate_documents": [f.description for f in visible_findings if f.rule_code in ("R002", "R008")],
             "broken_dependencies": [f.description for f in visible_findings if f.rule_code in ("R003", "R005")],
             "stale_references": [f.description for f in visible_findings if f.rule_code == "R004"],
-            "cross_stage_reference_violations": [f.description for f in visible_findings if f.rule_code == "R006"],
-            "document_contradictions": [f.description for f in visible_findings if f.rule_code == "R008"],
-            "scanner_flagged_versions": [f.description for f in visible_findings if f.rule_code == "R011"],
+            "document_contradictions": [f.description for f in visible_findings if f.rule_code == "R007"],
+            "scanner_flagged_versions": [f.description for f in visible_findings if f.rule_code == "R010"],
         }
     finally:
         db.close()

@@ -246,21 +246,21 @@ class TestAuditRulesExpanded(unittest.TestCase):
     # Confirms the rule was defensible only against a synthetic test fixture,
     # never against real usage.
 
-    def test_r010_pending_workflow_blocker(self):
+    def test_r008_pending_workflow_blocker(self):
         """
-        R010: Pending Workflow Blocker
-        1. pending document in approval-required stage -> R010 blocker
-        2. approved document -> no R010
-        3. pending document in non-gate stage -> no R010
-        4. rejected/draft state follows actual workflow semantics (fires R002, not R010)
-        5. R010 is included in audit engine's final findings and blocker calculation
+        R008: Pending Workflow Blocker
+        1. pending document in approval-required stage -> R008 blocker
+        2. approved document -> no R008
+        3. pending document in non-gate stage -> no R008
+        4. rejected/draft state follows actual workflow semantics (fires R002, not R008)
+        5. R008 is included in audit engine's final findings and blocker calculation
         """
         gate_stage = Stage(project_id=self.project.project_id, name="Security Gate", order_index=1, requires_approval=True)
         open_stage = Stage(project_id=self.project.project_id, name="Ideation", order_index=2, requires_approval=False)
         self.db.add_all([gate_stage, open_stage])
         self.db.commit()
 
-        # Case 1: Pending document in approval-required stage -> R010 BLOCKER
+        # Case 1: Pending document in approval-required stage -> R008 BLOCKER
         pending_doc = Document(
             tenant_id=self.tenant.tenant_id,
             project_id=self.project.project_id,
@@ -280,30 +280,30 @@ class TestAuditRulesExpanded(unittest.TestCase):
         sync_project_graph(self.db, self.project.project_id)
         audit1 = execute_project_audit(self.db, self.project.project_id, target_stage_id=gate_stage.stage_id)
 
-        r010_findings = [f for f in audit1.findings if f.rule_code == "R010" and f.affected_entity_id == pending_doc.document_id]
-        self.assertEqual(len(r010_findings), 1)
-        self.assertTrue(r010_findings[0].is_blocker)
-        self.assertEqual(r010_findings[0].severity, "HIGH")
-        self.assertEqual(r010_findings[0].details["workflow_state"], "pending_review")
-        self.assertTrue(r010_findings[0].details["blocks_stage_exit"])
+        r008_findings = [f for f in audit1.findings if f.rule_code == "R008" and f.affected_entity_id == pending_doc.document_id]
+        self.assertEqual(len(r008_findings), 1)
+        self.assertTrue(r008_findings[0].is_blocker)
+        self.assertEqual(r008_findings[0].severity, "HIGH")
+        self.assertEqual(r008_findings[0].details["workflow_state"], "pending_review")
+        self.assertTrue(r008_findings[0].details["blocks_stage_exit"])
         self.assertEqual(audit1.readiness_status, "NOT_READY")
 
         # Master Plan v2, item 13: R002 previously checked `state != "approved"`,
         # which also matched pending_review — producing a duplicate R002
-        # finding for the exact same document/fact R010 above already
+        # finding for the exact same document/fact R008 above already
         # covers. Confirms the fix: R002 must NOT also fire here.
         r002_on_pending = [f for f in audit1.findings if f.rule_code == "R002" and f.affected_entity_id == pending_doc.document_id]
         self.assertEqual(len(r002_on_pending), 0)
 
-        # Case 2: Approved document in gate stage -> NO R010
+        # Case 2: Approved document in gate stage -> NO R008
         wf_pending.state = WorkflowStatus.approved
         self.db.commit()
 
         audit2 = execute_project_audit(self.db, self.project.project_id, target_stage_id=gate_stage.stage_id)
-        r010_approved = [f for f in audit2.findings if f.rule_code == "R010"]
-        self.assertEqual(len(r010_approved), 0)
+        r008_approved = [f for f in audit2.findings if f.rule_code == "R008"]
+        self.assertEqual(len(r008_approved), 0)
 
-        # Case 3: Pending document in non-gate stage (requires_approval=False) -> NO R010
+        # Case 3: Pending document in non-gate stage (requires_approval=False) -> NO R008
         open_doc = Document(
             tenant_id=self.tenant.tenant_id,
             project_id=self.project.project_id,
@@ -320,17 +320,17 @@ class TestAuditRulesExpanded(unittest.TestCase):
         self.db.commit()
 
         audit3 = execute_project_audit(self.db, self.project.project_id, target_stage_id=open_stage.stage_id)
-        r010_open = [f for f in audit3.findings if f.rule_code == "R010" and f.affected_entity_id == open_doc.document_id]
-        self.assertEqual(len(r010_open), 0)
+        r008_open = [f for f in audit3.findings if f.rule_code == "R008" and f.affected_entity_id == open_doc.document_id]
+        self.assertEqual(len(r008_open), 0)
 
-        # Case 4: Rejected state in gate stage -> triggers R002 unapproved, NOT R010 pending review
+        # Case 4: Rejected state in gate stage -> triggers R002 unapproved, NOT R008 pending review
         wf_pending.state = WorkflowStatus.rejected
         self.db.commit()
 
         audit4 = execute_project_audit(self.db, self.project.project_id, target_stage_id=gate_stage.stage_id)
-        r010_rejected = [f for f in audit4.findings if f.rule_code == "R010" and f.affected_entity_id == pending_doc.document_id]
+        r008_rejected = [f for f in audit4.findings if f.rule_code == "R008" and f.affected_entity_id == pending_doc.document_id]
         r002_rejected = [f for f in audit4.findings if f.rule_code == "R002" and f.affected_entity_id == pending_doc.document_id]
-        self.assertEqual(len(r010_rejected), 0)
+        self.assertEqual(len(r008_rejected), 0)
         self.assertEqual(len(r002_rejected), 1)
 
     def test_r001_cross_stage_applies_to(self):
@@ -470,10 +470,14 @@ class TestAuditRulesExpanded(unittest.TestCase):
     def test_all_rules_wired_into_engine(self):
         """
         Verify every deterministic audit rule is registered and executed.
-        R006 (orphan entity) deliberately excluded — removed in Master Plan
-        v2, item 13 as structurally unreachable (see the deleted
-        test_r006_true_orphan_entity's replacement comment above). R011
-        (document coherence, item 10) included.
+        The original R006 (orphan entity) was removed in Master Plan v2,
+        item 13 as structurally unreachable (see the deleted
+        test_r006_true_orphan_entity's replacement comment above). A second
+        rule (Cross-Stage Reference Violation) later took the R006 code and
+        was itself retired for flagging legitimate cross-stage document
+        mentions — R007-R011 were then renumbered down to R006-R010, so
+        R006-R010 below are the same rules the old R007-R011 codes used to
+        name, not new checks.
         """
         stage = Stage(project_id=self.project.project_id, name="Initial Stage", order_index=1, requires_approval=False)
         self.db.add(stage)
@@ -481,7 +485,7 @@ class TestAuditRulesExpanded(unittest.TestCase):
 
         # Check RULE_REGISTRY completeness
         rule_codes = [code for code, fn in RULE_REGISTRY]
-        expected_rules = ["R001", "R002", "R003", "R004", "R005", "R007", "R008", "R009", "R010", "R011"]
+        expected_rules = ["R001", "R002", "R003", "R004", "R005", "R006", "R007", "R008", "R009", "R010"]
         self.assertEqual(rule_codes, expected_rules)
         self.assertEqual(len(RULE_REGISTRY), 10)
 

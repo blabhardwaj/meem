@@ -177,7 +177,7 @@ class DocumentCoherenceCheck(Base):
     version's content against related project context (contradiction,
     duplication, or unmet requirement). Keyed like ExtractionRun
     (version_id, content_hash) so it's computed once per finalize — the
-    audit sweep's R010 rule reads the cached `issues` on every run instead
+    audit sweep's R009 rule reads the cached `issues` on every run instead
     of re-calling the LLM per audit (which can be triggered far more often
     than a document is actually re-finalized).
     """

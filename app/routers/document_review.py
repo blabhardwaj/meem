@@ -124,7 +124,7 @@ class DocumentViewResponse(BaseModel):
     scan_passed: bool | None
     injection_flagged: bool | None
     failed_criteria: list[str] = []
-    # Item 10: cached R010 document-coherence issues (contradiction/duplicate/
+    # Item 10: cached R009 document-coherence issues (contradiction/duplicate/
     # unmet_requirement), already confidence-filtered by get_document_view_data.
     coherence_issues: list[dict] = []
 
@@ -472,7 +472,7 @@ def review_message(
     # Master Plan v2, items 5 & 9: keep the knowledge graph, extracted
     # relationships/claims, and audit in sync with real usage automatically —
     # a finalize just wrote a new DocumentVersion (and possibly indexed it),
-    # which can change R001/R002/R004/R008 findings.
+    # which can change R001/R002/R004/R007 findings.
     if turn.get("finalized") and turn.get("version_id"):
         background_tasks.add_task(
             extract_sync_and_audit_document,

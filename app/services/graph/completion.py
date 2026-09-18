@@ -9,7 +9,7 @@ something that actually matters changes underneath it.
 
 "Something that matters" is defined narrowly, on purpose: the set of
 currently-BLOCKING findings, plus the coverage score. Non-blocking findings
-(R004, R007, R010/duplication) are excluded from the signature entirely, so
+(R004, R006, R009/duplication) are excluded from the signature entirely, so
 their churn can never reopen a completed project -- consistent with
 Readiness itself only ever being gated by the blocker set. A new draft
 document also can't reopen anything: R001 only ever fires for missing

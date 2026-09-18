@@ -31,7 +31,7 @@ export const CriterionChip = ({ name, score, maxScore = 20 }) => (
 // Master Plan v2, item 10: the document-level coherence check — catches a
 // contradiction, duplicate, or unmet requirement in THIS document's content
 // against the rest of the project, which the Scanner (structure only) and
-// the project-wide audit (R001-R011, no single-document content check) both
+// the project-wide audit (R001-R010, no single-document content check) both
 // miss. Shown wherever scan results are shown, per the plan's own
 // instruction not to bury this in the separate Intelligence page.
 const ISSUE_ICON = { contradiction: ShieldAlert, unmet_requirement: AlertTriangle, duplicate: Copy };

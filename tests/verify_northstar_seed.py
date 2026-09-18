@@ -9,8 +9,8 @@ Runs all verification checks required by the Northstar Demo Seed Manifest:
 - Workflow states (Doc 05 approved, Doc 06 submitted/not approved, Doc 07 approved)
 - Qdrant indexing & zero-point unapproved gate check
 - Graph topology (Discovery->UX Design->Engineering->Validation->Launch) & extraction
-- Contradiction detection (750 ms vs 812 ms CONFLICTS_WITH edge & R009 finding)
-- Audit run & blocker findings (R002, R010, R009)
+- Contradiction detection (750 ms vs 812 ms CONFLICTS_WITH edge & R007 finding)
+- Audit run & blocker findings (R002, R008, R007)
 - Metric snapshots (Project and all 5 Stages)
 - ABAC tests A, B, C, D, E, F
 - Query Agent & Draft Agent executions
@@ -483,7 +483,7 @@ def run_all_verifications(lumen_baseline_json: str | None = None) -> list[TestRe
             "750 ms target vs 812 ms observed for NC-CHK-103, contradiction detected through the normal claims pipeline.",
         )
         conflicts = db.execute(select(Edge).where(Edge.project_id == project.project_id, Edge.edge_type == "CONFLICTS_WITH")).scalars().all() if project else []
-        r009_findings = db.execute(select(AuditFinding).where(AuditFinding.project_id == project.project_id, AuditFinding.rule_code == "R009")).scalars().all() if project else []
+        r007_findings = db.execute(select(AuditFinding).where(AuditFinding.project_id == project.project_id, AuditFinding.rule_code == "R007")).scalars().all() if project else []
 
         doc01 = next((d for d in docs if "01-holiday-checkout" in d.original_filename), None)
         doc06 = next((d for d in docs if "06-payment-failover" in d.original_filename), None)
@@ -517,15 +517,15 @@ def run_all_verifications(lumen_baseline_json: str | None = None) -> list[TestRe
             if c2_id:
                 claim_b = db.get(Claim, uuid.UUID(c2_id))
 
-        r103_r009 = None
-        for f in r009_findings:
+        r103_r007 = None
+        for f in r007_findings:
             f_det = f.details or {}
             if claim_a and claim_b and f_det.get("claim1_id") == str(claim_a.claim_id) and f_det.get("claim2_id") == str(claim_b.claim_id):
-                r103_r009 = f
+                r103_r007 = f
                 break
             elif "NC-CHK-103" in str(f.description) and "750 ms" in str(f.description) and "812 ms" in str(f.description):
                 if doc01 and f.affected_entity_id == doc01.document_id:
-                    r103_r009 = f
+                    r103_r007 = f
                     break
 
         details_payload = {
@@ -554,29 +554,29 @@ def run_all_verifications(lumen_baseline_json: str | None = None) -> list[TestRe
                 "target_node_id": str(target_edge.target_node_id) if target_edge else None,
                 "properties": target_edge.properties if target_edge else None,
             } if target_edge else None,
-            "r009_audit_finding": {
-                "finding_id": str(r103_r009.finding_id) if r103_r009 else None,
-                "rule_code": r103_r009.rule_code if r103_r009 else None,
-                "severity": r103_r009.severity if r103_r009 else None,
-                "is_blocker": r103_r009.is_blocker if r103_r009 else None,
-                "title": r103_r009.title if r103_r009 else None,
-                "description": r103_r009.description if r103_r009 else None,
-                "details": r103_r009.details if r103_r009 else None,
-            } if r103_r009 else None,
+            "r007_audit_finding": {
+                "finding_id": str(r103_r007.finding_id) if r103_r007 else None,
+                "rule_code": r103_r007.rule_code if r103_r007 else None,
+                "severity": r103_r007.severity if r103_r007 else None,
+                "is_blocker": r103_r007.is_blocker if r103_r007 else None,
+                "title": r103_r007.title if r103_r007 else None,
+                "description": r103_r007.description if r103_r007 else None,
+                "details": r103_r007.details if r103_r007 else None,
+            } if r103_r007 else None,
         }
 
-        if contradiction_found and r103_r009 and claim_a and claim_b:
+        if contradiction_found and r103_r007 and claim_a and claim_b:
             req_ctx_a = claim_a.source_locator.get("requirement_context") if claim_a.source_locator else None
             req_ctx_b = claim_b.source_locator.get("requirement_context") if claim_b.source_locator else None
             actual_str = (
                 f"Contradiction detected: Claim A ({claim_a.object} target from Doc 01, {req_ctx_a}) vs "
                 f"Claim B ({claim_b.object} observed from Doc 06, {req_ctx_b}). "
                 f"CONFLICTS_WITH edge {target_edge.edge_id} persisted. "
-                f"Audit rule R009 emitted blocker finding {r103_r009.finding_id}."
+                f"Audit rule R007 emitted blocker finding {r103_r007.finding_id}."
             )
             r.pass_test(actual_str, details=details_payload)
         elif contradiction_found:
-            actual_str = f"CONFLICTS_WITH edge found, but R009 finding not emitted: {target_edge.properties}"
+            actual_str = f"CONFLICTS_WITH edge found, but R007 finding not emitted: {target_edge.properties}"
             r.fail_test(actual_str, details=details_payload)
         else:
             actual_str = f"CONFLICTS_WITH edge not found among {len(conflicts)} edges."
@@ -590,15 +590,15 @@ def run_all_verifications(lumen_baseline_json: str | None = None) -> list[TestRe
             "S16",
             "Project audit produces NOT_READY and flags unapproved gate & contradiction blockers",
             "execute_project_audit(db, project.project_id)",
-            "readiness_status='NOT_READY', blockers > 0, findings contain R002/R010 and R009",
+            "readiness_status='NOT_READY', blockers > 0, findings contain R002/R008 and R007",
         )
         audit_run = db.execute(select(AuditRun).where(AuditRun.project_id == project.project_id).order_by(AuditRun.started_at.desc())).scalars().first() if project else None
         if audit_run:
             findings = db.execute(select(AuditFinding).where(AuditFinding.run_id == audit_run.run_id)).scalars().all()
             rule_codes = [f.rule_code for f in findings]
             blockers = sum(1 for f in findings if f.is_blocker)
-            has_gate_blocker = any(code in ("R002", "R010") for code in rule_codes)
-            has_contradiction = "R009" in rule_codes
+            has_gate_blocker = any(code in ("R002", "R008") for code in rule_codes)
+            has_contradiction = "R007" in rule_codes
             is_not_ready = audit_run.readiness_status in ("NOT_READY", "BLOCKED")
 
             if is_not_ready and has_gate_blocker and has_contradiction:
@@ -1014,7 +1014,7 @@ def run_all_verifications(lumen_baseline_json: str | None = None) -> list[TestRe
         r = TestRecord(
             "S36",
             "Query Agent Q14: Find conflicting evidence on latency",
-            "Query CONFLICTS_WITH edges and R009 findings for NC-CHK-103",
+            "Query CONFLICTS_WITH edges and R007 findings for NC-CHK-103",
             "Identifies 750 ms target (Doc 01) vs 812 ms observed result (Doc 06)",
         )
         latency_edges = [
