@@ -27,12 +27,11 @@ const RULE_CATEGORY_LABELS = {
   R003: 'Broken Dependency',
   R004: 'Stale Document Reference',
   R005: 'Broken Dependency',
-  R006: 'Reference Violation',
-  R007: 'Unassigned Stage Requirement',
-  R008: 'Performance Contradiction',
-  R009: 'Pending Workflow Review',
-  R010: 'Document-Level Coherence',
-  R011: 'Scanner-Flagged Current Version',
+  R006: 'Unassigned Stage Requirement',
+  R007: 'Performance Contradiction',
+  R008: 'Pending Workflow Review',
+  R009: 'Document-Level Coherence',
+  R010: 'Scanner-Flagged Current Version',
 };
 
 const getRuleCategory = (ruleCode) => RULE_CATEGORY_LABELS[(ruleCode || '').toUpperCase()] || 'Audit Rule Violation';

@@ -32,8 +32,13 @@ const RBAC_MATRIX = [
 // The original R006 ("orphan entity") was deleted (Master Plan v2 item 13)
 // — every condition it checked was structurally unreachable given the
 // schema. UI_FIXES_2026-09-15.md #32 renumbered R007-R012 down to R006-R011
-// to close the gap that left, so R006 below is a different, unrelated rule
-// (Cross-Stage Reference Violation) from the deleted one.
+// to close the gap that left, giving R006 to a different rule (Cross-Stage
+// Reference Violation, gated on the StageReference admin allow-list). That
+// second R006 was later retired outright too: it was flagging legitimate
+// forward/cross-stage document mentions, and the one real correctness
+// concern it could have checked (an unapproved dependency) is already
+// fully covered by R003. R007-R011 were then renumbered down to R006-R010
+// to close that second gap — a pure relabeling, no rule's logic changed.
 const AUDIT_RULES = [
   {
     code: 'R001', title: 'Missing Mandatory Requirement Evidence', severity: 'Critical',
@@ -56,27 +61,23 @@ const AUDIT_RULES = [
     meaning: 'Two or more documents depend on each other in a loop (A depends on B, B depends on A) — this can never be fully resolved as-is.',
   },
   {
-    code: 'R006', title: 'Cross-Stage Reference Violation', severity: 'High',
-    meaning: "A document references another stage's content in a way that isn't on that stage's permitted-references list (configurable per stage in Edit Stages).",
-  },
-  {
-    code: 'R007', title: 'Unassigned Stage Requirement', severity: 'Medium',
+    code: 'R006', title: 'Unassigned Stage Requirement', severity: 'Medium',
     meaning: 'A stage has a mandatory requirement defined, but no document has been linked to it at all yet — not even a draft.',
   },
   {
-    code: 'R008', title: 'Contradictory Statements Across Documents', severity: 'High',
+    code: 'R007', title: 'Contradictory Statements Across Documents', severity: 'High',
     meaning: 'Two documents make claims that directly contradict each other (e.g. different numbers for the same target) — caught both by exact matching and by an AI semantic pass for contradictions phrased differently.',
   },
   {
-    code: 'R009', title: 'Pending Workflow Blocker', severity: 'High',
+    code: 'R008', title: 'Pending Workflow Blocker', severity: 'High',
     meaning: 'A document in a gate stage is sitting in pending review — it needs a decision (approve or reject) before the stage can be considered complete.',
   },
   {
-    code: 'R010', title: 'Document-Level Coherence', severity: "High or Medium",
-    meaning: "One document's own content doesn't make sense against the rest of the project's related context — distinct from R008, which only compares explicit claims across documents.",
+    code: 'R009', title: 'Document-Level Coherence', severity: "High or Medium",
+    meaning: "One document's own content doesn't make sense against the rest of the project's related context — distinct from R007, which only compares explicit claims across documents.",
   },
   {
-    code: 'R011', title: 'Scanner-Flagged Current Version', severity: 'High',
+    code: 'R010', title: 'Scanner-Flagged Current Version', severity: 'High',
     meaning: "A document's current version failed the Structure Scanner or was flagged by the injection check — separate from whether it's been human-approved. Matches the status shown in that document's Versions panel.",
   },
 ];
