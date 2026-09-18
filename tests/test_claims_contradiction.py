@@ -100,7 +100,7 @@ class TestClaimsContradiction(unittest.TestCase):
         Verify that:
         1. Explicit claims are extracted from document versions and persisted in knowledge.claims.
         2. Contradictory claims between documents create CONFLICTS_WITH edges.
-        3. R009 audit findings are emitted with blocker=True.
+        3. R007 audit findings are emitted with blocker=True.
         """
         # Create Doc 1 in Stage A with Launch date 2026-10-01 and DB = PostgreSQL
         doc1 = Document(
@@ -209,10 +209,10 @@ class TestClaimsContradiction(unittest.TestCase):
         )
 
         # We expect at least two contradictions: launch date (differing values) and encryption (differing polarities)
-        r009_findings = [f for f in findings if f.rule_code == "R009"]
-        self.assertGreaterEqual(len(r009_findings), 2)
-        self.assertTrue(all(f.is_blocker for f in r009_findings))
-        self.assertTrue(all(f.severity == "HIGH" for f in r009_findings))
+        r007_findings = [f for f in findings if f.rule_code == "R007"]
+        self.assertGreaterEqual(len(r007_findings), 2)
+        self.assertTrue(all(f.is_blocker for f in r007_findings))
+        self.assertTrue(all(f.severity == "HIGH" for f in r007_findings))
 
         # Check that CONFLICTS_WITH edge was written
         conflicts_edges = (
@@ -222,10 +222,10 @@ class TestClaimsContradiction(unittest.TestCase):
         )
         self.assertGreaterEqual(len(conflicts_edges), 1)
 
-        # Now run full project audit and verify R009 findings are included in the audit run
+        # Now run full project audit and verify R007 findings are included in the audit run
         audit_run = execute_project_audit(self.db, self.project.project_id)
         self.assertEqual(audit_run.readiness_status, "NOT_READY")
-        self.assertIn("R009", [f.rule_code for f in audit_run.findings])
+        self.assertIn("R007", [f.rule_code for f in audit_run.findings])
 
     def test_generic_performance_sla_claims_and_contradictions(self):
         """
@@ -340,11 +340,11 @@ class TestClaimsContradiction(unittest.TestCase):
         contradictions = detect_project_contradictions(
             self.db, self.tenant.tenant_id, self.project.project_id
         )
-        r009_perf = [f for f in contradictions if f.rule_code == "R009" and "p95 latency" in f.description]
-        self.assertEqual(len(r009_perf), 1)
-        self.assertTrue(r009_perf[0].is_blocker)
-        self.assertIn("450 ms", r009_perf[0].description)
-        self.assertIn("520 ms", r009_perf[0].description)
+        r007_perf = [f for f in contradictions if f.rule_code == "R007" and "p95 latency" in f.description]
+        self.assertEqual(len(r007_perf), 1)
+        self.assertTrue(r007_perf[0].is_blocker)
+        self.assertIn("450 ms", r007_perf[0].description)
+        self.assertIn("520 ms", r007_perf[0].description)
 
         # Verify CONFLICTS_WITH edge exists in graph
         edge = (

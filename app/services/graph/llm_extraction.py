@@ -14,7 +14,7 @@ Confidence gating (stored in Edge.properties / Claim.source_locator, no
 schema change needed):
   >= 0.7  -> feeds audit rules directly, same as a regex-found edge/claim.
   0.5-0.7 -> stored with low_confidence=True, EXCLUDED from the audit-rule
-             queries (R001 evidence, R008 contradictions) — visible in the
+             queries (R001 evidence, R007 contradictions) — visible in the
              graph for a future manual-review surface, never silently
              treated as fact.
   < 0.5   -> discarded, not stored at all.

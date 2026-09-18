@@ -174,11 +174,9 @@ def get_gaps(
             missing_reqs.append(dto)
         elif f.rule_code in ("R003", "R005"):
             broken_deps.append(dto)
-        elif f.rule_code == "R006":
-            ref_violations.append(dto)
         elif f.rule_code == "R002":
             unapproved_gate.append(dto)
-        elif f.rule_code == "R008":
+        elif f.rule_code == "R007":
             contradictions.append(dto)
 
     total_blockers = len([f for f in visible_findings if f.is_blocker])

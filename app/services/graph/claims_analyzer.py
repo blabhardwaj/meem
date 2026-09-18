@@ -278,7 +278,7 @@ def detect_project_contradictions(
     """
     Detects contradictions between claims across documents in scope via
     EXACT (subject, predicate) string grouping. Generates CONFLICTS_WITH
-    edges between conflicting document nodes and returns R008 blocker
+    edges between conflicting document nodes and returns R007 blocker
     findings. See detect_semantic_contradictions() for the additive,
     embedding+LLM pass that catches claims phrased differently (item 9) —
     this function alone still only catches exact-phrasing matches, which is
@@ -459,7 +459,7 @@ def detect_project_contradictions(
                     )
                 db.flush()
 
-            # Emit R008 blocker finding
+            # Emit R007 blocker finding
             finding_details = {
                 "conflicting_document_id": str(doc2.document_id),
                 "conflicting_document_name": doc2.original_filename,
@@ -486,7 +486,7 @@ def detect_project_contradictions(
 
             findings.append(
                 FindingSpec(
-                    rule_code="R008",
+                    rule_code="R007",
                     severity="HIGH",
                     is_blocker=True,
                     title="Document Contradiction Detected",
@@ -657,7 +657,7 @@ def detect_semantic_contradictions(
         )
         findings.append(
             FindingSpec(
-                rule_code="R008",
+                rule_code="R007",
                 severity="HIGH",
                 is_blocker=True,
                 title="Document Contradiction Detected (Semantic)",

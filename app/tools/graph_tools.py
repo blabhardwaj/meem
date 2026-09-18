@@ -163,11 +163,10 @@ def query_project_gaps(
         readiness_status = "READY" if len(visible_blockers) == 0 else "NOT_READY"
 
         missing_reqs = [f.description for f in visible_findings if f.rule_code == "R001"]
-        gate_unapproved = [f.description for f in visible_findings if f.rule_code in ("R002", "R009")]
+        gate_unapproved = [f.description for f in visible_findings if f.rule_code in ("R002", "R008")]
         broken_deps = [f.description for f in visible_findings if f.rule_code in ("R003", "R005")]
         stale_refs = [f.description for f in visible_findings if f.rule_code == "R004"]
-        ref_violations = [f.description for f in visible_findings if f.rule_code == "R006"]
-        contradictions = [f.description for f in visible_findings if f.rule_code == "R008"]
+        contradictions = [f.description for f in visible_findings if f.rule_code == "R007"]
 
         return json.dumps(
             {
@@ -177,7 +176,6 @@ def query_project_gaps(
                 "unapproved_gate_documents": gate_unapproved,
                 "broken_dependencies": broken_deps,
                 "stale_references": stale_refs,
-                "permitted_reference_violations": ref_violations,
                 "document_contradictions": contradictions,
             },
             indent=2,

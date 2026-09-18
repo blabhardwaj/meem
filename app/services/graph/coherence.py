@@ -3,7 +3,7 @@ Document-level coherence check (Master Plan v2, item 10) — the feature this
 project was actually missing: something that checks a finalized document's
 CONTENT against the rest of the project, not just its own structural
 quality (the Scanner) or project-wide deterministic rule violations (the
-audit engine's R001-R011). A document can pass the Scanner while flatly
+audit engine's R001-R010). A document can pass the Scanner while flatly
 contradicting or duplicating existing project content; nothing caught that
 before this.
 
@@ -11,7 +11,7 @@ run_document_coherence_check() is called once per finalize (from
 audit_engine.extract_sync_and_audit_document, after extraction/sync, before
 the audit sweep) and caches its result in knowledge.document_coherence_checks
 — see that model's docstring for why this must be cached rather than
-re-run on every audit. evaluate_r011_document_coherence() (audit_rules.py)
+re-run on every audit. evaluate_r009_document_coherence() (audit_rules.py)
 reads the cache on every sweep; nothing here calls Groq during a sweep.
 """
 import hashlib

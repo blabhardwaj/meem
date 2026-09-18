@@ -97,7 +97,7 @@ class TestAgentToolsSecurity(unittest.TestCase):
         self.db.add_all([self.doc_1, self.doc_2])
         self.db.commit()
 
-        # Document 2 is unapproved in gate stage 2 -> creates R002 / R010 blocker in stage 2
+        # Document 2 is unapproved in gate stage 2 -> creates R008 (pending workflow) blocker in stage 2
         wf2 = WorkflowState(document_id=self.doc_2.document_id, state=WorkflowStatus.pending_review)
         self.db.add(wf2)
         self.db.commit()
@@ -189,7 +189,7 @@ class TestAgentToolsSecurity(unittest.TestCase):
             self.assertNotIn("error", s1_readiness)
             self.assertEqual(s1_readiness["readiness_status"], "READY")  # No blockers in Stage 1!
 
-            # 3. Project gaps: Stage 2 blockers (R002/R010 for ConfidentialStage2Doc) must be REDACTED
+            # 3. Project gaps: Stage 2 blockers (R002/R008 for ConfidentialStage2Doc) must be REDACTED
             gaps = json.loads(query_project_gaps(str(self.project_a.project_id)))
             self.assertNotIn("error", gaps)
             unapproved = gaps.get("unapproved_gate_documents", [])

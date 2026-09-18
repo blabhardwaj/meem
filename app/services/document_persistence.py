@@ -381,7 +381,7 @@ def get_document_view_data(db: Session, document_id: uuid.UUID) -> dict:
     # the same place the review modal already fetches scan results, per the
     # plan's own instruction not to bury this in the separate Intelligence
     # page. Only issues at/above DIRECT_FACT_CONFIDENCE_FLOOR are shown,
-    # matching R010's own gating (a low-confidence issue isn't shown as a
+    # matching R009's own gating (a low-confidence issue isn't shown as a
     # concern here either — it's not "fact" anywhere in the app).
     from app.models.graph import DocumentCoherenceCheck
     from app.services.graph.llm_extraction import DIRECT_FACT_CONFIDENCE_FLOOR
