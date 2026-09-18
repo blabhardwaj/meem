@@ -46,6 +46,34 @@ class DraftNotFoundError(Exception):
 class DraftPermissionError(Exception):
     pass
 
+
+# Matches the bracketed sign-off placeholders the drafting prompt is
+# instructed to emit (draft_prompts.py rule 4) — e.g. "[Author Name]",
+# "[Owner Name]", "[Date]" — with or without a "Prepared by:" label and
+# with or without surrounding asterisks/brackets. The LLM never reliably
+# fills these in itself (see UI_FIXES: drafts left with unresolved
+# brackets even after finalize), so this substitutes deterministically
+# instead of relying on another model rewrite.
+_NAME_PLACEHOLDER_RE = re.compile(r"\[\s*(?:Author|Owner)\s+Name\s*\]", re.IGNORECASE)
+_DATE_PLACEHOLDER_RE = re.compile(r"\[\s*Date\s*\]", re.IGNORECASE)
+
+
+def apply_author_placeholder(content: str, author_name: str | None) -> str:
+    """
+    Deterministically replaces "[Author Name]" / "[Owner Name]" placeholders
+    with `author_name`, and "[Date]" placeholders with the current local
+    timestamp. No-op if `author_name` is falsy or content has no such
+    placeholder — never invents a "Prepared by" line that wasn't already
+    there.
+    """
+    if not author_name or not content:
+        return content
+    result = _NAME_PLACEHOLDER_RE.sub(author_name, content)
+    if _DATE_PLACEHOLDER_RE.search(result):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        result = _DATE_PLACEHOLDER_RE.sub(timestamp, result)
+    return result
+
 # Hidden marker embedded at the top of a chat-finalized file (see
 # embed_scan_marker / check_scan_marker below) — lets the upload flow
 # (app/services/document_upload_review.py) recognize a chat-drafted file
@@ -178,11 +206,20 @@ def check_scan_marker(content: str) -> dict | None:
     return {"score": score, "content_without_marker": remainder}
 
 
-def finalize(session_id: str, *, user_id: uuid.UUID | str | None = None) -> dict:
+def finalize(
+    session_id: str,
+    *,
+    user_id: uuid.UUID | str | None = None,
+    author_name: str | None = None,
+) -> dict:
     """
     Finalize this session's draft:
       1. read the working file (the real, final draft — nothing the LLM could
          have substituted),
+      1b. resolve any remaining "[Author Name]" / "[Owner Name]" / "[Date]"
+          sign-off placeholders against `author_name` (safety net — the same
+          substitution already runs after every draft_document call in
+          draft_chat.run_draft_turn, so this normally has nothing left to do),
       2. score it via score_document(),
       3. on a successful score, prepend a hidden scan-result marker (see
          embed_scan_marker) — lets a later re-upload of this exact file skip
@@ -198,6 +235,7 @@ def finalize(session_id: str, *, user_id: uuid.UUID | str | None = None) -> dict
     if not path.exists():
         raise RuntimeError("No working draft to finalize")
     content = path.read_bytes().decode("utf-8")
+    content = apply_author_placeholder(content, author_name)
 
     scan: dict | None = None
     scan_error: str | None = None

@@ -33,6 +33,7 @@ from app.api.dependencies import get_current_user, get_db_with_tenant
 from app.models.document import DocumentScan, ScanReviewStatus
 from app.models.project import Project
 from app.models.team import Team
+from app.models.user import User
 from app.services.access_control import has_any_project_access, resolve_sensitivity
 from app.services.auth import ResolvedIdentity
 from app.services.chat_history import SessionScopeError
@@ -101,6 +102,15 @@ def draft_message(
     if safe_id != body.session_id:
         raise HTTPException(status_code=422, detail="Invalid session_id")
 
+    # Resolved once, before closing the connection below: the display name
+    # used to fill a draft's "[Author Name]"/"[Owner Name]" sign-off
+    # placeholder deterministically (see draft_workspace.apply_author_placeholder)
+    # rather than leaving it to the LLM, which does not reliably fill it in.
+    author_name = (
+        db.query(User.full_name).filter(User.user_id == identity.user_id).scalar()
+        or identity.email
+    )
+
     # Close this request's DB connection before the slow LLM turn below —
     # same reasoning as search_message's identical fix just above: this
     # session (shared with get_current_user via _request_db) would otherwise
@@ -116,6 +126,7 @@ def draft_message(
             project_id=body.project_id,
             tenant_id=identity.tenant_id,
             layout=[s.model_dump() for s in body.layout] if body.layout else None,
+            author_name=author_name,
         )
     except Exception as exc:  # noqa: BLE001 — Groq / rate-limit / parse failures
         raise HTTPException(

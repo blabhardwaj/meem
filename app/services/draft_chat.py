@@ -87,6 +87,7 @@ def run_draft_turn(
     project_id: uuid.UUID | None = None,
     tenant_id: uuid.UUID | str | None = None,
     layout: list[dict] | None = None,
+    author_name: str | None = None,
 ) -> dict:
     """
     Run one drafting turn for `session_id`.
@@ -195,6 +196,18 @@ def run_draft_turn(
             after is not None and after != before
         )
 
+        # The LLM is instructed to leave a "[Author Name]"/"[Date]" placeholder
+        # for a sign-off line rather than invent one — it does not reliably
+        # replace it on a later edit turn either (see draft_workspace docs).
+        # Resolve it deterministically against the authenticated caller right
+        # after the working file is rewritten, so the user never has to ask
+        # the agent to fill in their own name.
+        if drafted_this_turn and after is not None and author_name:
+            resolved = draft_workspace.apply_author_placeholder(after, author_name)
+            if resolved != after:
+                draft_workspace.write_working_draft(canonical, resolved)
+                after = resolved
+
         base = {
             "reply": reply,
             "drafted": False,
@@ -213,7 +226,7 @@ def run_draft_turn(
             if not draft_workspace.has_working_draft(canonical):
                 base["scan_error"] = "There is no draft in this conversation to finalize yet."
             else:
-                outcome = draft_workspace.finalize(canonical, user_id=uid)
+                outcome = draft_workspace.finalize(canonical, user_id=uid, author_name=author_name)
                 base.update(
                     finalized=True,
                     scan=outcome["scan"],
