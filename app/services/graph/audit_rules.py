@@ -6,7 +6,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models.graph import DocumentCoherenceCheck, Edge, Node
-from app.models.stage import Stage, StageReference, TeamStageAccess
+from app.models.stage import Stage, TeamStageAccess
 from app.models.document import Document, DocumentScan, DocumentVersion, DocumentStatus
 from app.models.required_document import RequiredDocument
 from app.models.workflow import WorkflowState, WorkflowStatus
@@ -387,9 +387,11 @@ def evaluate_r002_unapproved_documents_in_gate_stages(
     Master Plan v2, item 13: previously checked `current_state != "approved"`,
     which also matched 'pending_review' — contradicting this function's own
     docstring ("documents in pending_review... are flagged by the pending-
-    workflow-blocker rule, now R009 after UI_FIXES_2026-09-15.md's
-    renumbering") and producing two findings for the same document on every
-    single pending-review case in a gate stage. Fixed to explicitly exclude
+    workflow-blocker rule, now R008 after UI_FIXES_2026-09-15.md's
+    renumbering, then re-renumbered from R009 to R008 when the Cross-Stage
+    Reference Violation rule that had briefly occupied R006 was retired")
+    and producing two findings for the same document on every single
+    pending-review case in a gate stage. Fixed to explicitly exclude
     pending_review, matching that rule's exact scope with no overlap.
     """
     findings: List[FindingSpec] = []
@@ -740,8 +742,7 @@ def evaluate_r005_dependency_cycles(
     return findings
 
 
-def evaluate_r006_permitted_stage_reference_violations(
-
+def evaluate_r006_unassigned_stage_requirements(
     db: Session,
     tenant_id: uuid.UUID,
     project_id: uuid.UUID,
@@ -749,87 +750,7 @@ def evaluate_r006_permitted_stage_reference_violations(
     stage_name_map: Dict[uuid.UUID, str],
 ) -> List[FindingSpec]:
     """
-    R006: Permitted Stage Reference Violation.
-    Document in Stage A references a document in Stage B, but no ALLOWED_REFERENCE
-    exists between Stage A and Stage B.
-    """
-    findings: List[FindingSpec] = []
-    # Build set of allowed stage reference pairs: (consumer_stage_id, referenced_stage_id)
-    allowed_refs = (
-        db.query(StageReference)
-        .filter(StageReference.stage_id.in_(evaluated_stage_ids))
-        .all()
-    )
-    allowed_pairs = {(sr.stage_id, sr.references_stage_id) for sr in allowed_refs}
-
-    # Query all REFERENCES edges originating in evaluated stages
-    docs_in_scope = (
-        db.query(Document)
-        .filter(Document.project_id == project_id, Document.stage_id.in_(evaluated_stage_ids))
-        .all()
-    )
-    doc_map = {d.document_id: d for d in docs_in_scope}
-    if not doc_map:
-        return findings
-
-    doc_nodes = (
-        db.query(Node)
-        .filter(Node.source_table == "documents", Node.source_id.in_(list(doc_map.keys())))
-        .all()
-    )
-    node_to_doc = {n.node_id: doc_map[n.source_id] for n in doc_nodes}
-
-    ref_edges = (
-        db.query(Edge)
-        .filter(
-            Edge.source_node_id.in_(list(node_to_doc.keys())),
-            Edge.edge_type == "REFERENCES",
-        )
-        .all()
-    )
-
-    for edge in ref_edges:
-        target_node = db.query(Node).filter(Node.node_id == edge.target_node_id).first()
-        if target_node and target_node.source_table == "documents":
-            target_doc = db.query(Document).filter(Document.document_id == target_node.source_id).first()
-            if target_doc and target_doc.stage_id:
-                consumer_doc = node_to_doc[edge.source_node_id]
-                # Same stage is always allowed
-                if consumer_doc.stage_id != target_doc.stage_id:
-                    if (consumer_doc.stage_id, target_doc.stage_id) not in allowed_pairs:
-                        stage_a_name = stage_name_map.get(consumer_doc.stage_id, "Stage A")
-                        stage_b_name = stage_name_map.get(target_doc.stage_id, "Stage B")
-                        findings.append(
-                            FindingSpec(
-                                rule_code="R006",
-                                severity="HIGH",
-                                is_blocker=True,
-                                title="Cross-Stage Reference Violation",
-                                description=f"Document '{consumer_doc.original_filename}' in '{stage_a_name}' references document '{target_doc.original_filename}' in '{stage_b_name}', but no permitted stage reference link exists from '{stage_a_name}' to '{stage_b_name}'.",
-                                affected_entity_type="document",
-                                affected_entity_id=consumer_doc.document_id,
-                                target_stage_id=consumer_doc.stage_id,
-                                details={
-                                    "stage_name": stage_a_name,
-                                    "entity_label": consumer_doc.original_filename,
-                                    "referenced_stage": stage_b_name,
-                                    "referenced_document": target_doc.original_filename,
-                                },
-                            )
-                        )
-
-    return findings
-
-
-def evaluate_r007_unassigned_stage_requirements(
-    db: Session,
-    tenant_id: uuid.UUID,
-    project_id: uuid.UUID,
-    evaluated_stage_ids: List[uuid.UUID],
-    stage_name_map: Dict[uuid.UUID, str],
-) -> List[FindingSpec]:
-    """
-    R007: Unassigned Stage Requirement.
+    R006: Unassigned Stage Requirement.
     Mandatory requirement exists in a stage where team_stage_access provides 0 teams with write access.
     """
     findings: List[FindingSpec] = []
@@ -850,7 +771,7 @@ def evaluate_r007_unassigned_stage_requirements(
                 stage_name = stage_name_map.get(stage_id, "Unknown Stage")
                 findings.append(
                     FindingSpec(
-                        rule_code="R007",
+                        rule_code="R006",
                         severity="MEDIUM",
                         is_blocker=False,
                         title="Unassigned Stage Requirement",
@@ -868,7 +789,7 @@ def evaluate_r007_unassigned_stage_requirements(
     return findings
 
 
-def evaluate_r008_document_contradictions(
+def evaluate_r007_document_contradictions(
     db: Session,
     tenant_id: uuid.UUID,
     project_id: uuid.UUID,
@@ -876,7 +797,7 @@ def evaluate_r008_document_contradictions(
     stage_name_map: Dict[uuid.UUID, str],
 ) -> List[FindingSpec]:
     """
-    R008: Contradictory Statements Across Documents.
+    R007: Contradictory Statements Across Documents.
     Evaluates semantic claims extracted into knowledge.claims for documents within evaluated stages.
     Flags direct contradictions (differing values or opposing polarities) as high-severity blockers.
 
@@ -903,7 +824,7 @@ def evaluate_r008_document_contradictions(
         return []
 
 
-def evaluate_r009_pending_workflow_blockers(
+def evaluate_r008_pending_workflow_blockers(
     db: Session,
     tenant_id: uuid.UUID,
     project_id: uuid.UUID,
@@ -911,9 +832,9 @@ def evaluate_r009_pending_workflow_blockers(
     stage_name_map: Dict[uuid.UUID, str],
 ) -> List[FindingSpec]:
     """
-    R009: Pending Workflow Blocker.
+    R008: Pending Workflow Blocker.
     For stages where requires_approval = True, documents that are still awaiting approval
-    (status 'pending_review') generate an R009 blocker preventing the stage from exiting.
+    (status 'pending_review') generate an R008 blocker preventing the stage from exiting.
     Clearly distinct from R002 (which specifically flags unapproved draft or rejected documents).
     """
     findings: List[FindingSpec] = []
@@ -944,7 +865,7 @@ def evaluate_r009_pending_workflow_blockers(
                 stage_name = stage_name_map.get(stage.stage_id, stage.name)
                 findings.append(
                     FindingSpec(
-                        rule_code="R009",
+                        rule_code="R008",
                         severity="HIGH",
                         is_blocker=True,
                         title="Pending Workflow Blocker",
@@ -964,7 +885,7 @@ def evaluate_r009_pending_workflow_blockers(
     return findings
 
 
-def evaluate_r010_document_coherence(
+def evaluate_r009_document_coherence(
     db: Session,
     tenant_id: uuid.UUID,
     project_id: uuid.UUID,
@@ -972,11 +893,11 @@ def evaluate_r010_document_coherence(
     stage_name_map: Dict[uuid.UUID, str],
 ) -> List[FindingSpec]:
     """
-    R010: Document-Level Coherence (Master Plan v2, item 10) — the actual
+    R009: Document-Level Coherence (Master Plan v2, item 10) — the actual
     "does this document's content make sense against the rest of the
-    project" check. Deliberately separate from R008 (cross-document claim
+    project" check. Deliberately separate from R007 (cross-document claim
     contradictions via the claims table) so the two don't get confused in
-    the UI: R008 is a claims-table sweep across all documents; R010 is one
+    the UI: R007 is a claims-table sweep across all documents; R009 is one
     document's content checked against retrieved related context.
 
     Reads CACHED knowledge.document_coherence_checks rows only — never
@@ -1019,7 +940,7 @@ def evaluate_r010_document_coherence(
             if not isinstance(issue, dict):
                 continue
             confidence = issue.get("confidence", 0)
-            # Same confidence-gating principle as R001/R008 (item 9): a
+            # Same confidence-gating principle as R001/R007 (item 9): a
             # low-confidence (0.5-0.7) issue never becomes a direct finding.
             if not isinstance(confidence, (int, float)) or confidence < DIRECT_FACT_CONFIDENCE_FLOOR:
                 continue
@@ -1031,7 +952,7 @@ def evaluate_r010_document_coherence(
 
             findings.append(
                 FindingSpec(
-                    rule_code="R010",
+                    rule_code="R009",
                     severity="HIGH" if is_blocker else "MEDIUM",
                     is_blocker=is_blocker,
                     title=f"Document Coherence Issue: {issue_type.replace('_', ' ').title()}",
@@ -1053,7 +974,7 @@ def evaluate_r010_document_coherence(
     return findings
 
 
-def evaluate_r011_scanner_flagged_current_version(
+def evaluate_r010_scanner_flagged_current_version(
     db: Session,
     tenant_id: uuid.UUID,
     project_id: uuid.UUID,
@@ -1061,12 +982,12 @@ def evaluate_r011_scanner_flagged_current_version(
     stage_name_map: Dict[uuid.UUID, str],
 ) -> List[FindingSpec]:
     """
-    R011: Scanner-Flagged Current Version.
+    R010: Scanner-Flagged Current Version.
 
     UI_FIXES_2026-09-15.md #28/#30: the Structure Scanner's per-version
     status (DocumentVersion.status == needs_attention, set by
     document_finalize.py on a failed score or a flagged injection check) was
-    entirely invisible to the audit/findings system — R002/R009 only ever
+    entirely invisible to the audit/findings system — R002/R008 only ever
     look at the document-level WorkflowState (human approval), a completely
     separate model. A document could show "needs_attention" in the Versions
     panel while Intelligence's "What needs attention" showed nothing at all
@@ -1075,7 +996,7 @@ def evaluate_r011_scanner_flagged_current_version(
     the current one blocks anything) whenever its status is needs_attention,
     independent of the human-approval WorkflowState (a version can be
     Scanner-flagged whether or not it's also pending/approved — this rule
-    and R002/R009 can both fire on the same document for different reasons).
+    and R002/R008 can both fire on the same document for different reasons).
     """
     findings: List[FindingSpec] = []
     if not evaluated_stage_ids:
@@ -1105,7 +1026,7 @@ def evaluate_r011_scanner_flagged_current_version(
 
         findings.append(
             FindingSpec(
-                rule_code="R011",
+                rule_code="R010",
                 severity="HIGH",
                 is_blocker=True,
                 title="Scanner-Flagged Current Version",

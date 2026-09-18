@@ -25,12 +25,11 @@ from app.services.graph.audit_rules import (
     evaluate_r003_broken_stage_dependencies,
     evaluate_r004_stale_document_references,
     evaluate_r005_dependency_cycles,
-    evaluate_r006_permitted_stage_reference_violations,
-    evaluate_r007_unassigned_stage_requirements,
-    evaluate_r008_document_contradictions,
-    evaluate_r009_pending_workflow_blockers,
-    evaluate_r010_document_coherence,
-    evaluate_r011_scanner_flagged_current_version,
+    evaluate_r006_unassigned_stage_requirements,
+    evaluate_r007_document_contradictions,
+    evaluate_r008_pending_workflow_blockers,
+    evaluate_r009_document_coherence,
+    evaluate_r010_scanner_flagged_current_version,
 )
 from app.services.graph.sync import sync_project_graph
 
@@ -48,10 +47,20 @@ logger = logging.getLogger(__name__)
 # fresh rule changes what a given project audit can find. #32 then
 # renumbered R007-R012 down to R006-R011 to close the gap the original R006's
 # deletion left — the CODES below shifted, but every rule's actual logic is
-# unchanged; this is a relabeling, not a behavior change. Bumped once more
-# for that, since AUDIT_RULES_VERSION exists to let a caller tell "the same
-# codes mean the same checks" apart from "the numbering changed."
-AUDIT_RULES_VERSION = "1.4.0"
+# unchanged; this is a relabeling, not a behavior change. Bumped again for
+# that. Bumped once more to remove the SECOND R006 (Cross-Stage Reference
+# Violation, gated on the StageReference admin allow-list): investigation
+# showed StageReference exists only to widen Search Agent retrieval scope
+# (resolve_stage_scope, never a correctness gate) and R006 was flagging
+# perfectly legitimate forward/cross-stage document mentions as HIGH-severity
+# blockers. The one real correctness concern this rule could have
+# meaningfully checked — a document depending on another that isn't yet
+# approved — is already fully covered by R003, scoped correctly to actual
+# functional DEPENDS_ON edges rather than generic REFERENCES mentions. R006
+# was retired outright rather than replaced. Bumped once more to close the
+# resulting gap: R007-R011 renumbered down to R006-R010 — again a pure
+# relabeling, every rule's actual logic is unchanged.
+AUDIT_RULES_VERSION = "1.6.0"
 
 # Explicit inspectable rule registry for deterministic project audit.
 RULE_REGISTRY = [
@@ -60,12 +69,11 @@ RULE_REGISTRY = [
     ("R003", evaluate_r003_broken_stage_dependencies),
     ("R004", evaluate_r004_stale_document_references),
     ("R005", evaluate_r005_dependency_cycles),
-    ("R006", evaluate_r006_permitted_stage_reference_violations),
-    ("R007", evaluate_r007_unassigned_stage_requirements),
-    ("R008", evaluate_r008_document_contradictions),
-    ("R009", evaluate_r009_pending_workflow_blockers),
-    ("R010", evaluate_r010_document_coherence),
-    ("R011", evaluate_r011_scanner_flagged_current_version),
+    ("R006", evaluate_r006_unassigned_stage_requirements),
+    ("R007", evaluate_r007_document_contradictions),
+    ("R008", evaluate_r008_pending_workflow_blockers),
+    ("R009", evaluate_r009_document_coherence),
+    ("R010", evaluate_r010_scanner_flagged_current_version),
 ]
 
 
@@ -318,20 +326,21 @@ def execute_project_audit(
         # Same not-configured sentinel as completeness_score above -- -1.0,
         # never a value the real ratio can produce.
         mandatory_requirement_coverage=(satisfied_reqs_count / total_reqs) if total_reqs > 0 else -1.0,
-        approval_health=1.0 if len([f for f in all_findings if f.rule_code in ("R002", "R009")]) == 0 else 0.5,
-        dependency_health=1.0 if len([f for f in all_findings if f.rule_code in ("R003", "R005", "R006")]) == 0 else 0.0,
+        approval_health=1.0 if len([f for f in all_findings if f.rule_code in ("R002", "R008")]) == 0 else 0.5,
+        dependency_health=1.0 if len([f for f in all_findings if f.rule_code in ("R003", "R005")]) == 0 else 0.0,
         # Master Plan v2, item 13: document_health was a proxy for the
         # original R006's finding count (an "orphan entity" rule, deleted —
         # verified structurally unreachable; see the former
         # evaluate_r006_orphan_entities and this file's RULE_REGISTRY
-        # comment). R006 is now a different, real rule (Cross-Stage
-        # Reference Violation, after UI_FIXES_2026-09-15.md #32's
-        # renumbering) but this metric was never rewired to it — it stays
-        # fixed at 1.0 rather than left wired to an empty filter that would
-        # silently always equal 1.0 anyway — the column stays (nullable=False,
-        # dropping it is a schema migration outside this item's scope) but
-        # its value is explicitly constant, not computed, so a future reader
-        # isn't misled into thinking a check still backs it.
+        # comment). A second rule was later assigned the R006 code (Cross-
+        # Stage Reference Violation) but this metric was never rewired to
+        # it, and that second R006 has since been retired outright (see
+        # AUDIT_RULES_VERSION comment) — so this stays fixed at 1.0 rather
+        # than left wired to an empty filter that would silently always
+        # equal 1.0 anyway — the column stays (nullable=False, dropping it
+        # is a schema migration outside this item's scope) but its value is
+        # explicitly constant, not computed, so a future reader isn't misled
+        # into thinking a check still backs it.
         document_health=1.0,
         # version_reference_health was a proxy for R004's finding count. R004
         # is registered but has never produced a finding (see its docstring:
@@ -339,7 +348,7 @@ def execute_project_audit(
         # property), so this has always been 1.0 in practice and now is
         # documented as such rather than left implicit.
         version_reference_health=1.0,
-        conflict_health=1.0 if len([f for f in all_findings if f.rule_code == "R008"]) == 0 else 0.0,
+        conflict_health=1.0 if len([f for f in all_findings if f.rule_code == "R007"]) == 0 else 0.0,
         open_findings_by_severity=severity_counts,
         blockers_count=blockers_count,
     )
@@ -376,7 +385,7 @@ def execute_project_audit(
             # See project_snapshot.document_health above — same reason, fixed
             # at 1.0 since nothing rewired this per-stage value to a real rule.
             document_health=1.0,
-            approvals_satisfied=len([f for f in all_findings if f.target_stage_id == st_id and f.rule_code in ("R002", "R009")]) == 0,
+            approvals_satisfied=len([f for f in all_findings if f.target_stage_id == st_id and f.rule_code in ("R002", "R008")]) == 0,
             blockers_count=len(stage_blockers),
         )
 
@@ -399,7 +408,7 @@ def sync_and_audit_project(
     no live app code path ever ran it. That means for any project created and
     used through the real app (not the seeded demo), knowledge.nodes/edges was
     always empty, and every audit rule that reads the graph (R001's evidence
-    edges, R006's ALLOWED_REFERENCE, etc.) had nothing to find — not stale
+    edges, R003's DEPENDS_ON edges, etc.) had nothing to find — not stale
     data, just NO data. Re-running execute_project_audit alone would not have
     fixed that; the sync has to happen first, every time.
 
@@ -497,7 +506,7 @@ def extract_sync_and_audit_document(
             )
             db.commit()
 
-            # Item 10: cache this version's coherence assessment once — R010
+            # Item 10: cache this version's coherence assessment once — R009
             # reads the cache on every audit sweep, never calls the LLM itself.
             run_document_coherence_check(db, document_id, version_id, content)
 

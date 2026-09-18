@@ -309,10 +309,9 @@ const ProjectIntelligence = () => {
       : `${orderedStages.length} stage${orderedStages.length !== 1 ? 's' : ''}`
     : null;
 
-  const pendingApprovalCount = findings.filter((f) => f.rule_code === 'R009').length;
-  const contradictionCount = findings.filter((f) => f.rule_code === 'R008').length;
+  const pendingApprovalCount = findings.filter((f) => f.rule_code === 'R008').length;
+  const contradictionCount = findings.filter((f) => f.rule_code === 'R007').length;
   const dependencyIssueCount = findings.filter((f) => ['R003', 'R005'].includes(f.rule_code)).length;
-  const crossStageViolationCount = findings.filter((f) => f.rule_code === 'R006').length;
 
   const readinessDescription = isReady
     ? (coverageConfigured
@@ -345,18 +344,18 @@ const ProjectIntelligence = () => {
 
   // Group findings that are the same underlying issue reported once per
   // stage/document-pair into one card (UI_FIXES_2026-09-15.md #17) — e.g.
-  // three R008 contradictions against the same downstream claim, one per
+  // three R007 contradictions against the same downstream claim, one per
   // upstream stage, are one real-world problem, not three. The grouping key
   // deliberately does NOT include target_stage_id or the specific document
   // pair; it groups by what makes two findings read as "the same thing" to a
-  // person: same rule + same claim/target being contradicted (R008), or same
+  // person: same rule + same claim/target being contradicted (R007), or same
   // rule + same title/description text (everything else — e.g. the same
   // stage-reference violation flagged from two directions).
   const groupKey = (f) => {
-    if (f.rule_code === 'R008' && f.details?.subject && f.details?.predicate) {
+    if (f.rule_code === 'R007' && f.details?.subject && f.details?.predicate) {
       const a = f.details.value_a ?? '';
       const b = f.details.value_b ?? '';
-      return `R008::${f.details.subject.toLowerCase()}::${f.details.predicate.toLowerCase()}::${[a, b].sort().join('|')}`;
+      return `R007::${f.details.subject.toLowerCase()}::${f.details.predicate.toLowerCase()}::${[a, b].sort().join('|')}`;
     }
     return `${f.rule_code}::${f.title}::${f.description}`;
   };
@@ -376,13 +375,13 @@ const ProjectIntelligence = () => {
   }));
 
   // Prioritize findings:
-  // 1. Pending approval (R002, R009)
-  // 2. Material requirement contradiction (R008)
+  // 1. Pending approval (R002, R008)
+  // 2. Material requirement contradiction (R007)
   // 3. Others
   const sortedFindings = [...groupedFindings].sort((a, b) => {
     const priority = (f) => {
-      if (f.rule_code === 'R002' || f.rule_code === 'R009') return 1;
-      if (f.rule_code === 'R008') return 2;
+      if (f.rule_code === 'R002' || f.rule_code === 'R008') return 1;
+      if (f.rule_code === 'R007') return 2;
       return 3;
     };
     return priority(a) - priority(b);
@@ -540,7 +539,7 @@ const ProjectIntelligence = () => {
 
           {/* Secondary Supporting Health Dimensions (Compact Horizontal Bar) */}
           <div className="pt-3 border-t border-border/60">
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 text-xs">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 text-xs">
               <div className="rounded-lg bg-background/50 border border-border/60 p-2.5">
                 <span className="text-[11px] text-gray-400 block">Requirement Coverage</span>
                 <span className={`font-semibold mt-0.5 block ${!reqCoverageConfigured ? 'text-gray-400' : rawReqCoverage >= 1.0 ? 'text-emerald-400' : 'text-amber-400'}`}>
@@ -564,12 +563,6 @@ const ProjectIntelligence = () => {
                 <span className="text-[11px] text-gray-400 block">Claim Consistency</span>
                 <span className={`font-semibold mt-0.5 block ${contradictionCount === 0 ? 'text-emerald-400' : 'text-amber-400'}`}>
                   {contradictionCount === 0 ? 'No Conflicts' : `${contradictionCount} Conflict${contradictionCount !== 1 ? 's' : ''} Flagged`}
-                </span>
-              </div>
-              <div className="rounded-lg bg-background/50 border border-border/60 p-2.5">
-                <span className="text-[11px] text-gray-400 block">Cross-Stage Refs</span>
-                <span className={`font-semibold mt-0.5 block ${crossStageViolationCount === 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                  {crossStageViolationCount === 0 ? 'Permitted & Valid' : `${crossStageViolationCount} Violation${crossStageViolationCount !== 1 ? 's' : ''}`}
                 </span>
               </div>
             </div>
@@ -796,8 +789,8 @@ const ProjectIntelligence = () => {
               {topFindings.map((finding, idx) => {
                 const stage = stages.find((s) => s.stage_id === finding.target_stage_id);
                 const stageLabel = stage?.stage_name || finding.details?.stage_name || 'Unknown Stage';
-                const isContradiction = finding.rule_code === 'R008';
-                const isApproval = finding.rule_code === 'R002' || finding.rule_code === 'R009';
+                const isContradiction = finding.rule_code === 'R007';
+                const isApproval = finding.rule_code === 'R002' || finding.rule_code === 'R008';
                 const occurrences = finding.occurrences || [finding];
                 const isGrouped = occurrences.length > 1;
                 const isExpanded = expandedGroupIdx === idx;
@@ -1206,7 +1199,7 @@ const ProjectIntelligence = () => {
                 <Link2 size={13} className="text-primary" /> Permitted Stage References
               </p>
               <p className="text-xs text-gray-500 mb-2">
-                Allow documents in &ldquo;{editingStage.stage_name || editingStage.name}&rdquo; to reference these upstream stages without triggering R006 violations.
+                Let the Search Agent also pull content from these stages when a question is scoped to &ldquo;{editingStage.stage_name || editingStage.name}&rdquo;.
               </p>
               <div className="space-y-1">
                 {stages
