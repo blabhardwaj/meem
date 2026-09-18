@@ -22,7 +22,6 @@ used to hard-reject a total stranger before any further, more expensive
 work (e.g. a Qdrant call in retrieval.py).
 """
 
-from collections import defaultdict
 from dataclasses import dataclass
 import enum
 import uuid
@@ -544,45 +543,73 @@ class DocumentVisibility(str, enum.Enum):
 
 def classify_document_visibility(db: Session, user_id: UUID, document: Document) -> DocumentVisibility:
     """
-    The full ABAC decision for viewing a specific document — bypass, team
-    visibility, and sensitivity clearance — as a three-way outcome rather
-    than can_view_document()'s bool.
+    The full ABAC decision for viewing a specific document — bypass, stage
+    access, and sensitivity clearance — as a three-way outcome rather than
+    can_view_document()'s bool.
 
-    A stage grant (any tier) overrides the team-visibility check for
-    documents in its own stage only (spec §1.2) — it does NOT change what
-    DocumentTeamVisibility means for any other stage or any other user.
+    Stage access is the ONLY gate for sub-confidential (public/internal)
+    documents: a user has it via team_stage_access (any team they belong
+    to in this project) OR a per-user stage grant (resolve_stage_grant,
+    via the request-access workflow — lets one specific user see a
+    stage's content even when their own team has no native access).
+    DocumentTeamVisibility plays NO role in this decision — stage
+    assignment IS the document-access grant, not a separate layer on top
+    of it.
+
+    Confidential-tier documents return blocked_by_sensitivity (not
+    not_visible) when the user has stage access but insufficient
+    clearance — the Search Agent (app/services/rag/retrieval.py,
+    app/tools/rag_tools.py) relies on this exact distinction to tell a
+    user "there's relevant confidential content here, want me to request
+    access?" without ever naming the document. The document-LIST endpoint
+    (app/routers/documents.py) is a separate consumer that deliberately
+    treats blocked_by_sensitivity as excluded from the list entirely
+    (never surfaced as a filename or a locked stub) — see its own comment
+    for why. Both readings are intentional; this function's three-way
+    output does not change based on which consumer is asking.
     """
     if _is_org_admin(db, user_id):
         return DocumentVisibility.fully_allowed
     if _is_project_admin(db, user_id, document.project_id):
         return DocumentVisibility.fully_allowed
 
-    # Team visibility — document must be visible to a team the user belongs to
-    visible_team_ids = {
-        row.team_id for row in db.execute(
-            select(DocumentTeamVisibility).where(DocumentTeamVisibility.document_id == document.document_id)
-        ).scalars()
-    }
-    memberships = [
-        m for m in (_get_team_membership(db, user_id, team_id) for team_id in visible_team_ids)
-        if m is not None
-    ]
+    if document.stage_id is None:
+        return DocumentVisibility.not_visible
 
-    stage_grant = resolve_stage_grant(db, user_id, document.stage_id) if document.stage_id else None
+    user_team_ids = list(db.execute(
+        select(UserTeamMembership.team_id).where(
+            UserTeamMembership.user_id == user_id,
+            UserTeamMembership.project_id == document.project_id,
+        )
+    ).scalars())
 
-    if not memberships and stage_grant is None:
-        return DocumentVisibility.not_visible  # not on any team this document is visible to, and no stage grant either
+    has_native_stage_access = False
+    if user_team_ids:
+        has_native_stage_access = db.execute(
+            select(TeamStageAccess).where(
+                TeamStageAccess.team_id.in_(user_team_ids),
+                TeamStageAccess.stage_id == document.stage_id,
+            )
+        ).first() is not None
+
+    stage_grant = resolve_stage_grant(db, user_id, document.stage_id)
+
+    if not has_native_stage_access and stage_grant is None:
+        return DocumentVisibility.not_visible  # no stage access via team or per-user grant
 
     # Sensitivity clearance
     if document.sensitivity_level in (SensitivityLevel.public, SensitivityLevel.internal):
-        return DocumentVisibility.fully_allowed  # viewer+ can always see these
+        return DocumentVisibility.fully_allowed  # stage access alone is enough here
 
-    # confidential tier — delegate to the single shared resolver rather than
-    # re-deriving native-vs-grant precedence here. (Team visibility above has
-    # already established the user belongs to a team this document is
-    # visible to, and org_admin/project_admin were already handled above, so
-    # the resolver's own admin short-circuits cannot fire spuriously here —
-    # by this point the caller is neither.)
+    # Confidential tier: team_lead+ on a team with stage access to this
+    # stage sees it automatically; otherwise fall back to the shared
+    # resolver for an explicit grant.
+    memberships = [m for m in (_get_team_membership(db, user_id, tid) for tid in user_team_ids) if m is not None]
+    if has_native_stage_access and any(
+        _TEAM_ROLE_RANK[m.role] >= _TEAM_ROLE_RANK[TeamRole.team_lead] for m in memberships
+    ):
+        return DocumentVisibility.fully_allowed
+
     result = resolve_effective_access(db, user_id, document_id=document.document_id)
     if result.status == "granted":
         return DocumentVisibility.fully_allowed
@@ -597,6 +624,17 @@ def classify_documents_visibility(
     """
     Batch ABAC evaluation for candidate documents.
     Executes in 1-2 queries total instead of N queries per candidate document.
+
+    Stage access (native team_stage_access OR a per-user stage grant,
+    both folded into auth_context.accessible_stage_ids) is the ONLY gate
+    for sub-confidential documents — DocumentTeamVisibility plays no role.
+    Confidential documents are fully_allowed only for team_lead+ on a team
+    that natively holds this stage's access, or via an explicit grant;
+    otherwise blocked_by_sensitivity — a real, known document the caller
+    is specifically blocked from (used by the Search Agent / RAG retrieval
+    to offer a "request access" suggestion; app/routers/documents.py's
+    document-LIST endpoint is a separate consumer that deliberately
+    excludes blocked_by_sensitivity documents from what it returns).
 
     Returns:
         dict mapping each requested document_id to DocumentVisibility:
@@ -632,36 +670,28 @@ def classify_documents_visibility(
             out[doc_id] = DocumentVisibility.fully_allowed
         return out
 
-    # Step 3: Batch-fetch document team visibilities in ONE query
-    dtv_rows = db.execute(
-        select(DocumentTeamVisibility).where(
-            DocumentTeamVisibility.document_id.in_(list(doc_map.keys()))
-        )
-    ).scalars().all()
-
-    doc_visible_teams: dict[UUID, set[UUID]] = defaultdict(set)
-    for row in dtv_rows:
-        doc_visible_teams[row.document_id].add(row.team_id)
-
-    # Step 4: Evaluate visibility & sensitivity in-memory per document
+    # Step 3: Evaluate visibility & sensitivity in-memory per document
     for doc_id, document in doc_map.items():
-        visible_teams = doc_visible_teams.get(doc_id, set())
-        overlapping_teams = visible_teams & auth_context.team_ids
         stage_tier = auth_context.stage_grant_tiers.get(document.stage_id)
+        has_stage_access = document.stage_id in auth_context.accessible_stage_ids
 
-        if not overlapping_teams and stage_tier is None:
+        if not has_stage_access:
             out[doc_id] = DocumentVisibility.not_visible
             continue
 
-        # Sensitivity check: Public & Internal
+        # Sensitivity check: Public & Internal — stage access alone is
+        # enough here, independent of DocumentTeamVisibility.
         if document.sensitivity_level in (SensitivityLevel.public, SensitivityLevel.internal):
             out[doc_id] = DocumentVisibility.fully_allowed
             continue
 
         # Sensitivity check: Confidential
         if document.sensitivity_level == SensitivityLevel.confidential:
-            # Check highest role on any overlapping team
-            roles = [auth_context.team_roles.get(tid) for tid in overlapping_teams]
+            # team_lead+ on a team that NATIVELY holds this stage (a stage
+            # reachable only via a per-user grant does not itself confer
+            # team_lead auto-unlock — only real team membership does).
+            native_team_ids = auth_context.native_stage_team_ids.get(document.stage_id, set())
+            roles = [auth_context.team_roles.get(tid) for tid in native_team_ids]
             max_rank = max((_TEAM_ROLE_RANK[r] for r in roles if r in _TEAM_ROLE_RANK), default=-1)
 
             if max_rank >= _TEAM_ROLE_RANK[TeamRole.team_lead]:
@@ -673,7 +703,7 @@ def classify_documents_visibility(
             # contributor_confidential tier.
             if (
                 doc_id in auth_context.active_confidential_grant_document_ids
-                or overlapping_teams & auth_context.active_confidential_grant_team_ids
+                or auth_context.team_ids & auth_context.active_confidential_grant_team_ids
                 or stage_tier == GrantTier.contributor_confidential
             ):
                 out[doc_id] = DocumentVisibility.fully_allowed
@@ -701,33 +731,25 @@ def can_view_document(db: Session, user_id: UUID, document: Document) -> bool:
 def build_access_filter(db: Session, user_id: UUID, project_id: UUID):
     """
     Returns a SQLAlchemy filter condition for querying documents within a
-    project — the COARSE narrowing only: tenant, project, team-visibility,
-    and stage access. Sensitivity is deliberately NOT filtered here; that
-    decision belongs entirely to can_view_document()'s per-row check
-    (team_lead+ sees confidential automatically, contributor only with an
-    active grant, viewer never). Callers must still run each returned row
+    project — the COARSE narrowing only: tenant, project, and stage access.
+    Sensitivity is deliberately NOT filtered here; that decision belongs
+    entirely to can_view_document()'s per-row check (team_lead+ on a team
+    with native stage access sees confidential automatically, otherwise
+    only with an active grant). Callers must still run each returned row
     through can_view_document().
 
     For org_admin/project_admin, returns a filter scoped only to
     tenant/project (full visibility within that scope).
 
-    UI_FIXES_2026-09-15.md: a regular user's team can be visible to a
-    document (DocumentTeamVisibility) without that user having access to the
-    document's *stage* (team_stage_access) — team visibility and stage
-    access are two separate grants. Previously this filter checked only the
-    former, so a document sitting in an inaccessible stage still slipped
-    through here (the Sources panel would render its stage as "Unspecified"
-    — /workspace's stage list IS correctly scoped by
-    get_accessible_stages_for_user — while the document itself, wrongly,
-    remained visible). Now also requires the document's stage_id be in the
-    caller's accessible-stages set.
-
-    A stage grant (any tier) overrides the DocumentTeamVisibility
-    requirement for documents in its own stage only (spec §1.2) — the
-    document must still fall within accessible_stage_ids, which already
-    includes grant stages via get_accessible_stages_for_user().
+    Stage access (native team_stage_access via any of the user's teams, OR
+    a per-user stage grant from the request-access workflow) is the ONLY
+    gate here — a stage assignment IS the document-access grant, not a
+    separate DocumentTeamVisibility layer on top of it. A document whose
+    stage the user cannot access never reaches this filter at all,
+    regardless of sensitivity; can_view_document() then makes the final
+    per-row sensitivity call for documents whose stage DID pass through.
     """
-    from sqlalchemy import and_, or_
+    from sqlalchemy import and_
 
     user = db.get(User, user_id)
 
@@ -737,40 +759,17 @@ def build_access_filter(db: Session, user_id: UUID, project_id: UUID):
     if _is_project_admin(db, user_id, project_id):
         return and_(Document.tenant_id == user.tenant_id, Document.project_id == project_id)
 
-    # Regular user: must be on a team the document is visible to, OR the
-    # document's stage must be one this user holds an active grant for.
-    user_team_ids = [
-        row.team_id for row in db.execute(
-            select(UserTeamMembership).where(
-                UserTeamMembership.user_id == user_id,
-                UserTeamMembership.project_id == project_id,
-            )
-        ).scalars()
-    ]
-    grant_stage_ids = list(get_active_stage_grants_for_user(db, user_id).keys())
-    if not user_team_ids and not grant_stage_ids:
-        return Document.document_id == None  # no access — matches nothing
-
     accessible_stage_ids = get_accessible_stages_for_user(db, user_id, project_id)
     if not accessible_stage_ids:
         return Document.document_id == None  # no access — matches nothing
 
-    visible_doc_ids_subquery = (
-        select(DocumentTeamVisibility.document_id)
-        .where(DocumentTeamVisibility.team_id.in_(user_team_ids))
-    )
-
     return and_(
         Document.tenant_id == user.tenant_id,
         Document.project_id == project_id,
-        or_(
-            Document.document_id.in_(visible_doc_ids_subquery),
-            Document.stage_id.in_(grant_stage_ids),
-        ),
         Document.stage_id.in_(accessible_stage_ids),
-        # NOTE: no sensitivity condition — every doc visible to the user's
-        # teams (public, internal AND confidential) passes through here;
-        # can_view_document() makes the final per-row call.
+        # NOTE: no sensitivity condition — every doc in an accessible stage
+        # (public, internal AND confidential) passes through here;
+        # can_view_document() makes the final per-row sensitivity call.
     )
 
 def _coerce_sensitivity(value: "SensitivityLevel | int | str") -> SensitivityLevel:

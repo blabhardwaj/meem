@@ -48,6 +48,12 @@ class AuthorizationContext:
     team_roles: dict[uuid.UUID, TeamRole] = field(default_factory=dict)
 
     accessible_stage_ids: set[uuid.UUID] = field(default_factory=set)
+    # stage_id -> set of the user's own team_ids that hold NATIVE
+    # team_stage_access to that stage (excludes stages reachable only via a
+    # per-user stage grant) — used to find the user's highest role among
+    # teams that actually grant them this stage, for the confidential
+    # team_lead+ auto-unlock check.
+    native_stage_team_ids: dict[uuid.UUID, set[uuid.UUID]] = field(default_factory=dict)
     clearance_level: SensitivityLevel | str | None = None
     active_confidential_grant_team_ids: set[uuid.UUID] = field(default_factory=set)
     active_confidential_grant_document_ids: set[uuid.UUID] = field(default_factory=set)
@@ -104,6 +110,7 @@ def build_authorization_context(
     from app.services.access_control import get_active_stage_grants_for_user
 
     stage_grant_tiers: dict[uuid.UUID, GrantTier] = {}
+    native_stage_team_ids: dict[uuid.UUID, set[uuid.UUID]] = {}
     if is_org_admin or is_project_admin:
         stage_rows = db.execute(
             select(Stage.stage_id).where(
@@ -115,16 +122,17 @@ def build_authorization_context(
     else:
         accessible_stage_ids = set()
         if team_ids:
-            stage_rows = db.execute(
-                select(TeamStageAccess.stage_id)
+            tsa_rows = db.execute(
+                select(TeamStageAccess.stage_id, TeamStageAccess.team_id)
                 .join(Stage, Stage.stage_id == TeamStageAccess.stage_id)
                 .where(
                     TeamStageAccess.team_id.in_(team_ids),
                     Stage.deleted_at.is_(None),
                 )
-                .distinct()
-            ).scalars().all()
-            accessible_stage_ids = set(stage_rows)
+            ).all()
+            for stage_id, team_id in tsa_rows:
+                native_stage_team_ids.setdefault(stage_id, set()).add(team_id)
+            accessible_stage_ids = set(native_stage_team_ids.keys())
 
         stage_grants = get_active_stage_grants_for_user(db, user_id)
         if stage_grants:
@@ -181,6 +189,7 @@ def build_authorization_context(
         team_ids=team_ids,
         team_roles=team_roles,
         accessible_stage_ids=accessible_stage_ids,
+        native_stage_team_ids=native_stage_team_ids,
         clearance_level=clearance,
         active_confidential_grant_team_ids=active_confidential_grant_team_ids,
         active_confidential_grant_document_ids=active_confidential_grant_document_ids,
