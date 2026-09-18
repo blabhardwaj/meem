@@ -156,13 +156,28 @@ def _derive_document_team(db: Session, document_id: uuid.UUID) -> uuid.UUID | No
 
 def _derive_stage_team(db: Session, user_id: uuid.UUID, stage_id: uuid.UUID) -> uuid.UUID | None:
     """
-    The team responsible for approving a stage-scoped request: among the
-    teams with TeamStageAccess to this stage, the one the requester
-    themselves already belongs to (viewer/contributor), earliest grant
-    first if more than one qualifies. team_id here is approval-routing
-    metadata only — it is never part of the stage request's own identity
-    (that's stage_id alone; dedup/effective-state resolution is keyed by
-    stage_id, not by this derived team_id).
+    The team attached to a stage-scoped request for routing/display
+    purposes only — AccessRequest.team_id is non-nullable, but it is never
+    part of the request's own identity (that's stage_id alone; dedup and
+    effective-state resolution are keyed by stage_id, not by this derived
+    team_id) and approval is never gated on being THIS team's lead: a
+    project_admin/org_admin can decide any request regardless of team_id
+    (has_permission()'s existing bypass), which is exactly the path a
+    requester whose own team has zero access to the stage relies on.
+
+    Preference order: a team with TeamStageAccess to this stage that the
+    requester themselves already belongs to (earliest grant first) — this
+    is the common "upgrade my clearance within a stage I'm already on"
+    case, where the natural approver is that team's own lead. Falling
+    back to ANY team with TeamStageAccess to the stage (earliest first)
+    covers the requester having none at all — there's no team lead to ask
+    in that case, so the request surfaces to project admins only, but it
+    still needs a real team_id to attach.
+
+    Returns None only if the stage has no TeamStageAccess grants
+    whatsoever (nothing to attach to) — the caller must handle this by
+    routing to project-admin-only approval without a team, or rejecting
+    with a clear message; there is no team_id to derive.
     """
     from app.models.stage import TeamStageAccess
 
@@ -171,10 +186,12 @@ def _derive_stage_team(db: Session, user_id: uuid.UUID, stage_id: uuid.UUID) -> 
         .where(TeamStageAccess.stage_id == stage_id)
         .order_by(TeamStageAccess.created_at.asc())
     ).scalars().all()
+    if not access_rows:
+        return None
     for row in access_rows:
         if _get_team_membership(db, user_id, row.team_id) is not None:
             return row.team_id
-    return None
+    return access_rows[0].team_id
 
 
 def request_confidential_access(
@@ -184,6 +201,7 @@ def request_confidential_access(
     team_id: uuid.UUID | None = None,
     document_id: uuid.UUID | None = None,
     stage_id: uuid.UUID | None = None,
+    reason: str | None = None,
     expected_tenant_id: uuid.UUID | None = None,
 ) -> AccessRequest:
     """
@@ -232,7 +250,7 @@ def request_confidential_access(
         scope = AccessRequestScope.stage
         resolved_team_id = _derive_stage_team(db, user_id, stage_id)
         if resolved_team_id is None:
-            raise AccessRequestError("You are not a member of any team with access to this stage", status_code=403)
+            raise AccessRequestError("This stage has no team assigned yet — ask a project admin to assign a team before requesting access.", status_code=409)
     else:
         scope = AccessRequestScope.team
         resolved_team_id = team_id
@@ -248,7 +266,15 @@ def request_confidential_access(
     is_proj_admin = _is_project_admin(db, user_id, project.project_id)
     membership: UserTeamMembership | None = _get_team_membership(db, user_id, resolved_team_id)
 
-    if membership is None and not is_proj_admin and not is_org_admin:
+    # For stage scope, resolved_team_id is approval-routing metadata (see
+    # _derive_stage_team) — it may legitimately be a team the requester is
+    # NOT on at all (their own team has zero access to the stage, so an
+    # unrelated team with access is attached purely so a real team_id
+    # exists and a project_admin can still see/decide the request). The
+    # "must be a member of the resolved team" rule below only makes sense
+    # for document/team scope, where resolved_team_id IS the requester's
+    # own relevant team.
+    if scope != AccessRequestScope.stage and membership is None and not is_proj_admin and not is_org_admin:
         raise AccessRequestError("You are not a member of this team", status_code=403)
 
     if is_org_admin or is_proj_admin or (
@@ -295,6 +321,7 @@ def request_confidential_access(
         user_id=user_id, team_id=resolved_team_id, scope=scope,
         document_id=document_id, stage_id=stage_id,
         status=AccessRequestStatus.pending,
+        reason=reason,
     )
     db.add(req)
     db.flush()
@@ -304,11 +331,11 @@ def request_confidential_access(
         action="REQUEST_CONFIDENTIAL_ACCESS",
         resource_type="team",
         resource_id=team.team_id,
-        details={"team": team.name, "project": project.name, "scope": scope.value},
+        details={"team": team.name, "project": project.name, "scope": scope.value, "reason": reason},
     )
     notify_access_request_created(
         db, team_id=team.team_id, team_name=team.name, project_id=project.project_id,
-        requester_id=user_id, request_id=req.request_id,
+        requester_id=user_id, request_id=req.request_id, reason=reason,
     )
     db.commit()
     db.refresh(req)
