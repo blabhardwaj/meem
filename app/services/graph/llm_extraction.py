@@ -22,7 +22,7 @@ schema change needed):
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, Optional
 
 from groq import Groq
 
@@ -182,6 +182,76 @@ def extract_references_llm(
     if not isinstance(raw, list):
         return []
 
+    # Self-consistency guard: the model occasionally reasons correctly about
+    # WHICH document/requirement it means, then emits the WRONG target_id for
+    # it — e.g. reason="Mentions the Revenue Model document
+    # (03-instant-payouts-revenue-model.md)..." attached to a target_id that
+    # actually resolves to the PRD, or reason="Cites the Threat Model for
+    # concurrency mitigation" attached to a target_id that resolves to the
+    # Business Case. The reason text is free-form prose the model isn't
+    # otherwise constrained on, so when it happens to name another
+    # candidate's filename OR title, that's a free, strong signal to
+    # cross-check against — if a DIFFERENT candidate's filename/title is
+    # named and the actual target's is not, the model contradicted itself
+    # and the edge is discarded rather than trusted. This only catches the
+    # subset of mistakes where the reason happens to name something
+    # identifiable; it's a real but partial safety net, not a general
+    # correctness guarantee.
+    filename_by_doc_id = {d["id"]: d["filename"] for d in candidate_documents}
+
+    def _title_from_filename(filename: str) -> str:
+        # "10-instant-payouts-test-plan.md" -> "instant payouts test plan"
+        stem = re.sub(r"\.(?:md|pdf|docx|txt)$", "", filename, flags=re.IGNORECASE)
+        stem = re.sub(r"^\d+[-_]?", "", stem)
+        return re.sub(r"[-_]+", " ", stem).strip().lower()
+
+    raw_titles_by_id = {d["id"]: _title_from_filename(d["filename"]) for d in candidate_documents}
+
+    # Project documents in this codebase's real usage share a long common
+    # prefix ("instant payouts ...", "dispute autotag ..."), which drowns out
+    # the actually-distinguishing words a reason would naturally use ("threat
+    # model" vs "instant payouts threat model" never appearing verbatim).
+    # Strip whatever leading words are identical across EVERY candidate
+    # title before matching, so what's left is the part that actually
+    # distinguishes one document from another.
+    title_word_lists = [t.split() for t in raw_titles_by_id.values() if t]
+    common_prefix_len = 0
+    if len(title_word_lists) > 1:
+        for i in range(min(len(w) for w in title_word_lists)):
+            if len({w[i] for w in title_word_lists}) == 1:
+                common_prefix_len = i + 1
+            else:
+                break
+    doc_titles_by_id = {
+        doc_id: " ".join(title.split()[common_prefix_len:])
+        for doc_id, title in raw_titles_by_id.items()
+    }
+    filename_pattern = re.compile(r"\b[\w][\w\-]*\.(?:md|pdf|docx|txt)\b", re.IGNORECASE)
+
+    def _mentions_a_different_document(reason_lower: str, target_id: str) -> Optional[str]:
+        """Returns the wrongly-mentioned filename/title if the reason clearly
+        names a DIFFERENT candidate document than target_id, else None."""
+        target_title = doc_titles_by_id.get(target_id, "")
+        for other_id, other_filename in filename_by_doc_id.items():
+            if other_id == target_id:
+                continue
+            if other_filename.lower() in reason_lower:
+                return other_filename
+            other_title = doc_titles_by_id.get(other_id, "")
+            # Only trust a bare-title match when it's reasonably specific
+            # (2+ distinguishing words, after stripping the shared project
+            # prefix) and the target's own distinguishing title words aren't
+            # ALSO present — a document correctly discussing its own subject
+            # matter will usually mention its own title too, so requiring
+            # the target's title to be ABSENT avoids flagging that case.
+            if (
+                other_title and len(other_title.split()) >= 2
+                and other_title in reason_lower
+                and (not target_title or target_title not in reason_lower)
+            ):
+                return other_title
+        return None
+
     results = []
     for item in raw:
         if not isinstance(item, dict):
@@ -190,6 +260,7 @@ def extract_references_llm(
         target_id = item.get("target_id")
         relationship = item.get("relationship")
         confidence = item.get("confidence")
+        reason = str(item.get("reason", ""))
 
         if target_type not in ("document", "requirement"):
             continue
@@ -204,12 +275,29 @@ def extract_references_llm(
         if confidence < LOW_CONFIDENCE_FLOOR:
             continue
 
+        if target_type == "document":
+            target_filename = filename_by_doc_id.get(target_id)
+            mentioned_filenames = filename_pattern.findall(reason)
+            if target_filename and mentioned_filenames and target_filename not in mentioned_filenames:
+                logger.warning(
+                    "Discarding self-inconsistent LLM edge: reason names %s but target_id resolves to %s (reason: %s)",
+                    mentioned_filenames, target_filename, reason,
+                )
+                continue
+            wrong_mention = _mentions_a_different_document(reason.lower(), target_id)
+            if wrong_mention:
+                logger.warning(
+                    "Discarding self-inconsistent LLM edge: reason appears to name %r but target_id resolves to %s (reason: %s)",
+                    wrong_mention, target_filename, reason,
+                )
+                continue
+
         results.append({
             "target_type": target_type,
             "target_id": target_id,
             "relationship": relationship,
             "confidence": float(confidence),
-            "reason": str(item.get("reason", ""))[:500],
+            "reason": reason[:500],
         })
 
     return results
