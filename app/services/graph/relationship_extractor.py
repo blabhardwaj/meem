@@ -296,7 +296,7 @@ def extract_document_relationships(
         doc_by_id = {str(d.document_id): d for d in all_other_docs}
         req_by_id = {str(r.requirement_id): r for r in all_reqs}
 
-        llm_results = extract_references_llm(content, candidate_documents, candidate_requirements)
+        llm_results = extract_references_llm(content, candidate_documents, candidate_requirements, doc_label)
         for item in llm_results:
             if item["target_type"] == "document":
                 target = doc_by_id.get(item["target_id"])
