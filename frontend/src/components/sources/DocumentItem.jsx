@@ -3,7 +3,7 @@ import { FileText, File, FileImage, FileSpreadsheet, Send, ClipboardCheck, Histo
 import Badge from '../ui/Badge';
 import Button from '../ui/Button';
 import Modal from '../ui/Modal';
-import DocumentViewerModal from './DocumentViewerModal';
+import DocumentViewerModal, { VersionContentModal } from './DocumentViewerModal';
 import DocumentReviewModal from './DocumentReviewModal';
 import VersionDiffModal, { DiffStats } from './VersionDiffModal';
 import Dropdown from '../ui/Dropdown';
@@ -94,6 +94,7 @@ const DocumentItem = ({ document, canReview, canOverrideScan = false, canDelete,
   const [versionError, setVersionError] = useState('');
   const versionInputRef = useRef(null);
   const [viewerOpen, setViewerOpen] = useState(false);
+  const [previewVersion, setPreviewVersion] = useState(null); // { version_id, label } — single-version preview from the versions list
   const [reviewOpen, setReviewOpen] = useState(false);
   const [diffReview, setDiffReview] = useState(null); // upload-version outcome, while VersionDiffModal is open
   // Two-version compare (pick "from"/"to" from the version list, diffed
@@ -382,13 +383,10 @@ const DocumentItem = ({ document, canReview, canOverrideScan = false, canDelete,
                       variant="ghost"
                       icon={Eye}
                       className="h-7 px-2 text-xs"
-                      onClick={() => {
-                        setCompareOpen(true);
-                        setCompareToId(version.version_id);
-                        if (compareFromId && compareFromId !== version.version_id) {
-                          runCompare(compareFromId, version.version_id);
-                        }
-                      }}
+                      onClick={() => setPreviewVersion({
+                        version_id: version.version_id,
+                        label: `${document.filename} — ${versionDisplayLabel(version)}`,
+                      })}
                     >
                       View
                     </Button>
@@ -483,6 +481,15 @@ const DocumentItem = ({ document, canReview, canOverrideScan = false, canDelete,
         <DocumentViewerModal
           documentId={document.document_id}
           onClose={() => setViewerOpen(false)}
+        />
+      )}
+
+      {previewVersion && (
+        <VersionContentModal
+          documentId={document.document_id}
+          versionId={previewVersion.version_id}
+          versionLabel={previewVersion.label}
+          onClose={() => setPreviewVersion(null)}
         />
       )}
 

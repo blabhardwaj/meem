@@ -163,4 +163,65 @@ const DocumentViewerModal = ({ documentId, onClose }) => {
   );
 };
 
+// Single-version read-only preview, opened from the version history list's
+// own "View" button — distinct from DocumentViewerModal above (which always
+// shows the document's CURRENT version) and from VersionDiffModal's compare
+// panel (which shows a diff between two chosen versions, not one version's
+// content).
+export const VersionContentModal = ({ documentId, versionId, versionLabel, onClose }) => {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+    setData(null);
+    documentsApi.versionContent(documentId, versionId)
+      .then((result) => { if (!cancelled) setData(result); })
+      .catch((err) => { if (!cancelled) setError(err.message || 'Could not load this version.'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [documentId, versionId]);
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-[90] flex items-center justify-center p-4">
+      <div className="fixed inset-0 bg-background/80 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative z-[91] flex w-full max-w-3xl max-h-[85vh] flex-col rounded-xl border border-border bg-surface shadow-2xl">
+        <div className="flex items-start justify-between gap-3 border-b border-border/50 p-4">
+          <div className="flex items-start gap-3 min-w-0">
+            <div className="mt-0.5 rounded-lg bg-background p-2 text-primary shrink-0">
+              <FileText size={18} />
+            </div>
+            <div className="min-w-0">
+              <h2 className="text-base font-semibold text-gray-100 truncate">{versionLabel || 'Version'}</h2>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="rounded-md p-2 text-gray-400 hover:text-gray-100 hover:bg-surface-hover transition-colors shrink-0"
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="overflow-y-auto scrollbar-thin p-6 space-y-5">
+          {loading && <p className="text-sm text-gray-500">Loading...</p>}
+          {error && <p className="text-sm text-red-400">{error}</p>}
+          {data && <MarkdownMessage content={data.content_markdown} />}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export default DocumentViewerModal;

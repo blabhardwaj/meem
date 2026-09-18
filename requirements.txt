@@ -13,4 +13,7 @@ tokenizers==0.22.2  # explicit: used directly for untruncated token counts (chun
 reportlab==5.0.1  # test-only: generates a real PDF for scripts/verify_document_upload_review.py
 slowapi==0.1.9
 python-magic-bin==0.4.14
+groq>=0.11.0  # used directly in draft_generator.py, rag/generation.py, graph/llm_extraction.py, etc.
+agno>=1.2.0  # agent framework backing app/agents/* (drafting, RAG, revision, scanner)
+docling>=2.0.0  # PDF/DOCX -> markdown parsing, app/services/document_parser.py
 

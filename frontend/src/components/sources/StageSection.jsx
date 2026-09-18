@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { ChevronDown, ShieldCheck, Settings2, ListChecks } from 'lucide-react';
 import Badge from '../ui/Badge';
 import Button from '../ui/Button';
