@@ -50,21 +50,13 @@ export const SearchChatProvider = ({ children }) => {
       entry.loadPromise = chatApi
         .sessions(projectId, 'search')
         .then((items) => {
+          // The session LIST loads eagerly (so the history panel has
+          // something to show), but the most recent conversation is
+          // deliberately NOT auto-opened -- a fresh mount always starts on
+          // an empty "new conversation" instead, past chats are reachable
+          // via the history list itself (selectConversation).
           entry.sessions = items;
           entry.historyLoaded = true;
-          if (items[0] && entry.sessionId === null) {
-            entry.sessionId = items[0].session_id;
-            return chatApi.messages(items[0].session_id).then((msgs) => {
-              entry.messages = msgs.map((item) => ({
-                id: item.message_id,
-                text: item.content,
-                sender: item.role === 'user' ? 'user' : 'bot',
-                markdown: item.role !== 'user',
-              }));
-              rerender();
-              return entry;
-            });
-          }
           rerender();
           return entry;
         })

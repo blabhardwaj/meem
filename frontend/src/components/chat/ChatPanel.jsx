@@ -190,33 +190,20 @@ const ChatPanel = ({ projectId, mode = 'search', reviewSession = null, initialQu
       return undefined;
     }
 
-    // Draft: reload conversations for this user+project so past
-    // conversations can be viewed and resumed.
+    // Draft: load the session LIST for this user+project so past
+    // conversations are reachable, but deliberately don't auto-open the
+    // most recent one -- a fresh mount always starts on an empty "new
+    // conversation" instead (a fresh draftSessionId, no messages loaded),
+    // past chats are reachable via the history list itself (selectSession).
     let cancelled = false;
     setHistoryLoading(true);
     setMessages([]);
     setSessionId(null);
+    setDraftSessionId(newSessionId());
 
     chatApi.sessions(projectId, 'draft')
       .then((items) => {
-        if (cancelled) return [];
-        setSessions(items);
-        if (items[0]) {
-          const firstId = items[0].session_id;
-          setSessionId(firstId);
-          setDraftSessionId(firstId);
-          return chatApi.messages(firstId);
-        }
-        setDraftSessionId(newSessionId());
-        return [];
-      })
-      .then((items) => {
-        if (!cancelled && items && items.length > 0) setMessages(items.map((item) => ({
-          id: item.message_id,
-          text: item.content,
-          sender: item.role === 'user' ? 'user' : 'bot',
-          markdown: item.role !== 'user',
-        })));
+        if (!cancelled) setSessions(items);
       })
       .catch(() => {
         if (!cancelled) setSessions([]);
