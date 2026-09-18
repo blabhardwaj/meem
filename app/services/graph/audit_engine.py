@@ -1,7 +1,7 @@
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -16,8 +16,10 @@ from app.models.graph import (
 from app.models.project import Project
 from app.models.stage import Stage
 from app.models.required_document import RequiredDocument
+from app.models.requirement_satisfaction import RequirementSatisfaction
 from app.services.graph.audit_rules import (
     FindingSpec,
+    _resolve_requirement_evidence,
     evaluate_r001_missing_mandatory_requirements,
     evaluate_r002_unapproved_documents_in_gate_stages,
     evaluate_r003_broken_stage_dependencies,
@@ -140,18 +142,67 @@ def execute_project_audit(
     else:
         evaluated_stage_ids = [s.stage_id for s in active_stages]
 
+    # 2.5. Precompute evidence resolution once per requirement in scope —
+    # the single evaluation both R001 (finding generation) and
+    # RequirementSatisfaction persistence (below, step 6.5) read, so the two
+    # can never disagree about what counts as evidence. Mandatory AND
+    # optional requirements alike are resolved here; R001 only acts on the
+    # mandatory ones, but the satisfaction table covers every requirement.
+    # A requirement whose graph Node doesn't exist yet (sync_project_graph
+    # hasn't run since it was created) has no entry in this map at all —
+    # "not yet evaluable," not "no evidence" — mirroring R001's own
+    # pre-existing silent-skip behavior for that case.
+    all_reqs_in_scope = (
+        db.query(RequiredDocument)
+        .join(Stage, Stage.stage_id == RequiredDocument.stage_id)
+        .filter(Stage.stage_id.in_(evaluated_stage_ids), Stage.deleted_at.is_(None))
+        .all()
+    )
+    evidence_by_requirement: Dict[uuid.UUID, Optional[Tuple[uuid.UUID, str]]] = {}
+    for req in all_reqs_in_scope:
+        req_node = (
+            db.query(Node)
+            .filter(
+                Node.tenant_id == tenant_id,
+                Node.project_id == project_id,
+                Node.source_table == "required_documents",
+                Node.source_id == req.requirement_id,
+            )
+            .first()
+        )
+        if not req_node:
+            continue
+        evidence_by_requirement[req.requirement_id] = _resolve_requirement_evidence(
+            db, tenant_id, project_id, req_node, req, set(evaluated_stage_ids),
+        )
+
     # 3. Evaluate Deterministic Rules via Explicit Registry
     all_findings: List[FindingSpec] = []
     rules_evaluated_count = len(RULE_REGISTRY)
 
     for rule_code, rule_fn in RULE_REGISTRY:
-        rule_findings = rule_fn(
-            db=db,
-            tenant_id=tenant_id,
-            project_id=project_id,
-            evaluated_stage_ids=evaluated_stage_ids,
-            stage_name_map=stage_name_map,
-        )
+        # R001 is the one deliberate exception to every rule sharing an
+        # identical signature — it's the only rule with a second consumer
+        # (RequirementSatisfaction persistence, below) needing its
+        # evaluation-time evidence resolution, so it alone takes the
+        # precomputed evidence_by_requirement map.
+        if rule_code == "R001":
+            rule_findings = rule_fn(
+                db=db,
+                tenant_id=tenant_id,
+                project_id=project_id,
+                evaluated_stage_ids=evaluated_stage_ids,
+                stage_name_map=stage_name_map,
+                evidence_by_requirement=evidence_by_requirement,
+            )
+        else:
+            rule_findings = rule_fn(
+                db=db,
+                tenant_id=tenant_id,
+                project_id=project_id,
+                evaluated_stage_ids=evaluated_stage_ids,
+                stage_name_map=stage_name_map,
+            )
         all_findings.extend(rule_findings)
 
 
@@ -232,6 +283,30 @@ def execute_project_audit(
             details=f.details,
         )
         db.add(finding)
+
+    # 6.5. Rewrite RequirementSatisfaction as a current-state projection —
+    # delete-then-insert for every requirement in scope, NOT an accumulating
+    # history like AuditFinding above. audit_run_id is provenance only
+    # ("which run last confirmed this"); requirement_id is unique, so a row
+    # can never outlive the evidence that produced it once the next audit
+    # run replaces it. Independent of R001 — reads the same
+    # evidence_by_requirement map computed in step 2.5, covering mandatory
+    # AND optional requirements alike, regardless of what R001 does with it.
+    db.query(RequirementSatisfaction).filter(
+        RequirementSatisfaction.requirement_id.in_(
+            [req.requirement_id for req in all_reqs_in_scope]
+        )
+    ).delete(synchronize_session=False)
+    for requirement_id, evidence in evidence_by_requirement.items():
+        if evidence is None:
+            continue
+        document_id, matched_via = evidence
+        db.add(RequirementSatisfaction(
+            requirement_id=requirement_id,
+            document_id=document_id,
+            matched_via=matched_via,
+            audit_run_id=audit_run.run_id,
+        ))
 
     # 7. Persist Historical Project & Stage Metric Snapshots
     project_snapshot = ProjectMetricSnapshot(
