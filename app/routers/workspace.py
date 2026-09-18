@@ -37,6 +37,13 @@ class StageOut(BaseModel):
     stage_id: str
     name: str
     order_index: int
+    # Whether the caller has team_stage_access to this specific stage (or
+    # bypasses via org_admin/project_admin) — mirrors app/routers/stages.py's
+    # StageOut.has_access exactly (this is a second, duplicate serialization
+    # of the same Stage rows for the frontend's workspace bootstrap call).
+    # A stage's NAME is visible to every project member regardless; when
+    # false, the fields below are deliberately zeroed, not the real values.
+    has_access: bool = True
     requires_approval: bool
     references: list[str] = []  # stage_ids this stage references (one-way)
     team_access: list[str] = []  # team_ids granted access to this stage
@@ -103,30 +110,37 @@ def get_workspace(
                 for m in memberships_by_project.get(pid, [])
             ]
 
-        # ENFORCEMENT POINT B: a regular user only sees stages accessible via
-        # ANY of their team memberships in this project (team_stage_access
-        # union). org_admin/project_admin bypass — get_accessible_stages_for_user()
-        # returns every active stage for them, unfiltered.
+        # ENFORCEMENT POINT B: every active stage in the project is returned
+        # to every project member -- a stage's name/existence is not
+        # privileged, only its contents/roster are. has_access (per stage)
+        # reflects team_stage_access (ANY of the caller's team memberships)
+        # union'd with any per-user stage grant, via
+        # get_accessible_stages_for_user(); org_admin/project_admin bypass
+        # entirely. references/team_access are zeroed below for any stage
+        # the caller lacks access to, so this never leaks a locked stage's
+        # roster/references -- only that it exists, letting the frontend
+        # offer a "request access" affordance for it. Mirrors
+        # app/routers/stages.py's list_stages() exactly -- this endpoint is
+        # a second, duplicate serialization of the same Stage rows for the
+        # frontend's workspace bootstrap call.
         accessible_ids = set(get_accessible_stages_for_user(db, identity.user_id, pid))
-        stages = [
-            s for s in db.execute(
-                select(Stage)
-                .where(Stage.project_id == pid, Stage.deleted_at.is_(None))
-                .order_by(Stage.order_index)
-            ).scalars().all()
-            if s.stage_id in accessible_ids
-        ]
+        all_stages = db.execute(
+            select(Stage)
+            .where(Stage.project_id == pid, Stage.deleted_at.is_(None))
+            .order_by(Stage.order_index)
+        ).scalars().all()
+        accessible_stages = [s for s in all_stages if s.stage_id in accessible_ids]
         refs_by_stage: dict[uuid.UUID, list[str]] = {}
         for sr in db.execute(
             select(StageReference).where(
-                StageReference.stage_id.in_([s.stage_id for s in stages])
+                StageReference.stage_id.in_([s.stage_id for s in accessible_stages])
             )
         ).scalars():
             refs_by_stage.setdefault(sr.stage_id, []).append(str(sr.references_stage_id))
         team_access_by_stage: dict[uuid.UUID, list[str]] = {}
         for ta in db.execute(
             select(TeamStageAccess).where(
-                TeamStageAccess.stage_id.in_([s.stage_id for s in stages])
+                TeamStageAccess.stage_id.in_([s.stage_id for s in accessible_stages])
             )
         ).scalars():
             team_access_by_stage.setdefault(ta.stage_id, []).append(str(ta.team_id))
@@ -140,11 +154,12 @@ def get_workspace(
                     stage_id=str(s.stage_id),
                     name=s.name,
                     order_index=s.order_index,
-                    requires_approval=s.requires_approval,
-                    references=refs_by_stage.get(s.stage_id, []),
-                    team_access=team_access_by_stage.get(s.stage_id, []),
+                    has_access=(s.stage_id in accessible_ids),
+                    requires_approval=s.requires_approval if s.stage_id in accessible_ids else False,
+                    references=refs_by_stage.get(s.stage_id, []) if s.stage_id in accessible_ids else [],
+                    team_access=team_access_by_stage.get(s.stage_id, []) if s.stage_id in accessible_ids else [],
                 )
-                for s in stages
+                for s in all_stages
             ],
         ))
 

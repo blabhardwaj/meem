@@ -74,6 +74,14 @@ class StageOut(BaseModel):
     project_id: str
     name: str
     order_index: int
+    # Whether the caller has team_stage_access to this specific stage (or
+    # bypasses via org_admin/project_admin). A stage's NAME is visible to
+    # every project member regardless -- seeing that a stage exists is not
+    # privileged, only its contents/details are. When false, the fields
+    # below are deliberately zeroed rather than reflecting real values, so
+    # a locked-out user can see the stage exists and request access without
+    # learning who's on it or how much content is behind it.
+    has_access: bool = True
     requires_approval: bool
     document_count: int
     # Stage IDs this stage references (one-way, same project). Drives RAG scope.
@@ -191,12 +199,29 @@ def _serialize(
     doc_count: int,
     refs: list[uuid.UUID] | None = None,
     team_access: list[uuid.UUID] | None = None,
+    has_access: bool = True,
 ) -> StageOut:
+    if not has_access:
+        # Name/order/id only -- everything else deliberately zeroed, not
+        # the real value, so an inaccessible stage's contents/roster never
+        # leak through this endpoint.
+        return StageOut(
+            stage_id=str(stage.stage_id),
+            project_id=str(stage.project_id),
+            name=stage.name,
+            order_index=stage.order_index,
+            has_access=False,
+            requires_approval=False,
+            document_count=0,
+            references=[],
+            team_access=[],
+        )
     return StageOut(
         stage_id=str(stage.stage_id),
         project_id=str(stage.project_id),
         name=stage.name,
         order_index=stage.order_index,
+        has_access=True,
         requires_approval=stage.requires_approval,
         document_count=doc_count,
         references=[str(x) for x in (refs or [])],
@@ -216,19 +241,28 @@ def list_stages(
     if not _can_see_project(db, identity, project_id):
         raise HTTPException(status_code=403, detail="You do not have access to this project")
 
-    # ENFORCEMENT POINT B: a regular user only sees stages accessible via ANY
-    # of their team memberships in this project (team_stage_access union).
-    # org_admin/project_admin bypass — get_accessible_stages_for_user()
-    # returns every active stage for them, unfiltered.
+    # ENFORCEMENT POINT B: every active stage in the project is returned to
+    # every project member -- a stage's name/existence is not privileged,
+    # only its contents and roster are. A regular user's team_stage_access
+    # (team_stage_access union across their teams) determines has_access
+    # per stage; org_admin/project_admin bypass entirely (accessible to
+    # every stage). _serialize() zeroes document_count/references/
+    # team_access for any stage the caller lacks access to, so this never
+    # leaks a locked stage's contents -- only that it exists, letting the
+    # frontend offer a "request access" affordance for it.
     accessible_ids = set(get_accessible_stages_for_user(db, identity.user_id, project_id))
 
+    all_stages = _active_stages(db, project_id)
+    accessible_stages = [s for s in all_stages if s.stage_id in accessible_ids]
     counts = _doc_counts(db, project_id)
-    stages = [s for s in _active_stages(db, project_id) if s.stage_id in accessible_ids]
-    refs = _refs_by_stage(db, [s.stage_id for s in stages])
-    team_access = _team_access_by_stage(db, [s.stage_id for s in stages])
+    refs = _refs_by_stage(db, [s.stage_id for s in accessible_stages])
+    team_access = _team_access_by_stage(db, [s.stage_id for s in accessible_stages])
     return [
-        _serialize(s, counts.get(s.stage_id, 0), refs.get(s.stage_id, []), team_access.get(s.stage_id, []))
-        for s in stages
+        _serialize(
+            s, counts.get(s.stage_id, 0), refs.get(s.stage_id, []), team_access.get(s.stage_id, []),
+            has_access=(s.stage_id in accessible_ids),
+        )
+        for s in all_stages
     ]
 
 
@@ -607,12 +641,26 @@ def list_requirements(
     A stage's required-document checklist — what R001 (app/services/graph/
     audit_rules.py) evaluates for mandatory evidence, and what the
     Intelligence page's "X/Y requirements satisfied" counts. Read-only, so
-    visibility parity with GET /stages: any project member, not admin-only.
+    visibility parity with GET /stages: any project member with access to
+    THIS STAGE specifically, not admin-only -- but also not any project
+    member regardless of stage. Master Plan / requirements-checklist-ui:
+    this previously checked only _can_see_project (project membership),
+    which is ENFORCEMENT POINT A but not B -- it let any project member
+    read any stage's checklist (requirement names, mandatory flags, counts)
+    even without team_stage_access to that stage, the same gap list_stages
+    itself closes via get_accessible_stages_for_user. Fixed to match.
     """
     _load_project(db, identity, project_id)
     if not _can_see_project(db, identity, project_id):
         raise HTTPException(status_code=403, detail="You do not have access to this project")
     _load_active_stage(db, project_id, stage_id)
+
+    # ENFORCEMENT POINT B, same as list_stages: org_admin/project_admin
+    # bypass (get_accessible_stages_for_user returns every stage for them),
+    # everyone else must have team_stage_access to this specific stage.
+    accessible_ids = set(get_accessible_stages_for_user(db, identity.user_id, project_id))
+    if stage_id not in accessible_ids:
+        raise HTTPException(status_code=403, detail="You do not have access to this stage")
 
     requirements = db.execute(
         select(RequiredDocument)
