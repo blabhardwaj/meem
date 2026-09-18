@@ -30,6 +30,10 @@ scratch/
 # Qdrant embedded local-mode storage (on-disk vector DB, not source code)
 qdrant_storage/
 
+# Internal planning/design docs and verification reports — not for GitHub
+docs/
+docs for meridian pay/
+
 # IDE
 .vscode/
 .idea/
