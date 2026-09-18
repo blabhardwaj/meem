@@ -95,14 +95,25 @@ def _call_groq_json(system_prompt: str, user_content: str) -> Any:
 
 _REFERENCE_SYSTEM_PROMPT = """You are analyzing a project document to find what it references or satisfies.
 
-You are given the document's content, a list of OTHER documents in the same project (id + filename),
-and a list of requirement checklist items for the project (id + name + description).
+You are told the filename of the document you are analyzing ("this document"), given its content, a
+list of OTHER documents in the same project (id + filename), and a list of requirement checklist
+items for the project (id + name + description).
 
-Find every place this document:
+Find every place THIS document (the one whose filename and content you were given, NOT one of the
+other candidates):
 - REFERENCES or DEPENDS_ON another document from the list (by describing it, not necessarily naming
   the exact filename — e.g. "see the checkout API spec" could mean a document about checkout APIs)
 - EVIDENCES / IMPLEMENTS / VALIDATES / ESTABLISHES a requirement from the list, by actually
   satisfying what that requirement describes in its content
+
+A common failure mode to avoid: two documents can each discuss the other's topic at length (e.g. a
+"Test Plan" narrating that a later "Validation Results" document will confirm its results, and that
+"Validation Results" document in turn summarizing the Test Plan's outcomes). When this happens, judge
+strictly by what THIS document's OWN TYPE AND PURPOSE is — its title and role, not which requirement
+name appears most often in its prose — never attribute evidence for a requirement to this document
+merely because this document TALKS ABOUT that requirement's topic or mentions another document by
+name. A document only EVIDENCES/IMPLEMENTS/VALIDATES/ESTABLISHES a requirement if satisfying that
+requirement is this document's own reason for existing.
 
 Only reference items from the EXACT candidate lists given to you. Never invent a document or
 requirement that isn't in the lists. If nothing matches, return an empty list.
@@ -124,10 +135,16 @@ def extract_references_llm(
     content: str,
     candidate_documents: list[dict],
     candidate_requirements: list[dict],
+    this_document_filename: str | None = None,
 ) -> list[dict]:
     """
     candidate_documents: [{"id": str, "filename": str}]
     candidate_requirements: [{"id": str, "name": str, "description": str | None}]
+    this_document_filename: the filename of the document being analyzed —
+    without it, the LLM has no explicit anchor for "which document is this"
+    and can confuse a document with one of the OTHER candidates it heavily
+    cross-references (e.g. a Test Plan and its own Validation Results
+    summarizing each other, each getting attributed the other's requirement).
 
     Returns validated results only — any item naming a target_id outside the
     given candidates, or an invalid relationship/confidence, is dropped
@@ -143,7 +160,12 @@ def extract_references_llm(
         "other_documents": candidate_documents,
         "requirements": candidate_requirements,
     }
+    this_doc_line = (
+        f"This document's own filename: {this_document_filename}\n\n"
+        if this_document_filename else ""
+    )
     user_content = (
+        f"{this_doc_line}"
         f"Candidate documents and requirements (JSON):\n{json.dumps(manifest)}\n\n"
         f"Document content to analyze:\n\n{content[:MAX_CONTENT_CHARS]}"
     )

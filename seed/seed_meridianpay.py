@@ -179,20 +179,34 @@ PROJECT_1_STAGE_REFERENCES = {
 # uploaded against it) so gap-detection/coverage math has something real
 # to report, per the seeding brief's "a few left upload" instruction.
 PROJECT_1_REQUIRED_DOCS = [
-    {"stage": "Discovery", "name": "Business Case", "is_mandatory": True, "filename": "01-instant-payouts-business-case.md"},
-    {"stage": "Requirements", "name": "Product Requirements Document", "is_mandatory": True, "filename": "02-instant-payouts-prd.md"},
-    {"stage": "Requirements", "name": "Revenue Model", "is_mandatory": True, "filename": "03-instant-payouts-revenue-model.md"},
-    {"stage": "UX & API Design", "name": "API Specification", "is_mandatory": True, "filename": "04-instant-payouts-api-spec.md"},
-    {"stage": "UX & API Design", "name": "UX Flows", "is_mandatory": True, "filename": "05-instant-payouts-ux-flows.md"},
-    {"stage": "Architecture", "name": "System Architecture", "is_mandatory": True, "filename": "06-instant-payouts-architecture.md"},
-    {"stage": "Architecture", "name": "Threat Model", "is_mandatory": True, "filename": "07-instant-payouts-threat-model.md"},
-    {"stage": "Engineering", "name": "Implementation Notes", "is_mandatory": True, "filename": None},
-    {"stage": "Security Review", "name": "Penetration Test Findings", "is_mandatory": True, "filename": "08-instant-payouts-pentest-findings.md"},
-    {"stage": "Security Review", "name": "Compliance Checklist", "is_mandatory": True, "filename": "09-instant-payouts-compliance-checklist.md"},
-    {"stage": "QA & Validation", "name": "Test Plan", "is_mandatory": True, "filename": "10-instant-payouts-test-plan.md"},
-    {"stage": "QA & Validation", "name": "Validation Results", "is_mandatory": True, "filename": "11-instant-payouts-validation-results.md"},
-    {"stage": "Launch", "name": "Launch Readiness Checklist", "is_mandatory": True, "filename": "12-instant-payouts-launch-readiness.md"},
-    {"stage": "Launch", "name": "Public Release Notes", "is_mandatory": False, "filename": "13-instant-payouts-release-notes.md"},
+    {"stage": "Discovery", "name": "Business Case", "is_mandatory": True, "filename": "01-instant-payouts-business-case.md",
+     "description": "Justifies WHY this project should be built at all — problem statement, target users, expected business value. Written before requirements or design exist."},
+    {"stage": "Requirements", "name": "Product Requirements Document", "is_mandatory": True, "filename": "02-instant-payouts-prd.md",
+     "description": "Defines WHAT the feature must do — functional requirements, user flows, acceptance criteria. Does not cover pricing/financials or technical implementation."},
+    {"stage": "Requirements", "name": "Revenue Model", "is_mandatory": True, "filename": "03-instant-payouts-revenue-model.md",
+     "description": "Pricing, unit economics, and revenue projections specifically — cost basis, margin targets, volume forecasts. Not the functional PRD."},
+    {"stage": "UX & API Design", "name": "API Specification", "is_mandatory": True, "filename": "04-instant-payouts-api-spec.md",
+     "description": "Defines the API contract — endpoints, request/response shapes, error codes. Not the user-facing UX flow."},
+    {"stage": "UX & API Design", "name": "UX Flows", "is_mandatory": True, "filename": "05-instant-payouts-ux-flows.md",
+     "description": "Defines the user-facing screens and interaction flow. Not the API contract."},
+    {"stage": "Architecture", "name": "System Architecture", "is_mandatory": True, "filename": "06-instant-payouts-architecture.md",
+     "description": "Describes the system's technical design — components, data flow, integration points. Not a security/threat analysis."},
+    {"stage": "Architecture", "name": "Threat Model", "is_mandatory": True, "filename": "07-instant-payouts-threat-model.md",
+     "description": "Identifies specific security threats and mitigations for this system. Not the general system architecture."},
+    {"stage": "Engineering", "name": "Implementation Notes", "is_mandatory": True, "filename": None,
+     "description": "Engineering's own notes on how the feature was actually built, deviations from the design docs, and known technical debt."},
+    {"stage": "Security Review", "name": "Penetration Test Findings", "is_mandatory": True, "filename": "08-instant-payouts-pentest-findings.md",
+     "description": "Results of an ACTIVE penetration test against the running system — specific vulnerabilities found, severity, remediation status. Not a checklist of compliance controls."},
+    {"stage": "Security Review", "name": "Compliance Checklist", "is_mandatory": True, "filename": "09-instant-payouts-compliance-checklist.md",
+     "description": "A checklist of regulatory/compliance controls and their status. Not penetration test results."},
+    {"stage": "QA & Validation", "name": "Test Plan", "is_mandatory": True, "filename": "10-instant-payouts-test-plan.md",
+     "description": "The document that DEFINES test cases and records their pass/fail RESULT at the time each case was run — written DURING testing, by QA. Its own purpose is to enumerate test cases and results, not to assess overall launch readiness. Distinct from Validation Results, which is written AFTER testing to summarize load/soak testing and give the final go/no-go assessment."},
+    {"stage": "QA & Validation", "name": "Validation Results", "is_mandatory": True, "filename": "11-instant-payouts-validation-results.md",
+     "description": "The document that SUMMARIZES the outcome of the whole validation stage — load testing, soak testing, and a final go/no-go readiness assessment — written AFTER the Test Plan's test cases have already been run. Its own purpose is the launch-readiness summary and recommendation, not enumerating individual test cases (that's the Test Plan's job)."},
+    {"stage": "Launch", "name": "Launch Readiness Checklist", "is_mandatory": True, "filename": "12-instant-payouts-launch-readiness.md",
+     "description": "Final go/no-go checklist confirming every prior stage's exit criteria are met, immediately before launch."},
+    {"stage": "Launch", "name": "Public Release Notes", "is_mandatory": False, "filename": "13-instant-payouts-release-notes.md",
+     "description": "Customer-facing announcement of the new feature. Not an internal readiness document."},
 ]
 
 # action: "auto" (non-approval stage, upload+finalize only, no explicit
@@ -246,10 +260,14 @@ PROJECT_2_STAGE_REFERENCES = {
 }
 
 PROJECT_2_REQUIRED_DOCS = [
-    {"stage": "Sprint Planning", "name": "Sprint Brief", "is_mandatory": True, "filename": "14-dispute-autotag-sprint-brief.md"},
-    {"stage": "Build", "name": "Implementation Notes", "is_mandatory": True, "filename": None},
-    {"stage": "Review & Ship", "name": "Test Results", "is_mandatory": True, "filename": "15-dispute-autotag-test-results.md"},
-    {"stage": "Review & Ship", "name": "Changelog", "is_mandatory": False, "filename": "16-dispute-autotag-changelog.md"},
+    {"stage": "Sprint Planning", "name": "Sprint Brief", "is_mandatory": True, "filename": "14-dispute-autotag-sprint-brief.md",
+     "description": "Scopes the sprint before any work starts — goal, what's in/out of scope, target acceptance rate."},
+    {"stage": "Build", "name": "Implementation Notes", "is_mandatory": True, "filename": None,
+     "description": "Engineering's own notes on how the classifier was actually implemented."},
+    {"stage": "Review & Ship", "name": "Test Results", "is_mandatory": True, "filename": "15-dispute-autotag-test-results.md",
+     "description": "Classifier accuracy measured against a labeled historical sample, with a ship/no-ship recommendation. Written after the Sprint Brief, before shipping."},
+    {"stage": "Review & Ship", "name": "Changelog", "is_mandatory": False, "filename": "16-dispute-autotag-changelog.md",
+     "description": "User-facing summary of what changed for support agents. Not the accuracy test results."},
 ]
 
 PROJECT_2_DOCS = [
@@ -540,7 +558,7 @@ def seed_project_structure(
                 source=RequirementSource.custom,
                 description=(
                     "Deliberately left unsatisfied for this demo — no document has been uploaded against it."
-                    if rd["filename"] is None else None
+                    if rd["filename"] is None else rd.get("description")
                 ),
             ))
             db.flush()
