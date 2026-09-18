@@ -68,7 +68,7 @@ export default function DraftDocumentCard({
   return (
     <div className="w-full my-2 flex flex-col gap-3">
       {/* Document Sheet Canvas */}
-      <div className="rounded-xl border border-border/80 bg-[#13151b] shadow-xl overflow-hidden">
+      <div className="rounded-xl border border-border/80 bg-surface shadow-xl overflow-hidden">
         {/* Document Header Bar */}
         <div className="flex items-center justify-between px-4 py-2.5 bg-surface/90 border-b border-border/60 gap-3">
           <div className="flex items-center gap-2.5 min-w-0">
@@ -137,7 +137,7 @@ export default function DraftDocumentCard({
         </div>
 
         {/* Document Body */}
-        <div className="p-4 sm:p-6 bg-[#0f1117]/60 overflow-x-auto">
+        <div className="p-4 sm:p-6 bg-background/60 overflow-x-auto">
           <MarkdownMessage content={documentContent} />
         </div>
       </div>

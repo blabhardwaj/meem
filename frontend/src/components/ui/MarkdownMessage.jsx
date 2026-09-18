@@ -69,7 +69,7 @@ function CodeBlock({ children, className, ...props }) {
   };
 
   return (
-    <div className="relative group my-2.5 rounded-lg border border-border/80 bg-[#0d0f14] overflow-hidden">
+    <div className="relative group my-2.5 rounded-lg border border-border/80 bg-background overflow-hidden">
       <div className="flex items-center justify-between px-3 py-1.5 bg-surface/80 border-b border-border/50 text-[11px] text-gray-400 font-mono select-none">
         <span>{language || 'code'}</span>
         <button
