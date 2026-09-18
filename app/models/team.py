@@ -160,6 +160,12 @@ class AccessRequest(Base):
         default=AccessRequestStatus.pending,
         nullable=False,
     )
+    # Free-text justification the requester types when asking for access
+    # (e.g. "need to review QA's test coverage before sign-off") — shown to
+    # the approver alongside the request. Optional: nullable so existing
+    # requests and any caller that doesn't pass one (e.g. programmatic
+    # tool calls) are unaffected.
+    reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
     requested_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

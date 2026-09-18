@@ -39,6 +39,15 @@ const SourcePanel = ({
     () => [...stages].sort((a, b) => a.order_index - b.order_index),
     [stages],
   );
+  // list_stages now returns every active stage (locked ones included, with
+  // has_access:false) so their names can be shown and access requested --
+  // but a stage the caller has no access to is never a valid upload
+  // target, so the upload dropdown uses this narrower, accessible-only
+  // subset instead of orderedStages.
+  const uploadableStages = useMemo(
+    () => orderedStages.filter((s) => s.has_access !== false),
+    [orderedStages],
+  );
   const managedNames = new Set(orderedStages.map((s) => s.name));
   const extraNames = Object.keys(groupedDocs)
     .filter((name) => !managedNames.has(name))
@@ -339,7 +348,7 @@ const SourcePanel = ({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 min-w-0">
             <h2 className="text-lg font-semibold text-gray-100">Sources</h2>
-            {orderedStages.length > 0 && (
+            {uploadableStages.length > 0 && (
               <Button size="sm" variant="secondary" icon={UploadCloud} onClick={openUpload}>
                 Upload Doc
               </Button>
@@ -374,6 +383,7 @@ const SourcePanel = ({
                 key={stage.stage_id}
                 stage={stage.name}
                 stageId={stage.stage_id}
+                hasAccess={stage.has_access !== false}
                 documents={groupedDocs[stage.name] || []}
                 canReview={canReview}
                 canOverrideScan={canOverrideScan}
@@ -756,8 +766,8 @@ const SourcePanel = ({
             label="Stage"
             value={uploadStageId}
             onChange={setUploadStageId}
-            options={orderedStages.map((s) => ({ label: s.name, value: s.stage_id }))}
-            placeholder={orderedStages.length ? 'Select a stage…' : 'No accessible stages'}
+            options={uploadableStages.map((s) => ({ label: s.name, value: s.stage_id }))}
+            placeholder={uploadableStages.length ? 'Select a stage…' : 'No accessible stages'}
           />
 
           {uploadStageId && (

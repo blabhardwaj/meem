@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { FileText, File, FileImage, FileSpreadsheet, Send, ClipboardCheck, History, Upload, Trash2, FileDiff, Eye, Pencil, X as XIcon, Lock } from 'lucide-react';
+import { FileText, File, FileImage, FileSpreadsheet, Send, ClipboardCheck, History, Upload, Trash2, FileDiff, Eye, Pencil, X as XIcon } from 'lucide-react';
 import Badge from '../ui/Badge';
 import Button from '../ui/Button';
 import Modal from '../ui/Modal';
@@ -7,60 +7,8 @@ import DocumentViewerModal from './DocumentViewerModal';
 import DocumentReviewModal from './DocumentReviewModal';
 import VersionDiffModal, { DiffStats } from './VersionDiffModal';
 import Dropdown from '../ui/Dropdown';
-import { documentsApi, accessRequestsApi } from '../../lib/api';
+import { documentsApi } from '../../lib/api';
 import { sensitivityLabel } from '../../constants/docTypes';
-import { DOCUMENT_AND_TEAM_SCOPE_REQUESTS_ENABLED } from '../../constants/accessRequests';
-
-const LockedDocumentRow = ({ document }) => {
-  const [state, setState] = useState('loading'); // loading | none | pending | granted | denied | expired
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-
-  useEffect(() => {
-    let cancelled = false;
-    accessRequestsApi.status({ documentId: document.document_id })
-      .then((r) => { if (!cancelled) setState(r.status); })
-      .catch(() => { if (!cancelled) setState('none'); });
-    return () => { cancelled = true; };
-  }, [document.document_id]);
-
-  const handleRequest = async () => {
-    setBusy(true);
-    setError('');
-    try {
-      await accessRequestsApi.createForDocument(document.document_id);
-      setState('pending');
-    } catch (err) {
-      setError(err.message || 'Could not send the request.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="flex items-start gap-3 p-3 rounded-lg bg-background/40 border border-border/40">
-      <div className="mt-0.5"><Lock size={16} className="text-gray-500" /></div>
-      <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium text-gray-400 truncate">{document.filename}</p>
-        <p className="text-xs text-gray-500 mt-1">{sensitivityLabel(document.sensitivity_level)} — access required</p>
-        {error && <p className="text-xs text-red-400 mt-1">{error}</p>}
-      </div>
-      <div className="shrink-0">
-        {state === 'loading' && <span className="text-xs text-gray-600">…</span>}
-        {DOCUMENT_AND_TEAM_SCOPE_REQUESTS_ENABLED && (state === 'none' || state === 'denied' || state === 'expired') ? (
-          <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" loading={busy} onClick={handleRequest}>
-            Request access
-          </Button>
-        ) : null}
-        {!DOCUMENT_AND_TEAM_SCOPE_REQUESTS_ENABLED && (state === 'none' || state === 'denied' || state === 'expired') && (
-          <span className="text-xs text-gray-600">Request access for this stage instead</span>
-        )}
-        {state === 'pending' && <Badge variant="warning">Pending review</Badge>}
-        {state === 'granted' && <Badge variant="success">Granted</Badge>}
-      </div>
-    </div>
-  );
-};
 
 const formatFileSize = (bytes) => {
   if (!bytes || bytes <= 0) return '0 KB';
@@ -170,10 +118,6 @@ const DocumentItem = ({ document, canReview, canOverrideScan = false, canDelete,
   const [versionDeleteError, setVersionDeleteError] = useState('');
 
   const state = document.workflow_state;
-
-  if (document.locked) {
-    return <LockedDocumentRow document={document} />;
-  }
 
   const run = async (fn, actionKey) => {
     setBusyAction(actionKey);

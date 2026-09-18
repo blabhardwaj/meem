@@ -1060,6 +1060,9 @@ const ApprovalsTab = ({ projects, canOverrideScan = false }) => {
                                         {' · '}
                                         {r.tier ? `${r.tier} · ` : ''}{r.grant_duration_label}
                                       </p>
+                                      {r.reason && (
+                                        <p className="text-xs text-gray-400 mt-1 italic">&ldquo;{r.reason}&rdquo;</p>
+                                      )}
                                     </div>
                                     <div className="flex gap-2 shrink-0">
                                       <Button size="sm" icon={Check}

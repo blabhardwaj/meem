@@ -57,6 +57,9 @@ const MyAccessRequestsPanel = ({ open, onClose }) => {
                   {r.scope} access · {r.team_name}
                   {r.tier && <> · {r.tier.replace(/_/g, ' ')}</>}
                 </p>
+                {r.reason && (
+                  <p className="text-xs text-gray-400 mt-1 italic normal-case truncate">&ldquo;{r.reason}&rdquo;</p>
+                )}
               </div>
               <div className="flex items-center gap-2 shrink-0">
                 {isExpiredApproved ? (

@@ -144,7 +144,6 @@ function mapDocs(rows, project) {
     project_id: project?.project_id || null,
     created_at: null,
     members: undefined,
-    locked: Boolean(d.locked),
   }));
 }
 
@@ -486,11 +485,11 @@ export const accessRequestsApi = {
   // the caller's own requests, newest first — { status, active, team_name, ... }
   mine: () => request('/access-requests/mine'),
   // create a pending request for one team
-  create: (teamId) => request('/access-requests', { method: 'POST', body: { team_id: teamId } }),
-  createForDocument: (documentId) =>
-    request('/access-requests', { method: 'POST', body: { document_id: documentId } }),
-  createForStage: (stageId) =>
-    request('/access-requests', { method: 'POST', body: { stage_id: stageId } }),
+  create: (teamId, reason) => request('/access-requests', { method: 'POST', body: { team_id: teamId, reason } }),
+  createForDocument: (documentId, reason) =>
+    request('/access-requests', { method: 'POST', body: { document_id: documentId, reason } }),
+  createForStage: (stageId, reason) =>
+    request('/access-requests', { method: 'POST', body: { stage_id: stageId, reason } }),
   // Effective-state lookup for one exact target — the server resolves
   // native/grant/pending/terminal precedence; the caller only renders the
   // returned verdict, never re-derives it.
