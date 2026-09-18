@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Plus, Pencil, ArrowUp, ArrowDown, ShieldCheck, Trash2, Settings2, Link2, Users, UploadCloud, ListChecks, X as XIcon } from 'lucide-react';
 import { STAGES } from '../../constants/stages';
 import StageSection from './StageSection';
+import RequirementsChecklistModal from './RequirementsChecklistModal';
 import Modal from '../ui/Modal';
 import Button from '../ui/Button';
 import Input from '../ui/Input';
@@ -69,7 +70,10 @@ const SourcePanel = ({
   const [stageErr, setStageErr] = useState('');
   const [stageNotice, setStageNotice] = useState('');
 
-  // --- per-stage required-documents checklist ---
+  // --- read-only requirements checklist, open to any project member ---
+  const [checklistStage, setChecklistStage] = useState(null);
+
+  // --- per-stage required-documents checklist (admin settings modal, mutable) ---
   const [requirements, setRequirements] = useState([]);
   const [requirementsLoading, setRequirementsLoading] = useState(false);
   const [newReqName, setNewReqName] = useState('');
@@ -377,6 +381,7 @@ const SourcePanel = ({
                 onChanged={onChanged}
                 requiresApproval={stage.requires_approval}
                 onEdit={canManageStages ? () => openSettings(stage) : null}
+                onViewChecklist={() => setChecklistStage(stage)}
                 highlightDocumentId={highlightDocumentId}
                 canEditAny={canEditAny}
                 currentUserId={currentUserId}
@@ -679,6 +684,15 @@ const SourcePanel = ({
           </div>
         )}
       </Modal>
+
+      {/* Read-only requirements checklist — open to any project member */}
+      <RequirementsChecklistModal
+        open={Boolean(checklistStage)}
+        onClose={() => setChecklistStage(null)}
+        projectId={projectId}
+        stageId={checklistStage?.stage_id}
+        stageName={checklistStage?.name}
+      />
 
       {/* Upload a real document */}
       <Modal

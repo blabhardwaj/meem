@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { ChevronDown, ShieldCheck, Settings2 } from 'lucide-react';
+import { ChevronDown, ShieldCheck, Settings2, ListChecks } from 'lucide-react';
 import Badge from '../ui/Badge';
 import DocumentItem from './DocumentItem';
 import { accessRequestsApi } from '../../lib/api';
@@ -56,6 +56,7 @@ const StageSection = ({
   onChanged,
   requiresApproval = false,
   onEdit = null, // direct edit stage & settings callback
+  onViewChecklist = null, // open the read-only required-documents checklist — no admin gate
   menu = null, // optional <KebabMenu /> element rendered in the header
   defaultExpanded = true,
   highlightDocumentId = null,
@@ -100,6 +101,20 @@ const StageSection = ({
           )}
         </button>
         <div className="flex items-center gap-1 shrink-0 pr-1">
+          {stageId && onViewChecklist && (
+            <button
+              type="button"
+              aria-label={`View required documents for ${stage}`}
+              title={`View required documents for ${stage}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                onViewChecklist();
+              }}
+              className="p-1.5 rounded-md text-gray-400 hover:text-gray-100 hover:bg-surface-hover transition-colors"
+            >
+              <ListChecks size={16} />
+            </button>
+          )}
           {onEdit && (
             <button
               type="button"
