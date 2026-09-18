@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { ChevronDown, ShieldCheck, Settings2, ListChecks } from 'lucide-react';
 import Badge from '../ui/Badge';
 import Button from '../ui/Button';
@@ -18,28 +18,28 @@ import { accessRequestsApi } from '../../lib/api';
 //     sub-confidential documents via their own team, but wants the
 //     stage's CONFIDENTIAL-tier documents too -- routes to that team's
 //     lead as an upgrade request, per spec's tier system.
-// accessRequestsApi.status() reports 'granted' for ANY active stage grant
-// (viewer/contributor/contributor_confidential) -- a plain viewer or
-// contributor grant makes the stage itself visible but does NOT unlock its
-// confidential documents. Once the caller already has a
-// contributor_confidential grant (tier === 'contributor_confidential'),
-// there's genuinely nothing further to request and the button hides; a
-// lesser tier still needs the confidential-upgrade request to show.
-const StageAccessRequest = ({ stageId, stageName, hasAccess }) => {
-  const [state, setState] = useState('loading');
-  const [tier, setTier] = useState(null);
+// initialStatus/initialTier come from GET /workspace's per-stage
+// access_request_status/access_request_tier -- bundled there so this
+// component needs no network call of its own. Previously it fetched its
+// own status via GET /access-requests/status on mount; with N stages that
+// meant N sequential round trips firing AFTER the page had already
+// rendered everything else, each with several DB queries behind it,
+// which is exactly what made these buttons visibly slower to appear than
+// everything around them.
+// 'granted' covers ANY active stage grant (viewer/contributor/
+// contributor_confidential) -- a plain viewer or contributor grant makes
+// the stage itself visible but does NOT unlock its confidential
+// documents. Once the caller already has a contributor_confidential
+// grant (tier === 'contributor_confidential'), there's genuinely nothing
+// further to request and the button hides; a lesser tier still needs the
+// confidential-upgrade request to show.
+const StageAccessRequest = ({ stageId, stageName, hasAccess, initialStatus, initialTier }) => {
+  const [state, setState] = useState(initialStatus || 'none');
+  const [tier, setTier] = useState(initialTier || null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-
-  useEffect(() => {
-    let cancelled = false;
-    accessRequestsApi.status({ stageId })
-      .then((r) => { if (!cancelled) { setState(r.status); setTier(r.tier || null); } })
-      .catch(() => { if (!cancelled) setState('none'); });
-    return () => { cancelled = true; };
-  }, [stageId]);
 
   const openDialog = (e) => {
     e.stopPropagation();
@@ -62,7 +62,6 @@ const StageAccessRequest = ({ stageId, stageName, hasAccess }) => {
     }
   };
 
-  if (state === 'loading') return null;
   if (state === 'granted' && tier === 'contributor_confidential') return null;
 
   if (state === 'pending') {
@@ -128,6 +127,8 @@ const StageSection = ({
   stageId = null,
   documents = [],
   hasAccess = true,
+  accessRequestStatus = 'none',
+  accessRequestTier = null,
   canReview,
   canOverrideScan = false,
   canDelete,
@@ -179,7 +180,15 @@ const StageSection = ({
           )}
         </button>
         <div className="flex items-center gap-1 shrink-0 pr-1">
-          {stageId && <StageAccessRequest stageId={stageId} stageName={stage} hasAccess={hasAccess} />}
+          {stageId && (
+            <StageAccessRequest
+              stageId={stageId}
+              stageName={stage}
+              hasAccess={hasAccess}
+              initialStatus={accessRequestStatus}
+              initialTier={accessRequestTier}
+            />
+          )}
           {stageId && onViewChecklist && (
             <button
               type="button"

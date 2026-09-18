@@ -21,7 +21,11 @@ from app.api.dependencies import get_current_user, get_db_with_tenant
 from app.models.project import Project
 from app.models.stage import Stage, StageReference, TeamStageAccess
 from app.models.team import Team
-from app.services.access_control import get_accessible_stages_for_user
+from app.services.access_control import (
+    get_accessible_stages_for_user,
+    get_active_stage_grants_for_user,
+    get_pending_stage_requests_for_user,
+)
 from app.services.auth import ResolvedIdentity
 
 router = APIRouter(prefix="/workspace", tags=["workspace"])
@@ -47,6 +51,21 @@ class StageOut(BaseModel):
     requires_approval: bool
     references: list[str] = []  # stage_ids this stage references (one-way)
     team_access: list[str] = []  # team_ids granted access to this stage
+    # The caller's confidential-access-request status for THIS stage --
+    # 'none' | 'pending' | 'granted' -- and, when granted, the approved
+    # tier. Bundled in here so the frontend's request-access button never
+    # needs its own per-stage network round trip (previously N stages
+    # meant N sequential GET /access-requests/status calls after the page
+    # had already rendered everything else). Computed from two bulk
+    # queries per caller (get_active_stage_grants_for_user,
+    # get_pending_stage_requests_for_user), not one per stage. This is
+    # deliberately NOT the full resolve_effective_access() precedence
+    # (org/project-admin bypass, native team_lead auto-unlock, denied
+    # history) -- has_access above already answers "can I see this
+    # stage's documents at all"; this field only answers "is there an
+    # active or pending REQUEST for it", which is all the button needs.
+    access_request_status: str = "none"
+    access_request_tier: str | None = None
 
 
 class ProjectOut(BaseModel):
@@ -68,6 +87,13 @@ def get_workspace(
     identity: ResolvedIdentity = Depends(get_current_user),
     db: Session = Depends(get_db_with_tenant),
 ):
+    # Fetched ONCE for the whole response (every stage across every
+    # project), not once per stage -- see StageOut.access_request_status's
+    # docstring for why this replaces N per-stage GET /access-requests/
+    # status calls the frontend used to make after this endpoint returned.
+    active_stage_grants = get_active_stage_grants_for_user(db, identity.user_id)
+    pending_stage_ids = get_pending_stage_requests_for_user(db, identity.user_id)
+
     # Which projects can this user act in?
     project_ids: set[uuid.UUID] = set(identity.project_admin_project_ids)
     project_ids.update(m.project_id for m in identity.team_memberships)
@@ -158,6 +184,15 @@ def get_workspace(
                     requires_approval=s.requires_approval if s.stage_id in accessible_ids else False,
                     references=refs_by_stage.get(s.stage_id, []) if s.stage_id in accessible_ids else [],
                     team_access=team_access_by_stage.get(s.stage_id, []) if s.stage_id in accessible_ids else [],
+                    access_request_status=(
+                        "granted" if s.stage_id in active_stage_grants
+                        else "pending" if s.stage_id in pending_stage_ids
+                        else "none"
+                    ),
+                    access_request_tier=(
+                        active_stage_grants[s.stage_id].tier.value
+                        if s.stage_id in active_stage_grants else None
+                    ),
                 )
                 for s in all_stages
             ],

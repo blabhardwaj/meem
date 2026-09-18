@@ -384,6 +384,8 @@ const SourcePanel = ({
                 stage={stage.name}
                 stageId={stage.stage_id}
                 hasAccess={stage.has_access !== false}
+                accessRequestStatus={stage.access_request_status}
+                accessRequestTier={stage.access_request_tier}
                 documents={groupedDocs[stage.name] || []}
                 canReview={canReview}
                 canOverrideScan={canOverrideScan}

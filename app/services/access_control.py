@@ -323,6 +323,25 @@ def resolve_stage_grant(db: Session, user_id: UUID, stage_id: UUID) -> "StageGra
     return get_active_stage_grants_for_user(db, user_id).get(stage_id)
 
 
+def get_pending_stage_requests_for_user(db: Session, user_id: UUID) -> set[UUID]:
+    """
+    stage_ids with a currently-pending stage-scope access request from
+    user_id — the bulk counterpart to resolving one stage's "pending"
+    status at a time. Used alongside get_active_stage_grants_for_user() to
+    answer "what should the request-access button show for every stage in
+    this project" in two queries total instead of one round trip (each
+    internally several queries) per stage.
+    """
+    rows = db.execute(
+        select(AccessRequest.stage_id).where(
+            AccessRequest.user_id == user_id,
+            AccessRequest.scope == AccessRequestScope.stage,
+            AccessRequest.status == AccessRequestStatus.pending,
+        )
+    ).scalars().all()
+    return set(rows)
+
+
 @dataclass
 class EffectiveAccessResult:
     """
