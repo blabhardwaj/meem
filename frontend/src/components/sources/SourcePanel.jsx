@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, Pencil, ArrowUp, ArrowDown, ShieldCheck, Trash2, Settings2, Link2, Users, UploadCloud, ListChecks, X as XIcon } from 'lucide-react';
+import { Plus, Pencil, ArrowUp, ArrowDown, ShieldCheck, Trash2, Settings2, Link2, Users, UploadCloud, ListChecks, Check, Circle, X as XIcon } from 'lucide-react';
 import { STAGES } from '../../constants/stages';
 import StageSection from './StageSection';
 import RequirementsChecklistModal from './RequirementsChecklistModal';
@@ -590,21 +590,40 @@ const SourcePanel = ({
                       key={r.requirement_id}
                       className="flex items-start justify-between gap-2 rounded-md border border-border bg-background px-2.5 py-2"
                     >
-                      <div className="min-w-0">
-                        <p className="text-sm text-gray-200 truncate">{r.name}</p>
-                        {r.description && (
-                          <p className="text-xs text-gray-500 mt-0.5">{r.description}</p>
-                        )}
-                        <label className="flex items-center gap-1.5 mt-1 text-xs text-gray-400 cursor-pointer w-fit">
-                          <input
-                            type="checkbox"
-                            className="accent-primary"
-                            disabled={stageBusy}
-                            checked={r.is_mandatory}
-                            onChange={() => toggleRequirementMandatory(r)}
-                          />
-                          Mandatory
-                        </label>
+                      <div className="min-w-0 flex items-start gap-2">
+                        <div className="mt-0.5 shrink-0">
+                          {r.satisfied ? (
+                            <Check size={14} className="text-emerald-400" />
+                          ) : (
+                            <Circle size={14} className="text-gray-500" />
+                          )}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm text-gray-200 truncate">{r.name}</p>
+                          {r.description && (
+                            <p className="text-xs text-gray-500 mt-0.5">{r.description}</p>
+                          )}
+                          {r.satisfied && r.satisfied_by && (
+                            <p className="text-xs text-emerald-400/80 mt-1">
+                              Satisfied by: {r.satisfied_by.filename}
+                            </p>
+                          )}
+                          {r.satisfied && !r.satisfied_by && (
+                            <p className="text-xs text-gray-500 mt-1">
+                              Satisfied by a document you don&apos;t have access to.
+                            </p>
+                          )}
+                          <label className="flex items-center gap-1.5 mt-1 text-xs text-gray-400 cursor-pointer w-fit">
+                            <input
+                              type="checkbox"
+                              className="accent-primary"
+                              disabled={stageBusy}
+                              checked={r.is_mandatory}
+                              onChange={() => toggleRequirementMandatory(r)}
+                            />
+                            Mandatory
+                          </label>
+                        </div>
                       </div>
                       <button
                         type="button"
