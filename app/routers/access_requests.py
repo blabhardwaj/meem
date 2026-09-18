@@ -22,7 +22,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -70,6 +70,9 @@ class CreateAccessRequest(BaseModel):
     team_id: uuid.UUID | None = None
     document_id: uuid.UUID | None = None
     stage_id: uuid.UUID | None = None
+    # Optional free-text justification shown to the approver alongside the
+    # request (e.g. "need to review QA's test coverage before sign-off").
+    reason: str | None = Field(default=None, max_length=500)
 
 
 class ApproveAccessRequestBody(BaseModel):
@@ -91,6 +94,7 @@ class AccessRequestOut(BaseModel):
     target_name: str  # filename, stage name, or team name, matching `scope`
     tier: str | None  # GrantTier value — set only on a decided stage-scope request
     grant_duration_label: str  # human-readable duration, or a prompt to choose one if still pending
+    reason: str | None  # requester's free-text justification, if they gave one
     status: str
     requested_at: str | None
     decided_at: str | None
@@ -103,6 +107,12 @@ class EffectiveAccessOut(BaseModel):
     via_grant: bool
     expires_at: str | None
     request_id: str | None
+    # Set only for a stage-scope grant: the approved tier (viewer /
+    # contributor / contributor_confidential), so a caller can tell a plain
+    # "I can see this stage" grant apart from one that also unlocks
+    # confidential documents. Null for org/project-admin native access
+    # (via_grant=False) and for document/team-scope grants (tier-less).
+    tier: str | None = None
 
 
 @router.get("/status", response_model=EffectiveAccessOut)
@@ -146,12 +156,14 @@ def access_status(
                 status="granted", via_grant=True,
                 expires_at=stage_grant.expires_at.isoformat() if stage_grant.expires_at else None,
                 request_id=str(stage_grant.request_id),
+                tier=stage_grant.tier.value if stage_grant.tier else None,
             )
     return EffectiveAccessOut(
         status=result.status,
         via_grant=result.via_grant,
         expires_at=result.expires_at.isoformat() if result.expires_at else None,
         request_id=str(result.request_id) if result.request_id else None,
+        tier=result.tier.value if result.tier else None,
     )
 
 
@@ -197,6 +209,7 @@ def _serialize(db: Session, r: AccessRequest, *, team=None, project=None, reques
         target_name=target_name,
         tier=r.tier.value if r.tier else None,
         grant_duration_label=grant_duration_label,
+        reason=r.reason,
         status=r.status.value,
         requested_at=r.requested_at.isoformat() if r.requested_at else None,
         decided_at=r.decided_at.isoformat() if r.decided_at else None,
@@ -218,6 +231,7 @@ def create_access_request(
             team_id=body.team_id,
             document_id=body.document_id,
             stage_id=body.stage_id,
+            reason=body.reason,
             expected_tenant_id=identity.tenant_id,
         )
     except AccessRequestError as exc:

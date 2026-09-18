@@ -112,7 +112,7 @@ def notify_pending_review(
 
 def notify_access_request_created(
     db: Session, *, team_id: uuid.UUID, team_name: str, project_id: uuid.UUID,
-    requester_id: uuid.UUID, request_id: uuid.UUID,
+    requester_id: uuid.UUID, request_id: uuid.UUID, reason: str | None = None,
 ) -> None:
     """Confidential access requested -> every team_lead on that team."""
     lead_user_ids = set(db.execute(
@@ -123,12 +123,15 @@ def notify_access_request_created(
     ).scalars())
     requester = db.get(User, requester_id)
     requester_label = requester.full_name or requester.email if requester else "Someone"
+    title = f"{requester_label} requested confidential access on {team_name}"
+    if reason:
+        title += f": \"{reason}\""
     for recipient_id in lead_user_ids:
         _create(
             db,
             recipient_user_id=recipient_id,
             notification_type=NotificationType.access_request_created,
-            title=f"{requester_label} requested confidential access on {team_name}",
+            title=title,
             resource_type="access_request",
             resource_id=request_id,
             project_id=project_id,

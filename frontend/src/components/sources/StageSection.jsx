@@ -1,55 +1,133 @@
 import React, { useEffect, useState } from 'react';
 import { ChevronDown, ShieldCheck, Settings2, ListChecks } from 'lucide-react';
 import Badge from '../ui/Badge';
+import Button from '../ui/Button';
+import Modal from '../ui/Modal';
 import DocumentItem from './DocumentItem';
 import { accessRequestsApi } from '../../lib/api';
 
-const StageAccessLink = ({ stageId }) => {
+// A stage's own "Request access" affordance, shown in its header next to
+// the document count whenever the caller doesn't already hold a granted
+// stage-scope confidential-access grant. Serves TWO distinct cases through
+// the same backend call (request_confidential_access's stage branch
+// already handles both):
+//   - hasAccess is false: the caller has zero team_stage_access to this
+//     stage at all -- routes to a project admin (there's no team lead to
+//     ask yet), and approval creates a brand-new per-user stage grant.
+//   - hasAccess is true: the caller already sees this stage's
+//     sub-confidential documents via their own team, but wants the
+//     stage's CONFIDENTIAL-tier documents too -- routes to that team's
+//     lead as an upgrade request, per spec's tier system.
+// accessRequestsApi.status() reports 'granted' for ANY active stage grant
+// (viewer/contributor/contributor_confidential) -- a plain viewer or
+// contributor grant makes the stage itself visible but does NOT unlock its
+// confidential documents. Once the caller already has a
+// contributor_confidential grant (tier === 'contributor_confidential'),
+// there's genuinely nothing further to request and the button hides; a
+// lesser tier still needs the confidential-upgrade request to show.
+const StageAccessRequest = ({ stageId, stageName, hasAccess }) => {
   const [state, setState] = useState('loading');
+  const [tier, setTier] = useState(null);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
 
   useEffect(() => {
     let cancelled = false;
     accessRequestsApi.status({ stageId })
-      .then((r) => { if (!cancelled) setState(r.status); })
+      .then((r) => { if (!cancelled) { setState(r.status); setTier(r.tier || null); } })
       .catch(() => { if (!cancelled) setState('none'); });
     return () => { cancelled = true; };
   }, [stageId]);
 
-  if (state === 'loading' || state === 'granted') return null;
+  const openDialog = (e) => {
+    e.stopPropagation();
+    setError('');
+    setReason('');
+    setDialogOpen(true);
+  };
 
-  const handleClick = async () => {
+  const submit = async () => {
     setBusy(true);
+    setError('');
     try {
-      await accessRequestsApi.createForStage(stageId);
+      await accessRequestsApi.createForStage(stageId, reason.trim() || null);
       setState('pending');
+      setDialogOpen(false);
+    } catch (err) {
+      setError(err.message || 'Could not send the request.');
     } finally {
       setBusy(false);
     }
   };
 
+  if (state === 'loading') return null;
+  if (state === 'granted' && tier === 'contributor_confidential') return null;
+
   if (state === 'pending') {
-    return <p className="text-xs text-gray-500 py-1 px-1">Stage access requested — pending review.</p>;
+    return <span className="text-xs text-gray-500">Access requested — pending review.</span>;
   }
 
   return (
-    <button
-      type="button"
-      onClick={handleClick}
-      disabled={busy}
-      className="text-xs text-primary-light hover:text-primary transition-colors py-1 px-1"
-    >
-      Need access to more documents in this stage? Request stage access.
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={openDialog}
+        title={hasAccess ? 'Request access to this stage’s confidential documents' : 'Request access to this stage'}
+        className="text-xs text-primary-light hover:text-primary transition-colors py-1 px-2 rounded-md hover:bg-surface-hover"
+      >
+        {hasAccess ? 'Request confidential access' : 'Request access'}
+      </button>
+      <Modal
+        open={dialogOpen}
+        onClose={() => setDialogOpen(false)}
+        title={hasAccess ? 'Request confidential access' : 'Request stage access'}
+        description={
+          hasAccess
+            ? `Ask for access to ${stageName || 'this stage'}'s confidential documents.`
+            : `Ask for access to ${stageName || 'this stage'}.`
+        }
+      >
+        <div className="space-y-3">
+          <div>
+            <label htmlFor="access-request-reason" className="block text-xs text-gray-400 mb-1">
+              Why do you need access? (optional)
+            </label>
+            <textarea
+              id="access-request-reason"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              maxLength={500}
+              rows={3}
+              placeholder="e.g. Need to review QA's test coverage before sign-off"
+              className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-gray-200 placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-primary"
+            />
+          </div>
+          {error && <p className="text-xs text-red-400">{error}</p>}
+          <div className="flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => setDialogOpen(false)} disabled={busy}>
+              Cancel
+            </Button>
+            <Button onClick={submit} loading={busy}>
+              Send request
+            </Button>
+          </div>
+        </div>
+      </Modal>
+    </>
   );
 };
 
 // One stage grouping in the Sources panel. Renders even when it has no
-// documents (so newly created / empty stages are visible and manageable).
+// documents (so newly created / empty stages are visible and manageable),
+// and even when the caller has no document access to it at all (hasAccess
+// false) — the stage itself, its name, and its position are never hidden.
 const StageSection = ({
   stage,
   stageId = null,
   documents = [],
+  hasAccess = true,
   canReview,
   canOverrideScan = false,
   canDelete,
@@ -101,6 +179,7 @@ const StageSection = ({
           )}
         </button>
         <div className="flex items-center gap-1 shrink-0 pr-1">
+          {stageId && <StageAccessRequest stageId={stageId} stageName={stage} hasAccess={hasAccess} />}
           {stageId && onViewChecklist && (
             <button
               type="button"
@@ -136,7 +215,11 @@ const StageSection = ({
       <div className={`grid transition-all duration-200 ease-in-out ${expanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'}`}>
         <div className="overflow-hidden">
           <div className="p-4 border-t border-border/50 bg-background/30">
-            {documents.length > 0 ? (
+            {!hasAccess ? (
+              <p className="text-xs text-gray-600 py-1">
+                You don&apos;t have access to this stage&apos;s documents. Request access above to view them.
+              </p>
+            ) : documents.length > 0 ? (
               <div className="flex flex-col gap-1">
                 {documents.map((doc) => (
                   <DocumentItem
@@ -153,9 +236,6 @@ const StageSection = ({
               </div>
             ) : (
               <p className="text-xs text-gray-600 py-1">No documents in this stage yet.</p>
-            )}
-            {documents.some((d) => d.locked) && stageId && (
-              <StageAccessLink stageId={stageId} />
             )}
           </div>
         </div>
