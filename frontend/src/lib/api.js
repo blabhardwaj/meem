@@ -238,7 +238,11 @@ export const stagesApi = {
   },
   // Required-document checklist for a stage — what R001 evaluates for
   // mandatory evidence, and what "X/Y requirements satisfied" counts.
-  // -> [{ requirement_id, stage_id, name, description, is_mandatory, source, created_at }]
+  // satisfied/satisfied_by come from the audit engine's RequirementSatisfaction
+  // table and are ABAC-filtered server-side: satisfied can be true while
+  // satisfied_by is null when the caller can't see the satisfying document.
+  // -> [{ requirement_id, stage_id, name, description, is_mandatory, source,
+  //       created_at, satisfied, satisfied_by: {document_id, filename} | null }]
   listRequirements: (projectId, stageId) =>
     request(`/projects/${encodeURIComponent(projectId)}/stages/${encodeURIComponent(stageId)}/requirements`),
   // body: { name, description?, is_mandatory? }
