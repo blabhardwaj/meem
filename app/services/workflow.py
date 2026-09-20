@@ -340,14 +340,28 @@ def approve_document(
     state.approved_by = approver_id
     state.approval_timestamp = datetime.now(timezone.utc)
     state.rejection_reason = None
+    target_version = None
     if document is not None and document.current_version_id is not None:
         promote_version_on_approval(
             db, document_id=document_id, version_id=document.current_version_id
         )
-    record_audit(
+        target_version = db.get(DocumentVersion, document.current_version_id)
+
+    audit_entry = record_audit(
         db, actor_id=approver_id, action="APPROVE_DOCUMENT", resource_type="document",
-        resource_id=document_id, details={"state": "approved"},
+        resource_id=document_id, details={
+            "state": "approved",
+            "version_id": str(document.current_version_id) if document and document.current_version_id else None,
+            "version_number": target_version.version_number if target_version else None,
+            "role": role,
+            "team_id": str(team_id),
+        },
     )
+    if target_version is not None:
+        target_version.approved_by = approver_id
+        target_version.approved_at = state.approval_timestamp
+        target_version.provenance_event_id = audit_entry.log_id
+
     if document is not None and document.uploaded_by != approver_id:
         notify_document_decided(db, document=document, approved=True)
     db.commit()

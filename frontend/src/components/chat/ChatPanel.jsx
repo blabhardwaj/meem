@@ -58,7 +58,7 @@ const buildReviewSeedMessage = (reviewSession) => ({
   failedCriteria: reviewSession.failedCriteria || [],
 });
 
-const ChatPanel = ({ projectId, mode = 'search', reviewSession = null, initialQuery = null, onReviewFinalized, onReviewExit, onInitialQueryConsumed }) => {
+const ChatPanel = ({ projectId, mode = 'search', reviewSession = null, initialQuery = null, prefillQuery = null, onReviewFinalized, onReviewExit, onInitialQueryConsumed }) => {
   const isDraft = mode === 'draft';
   const isReview = mode === 'review';
   const isSearch = mode === 'rag' || mode === 'search';
@@ -489,16 +489,19 @@ const ChatPanel = ({ projectId, mode = 'search', reviewSession = null, initialQu
             >
               <ArrowLeft size={13} /> Back to drafting
             </button>
-          ) : hasHistory && !historyOpen && (
+          ) : hasHistory && (
             <button
               type="button"
-              onClick={() => setHistoryOpen(true)}
+              onClick={() => setHistoryOpen((open) => !open)}
               className="cursor-pointer text-gray-400 transition-colors hover:text-primary-light"
-              aria-label="Open chat history"
-              aria-expanded={false}
+              aria-label={historyOpen ? 'Close chat history' : 'Open chat history'}
+              aria-expanded={historyOpen}
               title="Chat history"
             >
-              <Menu size={21} />
+              <span className="relative block h-[21px] w-[21px]">
+                <Menu size={21} className={`absolute inset-0 transition-all duration-150 ${historyOpen ? 'opacity-0 rotate-90 scale-75' : 'opacity-100 rotate-0 scale-100'}`} />
+                <X size={21} className={`absolute inset-0 transition-all duration-150 ${historyOpen ? 'opacity-100 rotate-0 scale-100' : 'opacity-0 -rotate-90 scale-75'}`} />
+              </span>
             </button>
           )}
         </div>
@@ -769,7 +772,13 @@ const ChatPanel = ({ projectId, mode = 'search', reviewSession = null, initialQu
         )}
       </div>
 
-      <ChatInput onSend={handleSend} disabled={isTyping} placeholder={inputPlaceholder} />
+      <ChatInput
+        onSend={handleSend}
+        disabled={isTyping}
+        placeholder={inputPlaceholder}
+        prefillValue={prefillQuery}
+        autoFocus={Boolean(prefillQuery)}
+      />
 
       <MarkdownViewer
         open={Boolean(viewerDoc)}

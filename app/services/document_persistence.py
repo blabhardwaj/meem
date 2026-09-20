@@ -212,16 +212,18 @@ def _persist_new_document(
         db.add(WorkflowState(document_id=document_id, state=WorkflowStatus.draft))
         workflow_state = WorkflowStatus.draft.value
 
-    record_audit(
+    upload_audit = record_audit(
         db, actor_id=user_id, action="UPLOAD_DOCUMENT", resource_type="document",
         resource_id=document_id,
         details={
             "stage_id": str(stage.stage_id),
             "team_id": str(team_id),
+            "version_id": str(version_id),
             "sensitivity": final_sensitivity.name,
             "workflow_state": workflow_state or "none",
         },
     )
+    version.provenance_event_id = upload_audit.log_id
     if workflow_state == WorkflowStatus.approved.value:
         record_audit(
             db,
@@ -376,6 +378,8 @@ def get_document_view_data(db: Session, document_id: uuid.UUID) -> dict:
     )
 
     workflow = db.query(WorkflowState).filter(WorkflowState.document_id == document_id).one_or_none()
+    stage = db.get(Stage, document.stage_id) if document.stage_id else None
+    stage_requires_approval = stage.requires_approval if stage else False
 
     # Item 10: surface the cached document-coherence assessment here too —
     # the same place the review modal already fetches scan results, per the
@@ -384,6 +388,8 @@ def get_document_view_data(db: Session, document_id: uuid.UUID) -> dict:
     # matching R009's own gating (a low-confidence issue isn't shown as a
     # concern here either — it's not "fact" anywhere in the app).
     from app.models.graph import DocumentCoherenceCheck
+    from app.models.required_document import RequiredDocument
+    from app.models.requirement_satisfaction import RequirementSatisfaction
     from app.services.graph.llm_extraction import DIRECT_FACT_CONFIDENCE_FLOOR
 
     coherence_check = (
@@ -396,14 +402,72 @@ def get_document_view_data(db: Session, document_id: uuid.UUID) -> dict:
         .order_by(DocumentCoherenceCheck.completed_at.desc())
         .first()
     )
-    coherence_issues = [
+    raw_issues = [
         issue for issue in (coherence_check.issues if coherence_check else [])
         if isinstance(issue, dict) and issue.get("confidence", 0) >= DIRECT_FACT_CONFIDENCE_FLOOR
     ]
 
+    # Same suppression evaluate_r009_document_coherence applies during an
+    # audit sweep: a cached "unmet_requirement" issue is a historical fact
+    # about THIS document's content, but it should stop being shown as a
+    # live concern once a different, currently-selected document has
+    # superseded it as that requirement's evidence (see
+    # audit_rules.evaluate_r009_document_coherence's docstring for the full
+    # reasoning). Without this, a document's own review view could keep
+    # showing "doesn't meet the requirement" forever after a better
+    # document elsewhere already fixed the gap -- exactly what the audit
+    # findings list no longer does, making the two views disagree.
+    # Reads the already-persisted RequirementSatisfaction snapshot (last
+    # audit run) rather than recomputing evidence resolution live -- same
+    # freshness the rest of the app already accepts for this table.
+    coherence_issues = []
+    reqs_by_name = None
+    for issue in raw_issues:
+        if issue.get("type") != "unmet_requirement" or document.stage_id is None:
+            coherence_issues.append(issue)
+            continue
+        if reqs_by_name is None:
+            reqs_by_name = {
+                req.name: req.requirement_id
+                for req in db.query(RequiredDocument)
+                .filter(RequiredDocument.stage_id == document.stage_id)
+                .all()
+            }
+        related_context = issue.get("related_context", "") or ""
+        matched_req_id = next((rid for name, rid in reqs_by_name.items() if name in related_context), None)
+        if matched_req_id is not None:
+            satisfaction = (
+                db.query(RequirementSatisfaction)
+                .filter(RequirementSatisfaction.requirement_id == matched_req_id)
+                .first()
+            )
+            if satisfaction is not None and satisfaction.document_id != document_id:
+                continue  # superseded -- a different document now serves as this requirement's evidence
+        coherence_issues.append(issue)
+
     content = version.file_data
     if isinstance(content, bytes):
         content = content.decode("utf-8", errors="replace")
+
+    uploader_user = db.get(User, version.uploaded_by)
+    uploader_info = {
+        "user_id": str(uploader_user.user_id) if uploader_user else str(version.uploaded_by),
+        "name": uploader_user.full_name or uploader_user.email if uploader_user else "Unknown",
+        "email": uploader_user.email if uploader_user else "",
+        "timestamp": version.created_at.isoformat(),
+    }
+
+    approver_info = None
+    approver_id = version.approved_by or (workflow.approved_by if workflow and workflow.state == WorkflowStatus.approved else None)
+    if approver_id is not None:
+        approver_user = db.get(User, approver_id)
+        approved_time = version.approved_at or (workflow.approval_timestamp if workflow else None)
+        approver_info = {
+            "user_id": str(approver_id),
+            "name": approver_user.full_name or approver_user.email if approver_user else "Unknown",
+            "email": approver_user.email if approver_user else "",
+            "timestamp": approved_time.isoformat() if approved_time else None,
+        }
 
     return {
         "document_id": str(document_id),
@@ -414,7 +478,11 @@ def get_document_view_data(db: Session, document_id: uuid.UUID) -> dict:
         "content_markdown": content,
         "sensitivity_level": document.sensitivity_level.name,
         "workflow_state": workflow.state.value if workflow else None,
+        "stage_requires_approval": stage_requires_approval,
         "created_at": version.created_at.isoformat(),
+        "uploader": uploader_info,
+        "approver": approver_info,
+        "provenance_event_id": str(version.provenance_event_id) if version.provenance_event_id else None,
         "scan_overall_score": scan.overall_score if scan else None,
         "scan_criteria": scan.criteria if scan else None,
         # Recomputed from the persisted score/criteria, NOT from

@@ -58,6 +58,8 @@ AUDIT_LOG_ACTIONS = (
     "REQUEST_CONFIDENTIAL_ACCESS",
     "APPROVE_ACCESS_REQUEST",
     "DENY_ACCESS_REQUEST",
+    "DISMISS_ADVISORY_FINDING",
+    "RESTORE_ADVISORY_FINDING",
 )
 
 _ACCESS_REQUEST_OUTCOME = {
@@ -75,20 +77,23 @@ def record_audit(
     resource_type: str,
     resource_id: uuid.UUID | str | None = None,
     details: dict | None = None,
-) -> None:
+) -> AuditLog:
     """Stage an audit row on `db` (no commit — caller commits with its work)."""
     if isinstance(resource_id, str):
         try:
             resource_id = uuid.UUID(resource_id)
         except ValueError:
             resource_id = None
-    db.add(AuditLog(
+    entry = AuditLog(
         user_id=actor_id,
         action=action,
         resource_type=resource_type,
         resource_id=resource_id,
         details=details,
-    ))
+    )
+    db.add(entry)
+    db.flush()
+    return entry
 
 
 def _details_to_text(details: dict | None) -> str | None:
@@ -191,7 +196,7 @@ def list_audit_log(db: Session, identity, limit: int = 200) -> list[dict]:
         if a.action in ("ASSIGN_ROLE", "UPDATE_ROLE", "REMOVE_ROLE"):
             team_id = _as_uuid(d.get("team_id"))
             project_id = _as_uuid(d.get("project_id"))
-        elif a.action in ("GRANT_PROJECT_ADMIN", "REVOKE_PROJECT_ADMIN"):
+        elif a.action in ("GRANT_PROJECT_ADMIN", "REVOKE_PROJECT_ADMIN", "DISMISS_ADVISORY_FINDING", "RESTORE_ADVISORY_FINDING"):
             project_id = _as_uuid(d.get("project_id"))
         elif a.action == "REQUEST_CONFIDENTIAL_ACCESS":
             team_id = a.resource_id  # resource_id IS the team for this action
@@ -212,6 +217,8 @@ def list_audit_log(db: Session, identity, limit: int = 200) -> list[dict]:
         if project_id is not None and project_id in admin_project_ids:
             return True
         if team_id is not None and team_id in lead_team_ids:
+            return True
+        if project_id is not None and any(t.project_id == project_id for t_id, t in teams.items() if t_id in lead_team_ids):
             return True
         return False
 

@@ -369,9 +369,28 @@ const DocumentItem = ({ document, canReview, canOverrideScan = false, canDelete,
                         </Badge>
                       )}
                     </p>
-                    <p className="text-xs text-gray-500 mt-1">
-                      {new Date(version.created_at).toLocaleString()} · {formatFileSize(version.file_size_bytes)}
-                    </p>
+                    <div className="text-xs text-gray-500 mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                      <span>{new Date(version.created_at).toLocaleString()}</span>
+                      <span>·</span>
+                      <span>{formatFileSize(version.file_size_bytes)}</span>
+                      {version.uploader_name && (
+                        <>
+                          <span>·</span>
+                          <span className="text-gray-300">By {version.uploader_name}</span>
+                        </>
+                      )}
+                      {version.approver_name ? (
+                        <>
+                          <span>·</span>
+                          <span className="text-emerald-400 font-medium">Approved by {version.approver_name}</span>
+                        </>
+                      ) : version.approval_outcome === 'approved' ? (
+                        <>
+                          <span>·</span>
+                          <span className="text-emerald-400 font-medium">Auto-approved</span>
+                        </>
+                      ) : null}
+                    </div>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     <Badge

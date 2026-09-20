@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { AlertTriangle, Copy, FileText, ShieldAlert, X } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { AlertTriangle, Copy, FileText, Fingerprint, ShieldAlert, ShieldCheck, UploadCloud, UserCheck, X } from 'lucide-react';
 import Badge from '../ui/Badge';
 import MarkdownMessage from '../ui/MarkdownMessage';
 import { documentsApi } from '../../lib/api';
@@ -106,11 +106,15 @@ const DocumentViewerModal = ({ documentId, onClose }) => {
               <div className="flex items-center gap-2 mt-1.5 flex-wrap">
                 {data && <Badge variant="neutral">v{data.version_number}</Badge>}
                 {data && <Badge variant="neutral">{sensitivityLabel(data.sensitivity_level)}</Badge>}
-                {data?.workflow_state && (
+                {data?.workflow_state ? (
                   <Badge variant={stateVariant[data.workflow_state] || 'neutral'}>
                     {data.workflow_state.replace('_', ' ')}
                   </Badge>
-                )}
+                ) : data?.stage_requires_approval === false ? (
+                  <Badge variant="success">
+                    auto approved
+                  </Badge>
+                ) : null}
               </div>
             </div>
           </div>
@@ -130,6 +134,86 @@ const DocumentViewerModal = ({ documentId, onClose }) => {
 
           {data && (
             <>
+              {/* Document Governance & Provenance */}
+              <div className="rounded-lg border border-border/70 bg-background/60 p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-gray-200">
+                    <ShieldCheck size={14} className="text-primary" />
+                    <span>Governance & Provenance</span>
+                  </div>
+                  {data.provenance_event_id && (
+                    <span className="flex items-center gap-1 font-mono text-[10px] text-gray-400 bg-surface/80 px-2 py-0.5 rounded border border-border/60" title={`Audit Event ID: ${data.provenance_event_id}`}>
+                      <Fingerprint size={11} className="text-gray-400" />
+                      {data.provenance_event_id.slice(0, 8)}...
+                    </span>
+                  )}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-0.5 text-xs">
+                  <div className="flex items-start gap-2 bg-surface/50 p-2.5 rounded border border-border/40">
+                    <UploadCloud size={14} className="mt-0.5 text-blue-400 shrink-0" />
+                    <div className="min-w-0">
+                      <p className="text-[11px] font-medium text-gray-400">Uploaded By</p>
+                      <p className="text-gray-200 font-medium truncate">
+                        {data.uploader?.name || data.uploader?.email || 'Unknown Uploader'}
+                      </p>
+                      {data.uploader?.role && (
+                        <p className="text-[10px] text-gray-400 capitalize">{data.uploader.role}</p>
+                      )}
+                      {data.uploader?.timestamp && (
+                        <p className="text-[10px] text-gray-500 mt-0.5">{new Date(data.uploader.timestamp).toLocaleString()}</p>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-2 bg-surface/50 p-2.5 rounded border border-border/40">
+                    <UserCheck size={14} className={`mt-0.5 shrink-0 ${
+                      data.approver || data.stage_requires_approval === false || data.workflow_state === 'approved' 
+                        ? 'text-emerald-400' 
+                        : 'text-amber-400'
+                    }`} />
+                    <div className="min-w-0">
+                      <p className="text-[11px] font-medium text-gray-400">
+                        {data.stage_requires_approval === false ? 'Approval Status' : 'Approved By'}
+                      </p>
+                      {data.approver ? (
+                        <>
+                          <p className="text-gray-200 font-medium truncate">
+                            {data.approver.name || data.approver.email}
+                          </p>
+                          {data.uploader?.user_id && data.uploader.user_id === data.approver.user_id ? (
+                            <p className="text-[10px] text-emerald-400 font-medium">Auto-approved (Privileged Uploader)</p>
+                          ) : data.approver.role ? (
+                            <p className="text-[10px] text-gray-400 capitalize">{data.approver.role}</p>
+                          ) : null}
+                          {data.approver.timestamp && (
+                            <p className="text-[10px] text-gray-500 mt-0.5">{new Date(data.approver.timestamp).toLocaleString()}</p>
+                          )}
+                        </>
+                      ) : data.stage_requires_approval === false ? (
+                        <>
+                          <p className="text-emerald-400 font-medium">
+                            Auto-approved (Scan Verified)
+                          </p>
+                          <p className="text-[10px] text-gray-400 mt-0.5">
+                            Stage policy: manual sign-off not required
+                          </p>
+                        </>
+                      ) : data.workflow_state === 'approved' ? (
+                        <>
+                          <p className="text-emerald-400 font-medium">
+                            Auto-approved (System Policy)
+                          </p>
+                          <p className="text-[10px] text-gray-400 mt-0.5">
+                            Approved and indexed
+                          </p>
+                        </>
+                      ) : (
+                        <p className="text-amber-400/90 text-xs italic mt-0.5">Pending Sign-off</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               {data.scan_criteria && data.scan_criteria.length > 0 && (
                 <div className="rounded-lg border border-border/60 bg-background/50 p-3 space-y-2">
                   <div className="flex items-center justify-between">

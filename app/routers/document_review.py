@@ -36,6 +36,7 @@ from sqlalchemy.orm import Session
 from app.models.document import Document, DocumentVersion
 from app.models.project import Project
 from app.models.team import GrantTier, Team
+from app.models.user import User
 from app.services.access_control import can_edit_document, can_view_document, has_permission, resolve_stage_grant
 from app.services.auth import ResolvedIdentity
 from app.services.document_parser import DocumentParseError, UnsupportedDocumentTypeError
@@ -127,6 +128,10 @@ class DocumentViewResponse(BaseModel):
     # Item 10: cached R009 document-coherence issues (contradiction/duplicate/
     # unmet_requirement), already confidence-filtered by get_document_view_data.
     coherence_issues: list[dict] = []
+    uploader: dict | None = None
+    approver: dict | None = None
+    provenance_event_id: str | None = None
+    stage_requires_approval: bool = True
 
 
 class ReviewMessageRequest(BaseModel):
@@ -213,6 +218,12 @@ class VersionOut(BaseModel):
     status: str
     file_size_bytes: int
     created_at: str
+    uploader_name: str | None = None
+    uploader_email: str | None = None
+    approver_name: str | None = None
+    approver_email: str | None = None
+    approved_at: str | None = None
+    provenance_event_id: str | None = None
 
 
 class VersionContentResponse(BaseModel):
@@ -675,6 +686,12 @@ def list_versions(
     live_created_at = live_version.created_at if live_version is not None else None
     is_admin = identity.is_org_admin or document.project_id in identity.project_admin_project_ids
 
+    user_ids = {v.uploaded_by for v in versions if v.uploaded_by} | {v.approved_by for v in versions if v.approved_by}
+    user_map = {}
+    if user_ids:
+        users = db.query(User).filter(User.user_id.in_(user_ids)).all()
+        user_map = {u.user_id: u for u in users}
+
     def _can_delete(v: DocumentVersion) -> bool:
         if v.version_id == live_version_id:
             return False
@@ -694,6 +711,12 @@ def list_versions(
             status=v.status.value,
             file_size_bytes=v.file_size_bytes,
             created_at=v.created_at.isoformat(),
+            uploader_name=(user_map[v.uploaded_by].full_name or user_map[v.uploaded_by].email) if v.uploaded_by in user_map else None,
+            uploader_email=user_map[v.uploaded_by].email if v.uploaded_by in user_map else None,
+            approver_name=(user_map[v.approved_by].full_name or user_map[v.approved_by].email) if v.approved_by in user_map else None,
+            approver_email=user_map[v.approved_by].email if v.approved_by in user_map else None,
+            approved_at=v.approved_at.isoformat() if v.approved_at else None,
+            provenance_event_id=str(v.provenance_event_id) if v.provenance_event_id else None,
         )
         for v in versions
     ]

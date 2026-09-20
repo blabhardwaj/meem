@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link, Navigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, ShieldCheck, Users, ClipboardList, ScrollText, FlaskConical, Check, X, Clock3, Trash2, Search, ChevronDown, ChevronRight, FolderKanban } from 'lucide-react';
+import { ArrowLeft, ShieldCheck, Users, ClipboardList, ScrollText, Check, X, Clock3, Trash2, Search, ChevronDown, ChevronRight, FolderKanban } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { adminApi, projectsApi, documentsApi, workspaceApi, accessRequestsApi, activityApi } from '../lib/api';
 import Button from '../components/ui/Button';
@@ -17,7 +17,6 @@ const TABS = [
   { id: 'approvals', label: 'Pending Approvals', icon: ClipboardList },
   { id: 'audit', label: 'Audit Log', icon: ScrollText },
   { id: 'activity', label: 'Project Activity', icon: Clock3 },
-  { id: 'rbac', label: 'Role Matrix', icon: FlaskConical },
 ];
 
 const TEAM_ROLES = ['viewer', 'contributor', 'team_lead'];
@@ -99,7 +98,7 @@ const AdminPage = () => {
     || roleValues.some((role) => ['contributor', 'team_lead', 'project_admin'].includes(role));
   const canManageUsers = isOrgAdmin || isProjectAdminAnywhere || isTeamLeadAnywhere;
   const availableTabs = TABS.filter((tab) => {
-    if (tab.id === 'users' || tab.id === 'rbac') return canManageUsers;
+    if (tab.id === 'users') return canManageUsers;
     if (tab.id === 'audit') return canViewAudit;
     if (tab.id === 'activity') return canViewActivity;
     if (tab.id === 'approvals') return hasApprovalAccess;
@@ -127,7 +126,7 @@ const AdminPage = () => {
   return (
     <div className="flex-1 p-8 max-w-5xl mx-auto w-full">
       <div className="mb-6">
-        <BackButton fallbackTo="/" className="mb-4" />
+        <BackButton fallbackTo={requestedProjectId ? `/projects/${encodeURIComponent(requestedProjectId)}` : '/'} className="mb-4" />
         <h1 className="text-2xl font-bold text-gray-100 flex items-center gap-2">
           <ShieldCheck className="text-primary" size={22} />
           Access &amp; Governance
@@ -135,25 +134,29 @@ const AdminPage = () => {
         <p className="text-gray-400 mt-1">User access, approvals, and access-control diagnostics.</p>
       </div>
 
-      <div className="flex gap-1 border-b border-border mb-6 overflow-x-auto">
-        {availableTabs.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors whitespace-nowrap
-              ${tab === t.id ? 'border-primary text-primary-light' : 'border-transparent text-gray-400 hover:text-gray-200'}`}
-          >
-            <t.icon size={16} />
-            {t.label}
-          </button>
-        ))}
+      <div className="flex justify-center mb-6">
+        <div className="inline-flex items-center gap-1 p-1 rounded-xl border border-border bg-surface/80 max-w-full overflow-x-auto">
+          {availableTabs.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={`flex items-center gap-2 px-3.5 py-2 text-sm font-medium rounded-lg transition-all whitespace-nowrap ${
+                tab === t.id
+                  ? 'bg-background text-gray-100 shadow-xs border border-border/60 font-semibold'
+                  : 'text-gray-400 hover:text-gray-200 hover:bg-surface-hover/60 border border-transparent'
+              }`}
+            >
+              <t.icon size={16} className={tab === t.id ? 'text-primary' : ''} />
+              {t.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {tab === 'users' && canManageUsers && <UsersTab currentUser={user} initialProjectId={requestedProjectId} />}
       {tab === 'approvals' && hasApprovalAccess && <ApprovalsTab projects={visibleProjects} canOverrideScan={isOrgAdmin} />}
       {tab === 'audit' && canViewAudit && <AuditTab />}
       {tab === 'activity' && canViewActivity && <ProjectActivityTab />}
-      {tab === 'rbac' && canManageUsers && <RbacTab />}
     </div>
   );
 };
@@ -1238,63 +1241,5 @@ const AuditTab = () => {
     </div>
   );
 };
-
-// Static reference — mirrors app/services/access_control.py (_ACTION_MIN_ROLE,
-// the cumulative team-role rank, and the org_admin / project_admin bypass).
-const RBAC_ACTIONS = ['view', 'upload', 'edit', 'submit', 'approve', 'reject', 'manage members'];
-const RBAC_MATRIX = [
-  { role: 'Viewer', scope: 'Per team', allow: ['view'] },
-  { role: 'Contributor', scope: 'Per team', allow: ['view', 'upload', 'edit', 'submit'] },
-  {
-    role: 'Team Lead', scope: 'Per team',
-    allow: ['view', 'upload', 'edit', 'submit', 'approve', 'reject', 'manage members'],
-  },
-  { role: 'Project Admin', scope: 'Whole project', allow: 'ALL' },
-  { role: 'Organization Admin', scope: 'Whole tenant', allow: 'ALL' },
-];
-
-const RbacTab = () => (
-  <Card
-    title="Role Matrix"
-    description="What each role can do. Team roles are cumulative (Team Lead includes Contributor includes Viewer); Project Admin and Organization Admin bypass the per-team checks entirely."
-  >
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="text-left text-gray-500 border-b border-border">
-            <th className="py-2 pr-4 font-medium">Role</th>
-            <th className="py-2 pr-4 font-medium">Scope</th>
-            {RBAC_ACTIONS.map((a) => (
-              <th key={a} className="py-2 px-2 font-medium text-center whitespace-nowrap">{a}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-border/50">
-          {RBAC_MATRIX.map((row) => (
-            <tr key={row.role} className="text-gray-300">
-              <td className="py-2.5 pr-4 font-medium text-gray-100 whitespace-nowrap">{row.role}</td>
-              <td className="py-2.5 pr-4 text-gray-500 whitespace-nowrap">{row.scope}</td>
-              {RBAC_ACTIONS.map((a) => {
-                const allowed = row.allow === 'ALL' || row.allow.includes(a);
-                return (
-                  <td key={a} className="py-2.5 px-2 text-center">
-                    {allowed
-                      ? <Check size={15} className="inline text-emerald-400" />
-                      : <span className="text-gray-700">–</span>}
-                  </td>
-                );
-              })}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-
-    <div className="mt-5 space-y-1.5 text-xs text-gray-500">
-      <p><span className="text-gray-400">Sensitivity clearance:</span> Viewers and Contributors see Public and Internal documents; Confidential requires Team Lead+ (automatic) or a Contributor with an active access grant.</p>
-      <p><span className="text-gray-400">approve / reject:</span> require Team Lead+ on the specific team a document was uploaded as.</p>
-    </div>
-  </Card>
-);
 
 export default AdminPage;

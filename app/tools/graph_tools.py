@@ -12,6 +12,7 @@ from app.models.required_document import RequiredDocument
 from app.models.stage import Stage
 from app.models.user import User
 from app.services.access_control import (
+    can_view_document,
     get_accessible_stages_for_user,
     has_any_project_access,
 )
@@ -220,11 +221,11 @@ def query_entity_neighborhood(
                 return json.dumps({"error": "Access denied: Stage is not accessible to caller"})
         elif center_node.source_table == "documents":
             doc = db.query(Document).filter(Document.document_id == center_node.source_id).first()
-            if doc and doc.stage_id and doc.stage_id not in accessible_stages:
-                return json.dumps({"error": "Access denied: Document belongs to an inaccessible stage"})
+            if doc and not can_view_document(db, caller_user_id, doc):
+                return json.dumps({"error": "Access denied: Document is not accessible to caller"})
         elif center_node.source_table == "required_documents":
             req = db.query(RequiredDocument).filter(RequiredDocument.requirement_id == center_node.source_id).first()
-            if req and req.stage_id not in accessible_stages:
+            if req and req.stage_id and req.stage_id not in accessible_stages:
                 return json.dumps({"error": "Access denied: Requirement belongs to an inaccessible stage"})
 
         edges = (
@@ -264,10 +265,10 @@ def query_entity_neighborhood(
                 return n.source_id in accessible_stages
             elif n.source_table == "documents":
                 d = docs_by_id.get(n.source_id)
-                return (d is None) or (d.stage_id is None) or (d.stage_id in accessible_stages)
+                return d is not None and can_view_document(db, caller_user_id, d)
             elif n.source_table == "required_documents":
                 r = reqs_by_id.get(n.source_id)
-                return (r is None) or (r.stage_id in accessible_stages)
+                return (r is None) or (r.stage_id is None) or (r.stage_id in accessible_stages)
             return True
 
         relationships = []

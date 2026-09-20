@@ -322,7 +322,7 @@ const ProjectWorkspace = () => {
             documents={documents}
             canReview={canReview}
             canOverrideScan={canOverrideScan}
-            canDelete={user?.is_org_admin}
+            canDelete={['org_admin', 'project_admin'].includes(role) || Boolean(user?.is_org_admin)}
             canEditAny={canContribute}
             currentUserId={user?.user_id}
             onChanged={load}
@@ -387,14 +387,16 @@ const ProjectWorkspace = () => {
             >
               <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">Create new team</p>
               <div className="flex items-end gap-2">
-                <Input
-                  label="Team name"
-                  value={newTeamName}
-                  onChange={(e) => setNewTeamName(e.target.value)}
-                  placeholder="e.g. QA"
-                />
+                <div className="min-w-0 flex-1">
+                  <Input
+                    label="Team name"
+                    value={newTeamName}
+                    onChange={(e) => setNewTeamName(e.target.value)}
+                    placeholder="e.g. QA"
+                  />
+                </div>
                 <Button type="submit" loading={creatingTeam} disabled={!newTeamName.trim()}>
-                  Create team
+                  Create
                 </Button>
               </div>
               <p className="text-xs text-gray-500">

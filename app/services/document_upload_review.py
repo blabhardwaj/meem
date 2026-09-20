@@ -173,6 +173,23 @@ def upload_and_scan(
         promote_version_on_approval(
             db, document_id=created.document_id, version_id=created.version_id,
         )
+        from app.services.audit import record_audit
+        audit_entry = record_audit(
+            db, actor_id=user_id, action="APPROVE_DOCUMENT", resource_type="document",
+            resource_id=created.document_id, details={
+                "state": "approved",
+                "version_id": str(created.version_id),
+                "auto_approved": True,
+                "role": role,
+                "team_id": str(team_id),
+            },
+        )
+        ver = db.get(DocumentVersion, created.version_id)
+        if ver is not None:
+            ver.approved_by = user_id
+            ver.approved_at = now
+            ver.provenance_event_id = audit_entry.log_id
+
 
     # Unconditional (not nested under the DocumentScan branch above): the
     # needs_attention status update must be committed even on a total

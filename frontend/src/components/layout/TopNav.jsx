@@ -1,20 +1,39 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { ShieldCheck, LogOut, ChevronDown, User, Command, CircleHelp, Bell, X, FolderKanban, Activity, Sun, Moon } from 'lucide-react';
-import { Link, useNavigate, useMatch } from 'react-router-dom';
+import { Link, useNavigate, useMatch, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { notificationsApi, projectsApi } from '../../lib/api';
 
 const TopNav = () => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   // Workspace/Intelligence switcher only makes sense while inside a project
   // — moved here from the per-project header (UI_FIXES_2026-09-15.md #8) so
   // its position stays fixed instead of shifting with badge content.
   const workspaceMatch = useMatch('/projects/:projectId');
   const intelligenceMatch = useMatch('/projects/:projectId/intelligence');
-  const activeProjectId = workspaceMatch?.params.projectId || intelligenceMatch?.params.projectId;
+  const uploadMatch = useMatch('/projects/:projectId/upload');
+  const routeProjectId = workspaceMatch?.params.projectId || intelligenceMatch?.params.projectId || uploadMatch?.params.projectId;
   const inIntelligence = Boolean(intelligenceMatch);
   const adminMatch = useMatch('/admin');
+  const homeMatch = useMatch('/');
+
+  const [storedProjectId, setStoredProjectId] = useState(() => {
+    return window.sessionStorage?.getItem('docflow_active_project_id') || null;
+  });
+
+  useEffect(() => {
+    if (routeProjectId) {
+      setStoredProjectId(routeProjectId);
+      window.sessionStorage?.setItem('docflow_active_project_id', routeProjectId);
+    } else if (homeMatch) {
+      setStoredProjectId(null);
+      window.sessionStorage?.removeItem('docflow_active_project_id');
+    }
+  }, [routeProjectId, homeMatch]);
+
+  const activeProjectId = routeProjectId || (adminMatch ? (searchParams.get('project_id') || storedProjectId) : null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [projects, setProjects] = useState([]);
@@ -109,9 +128,10 @@ const TopNav = () => {
   const toggleAdmin = () => {
     if (adminMatch) {
       if (window.history.state?.idx > 0) navigate(-1);
+      else if (activeProjectId) navigate(`/projects/${encodeURIComponent(activeProjectId)}`);
       else navigate('/');
     } else {
-      navigate('/admin');
+      navigate(activeProjectId ? `/admin?project_id=${encodeURIComponent(activeProjectId)}` : '/admin');
     }
   };
 
@@ -129,23 +149,23 @@ const TopNav = () => {
           <Link
             to={`/projects/${encodeURIComponent(activeProjectId)}`}
             className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition-colors ${
-              inIntelligence
-                ? 'text-gray-400 hover:text-gray-200 hover:bg-surface-hover'
-                : 'bg-background text-gray-100 shadow-sm'
+              !inIntelligence && !adminMatch
+                ? 'bg-background text-gray-100 shadow-sm'
+                : 'text-gray-400 hover:text-gray-200 hover:bg-surface-hover'
             }`}
           >
-            <FolderKanban size={13} className={inIntelligence ? '' : 'text-primary'} />
+            <FolderKanban size={13} className={!inIntelligence && !adminMatch ? 'text-primary' : ''} />
             Workspace
           </Link>
           <Link
             to={`/projects/${encodeURIComponent(activeProjectId)}/intelligence`}
             className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition-colors ${
-              inIntelligence
+              inIntelligence && !adminMatch
                 ? 'bg-background text-gray-100 shadow-sm'
                 : 'text-gray-400 hover:text-gray-200 hover:bg-surface-hover'
             }`}
           >
-            <Activity size={13} className={inIntelligence ? 'text-primary' : ''} />
+            <Activity size={13} className={inIntelligence && !adminMatch ? 'text-primary' : ''} />
             Intelligence
           </Link>
         </div>

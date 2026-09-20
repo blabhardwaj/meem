@@ -118,6 +118,32 @@ def _team_leads(db, team_id: uuid.UUID) -> list[str]:
     return sorted(e for e in (_email(db, r.user_id) for r in rows) if e)
 
 
+def _user_profile(db, user_id: uuid.UUID | None, team_id: uuid.UUID | None = None, project_id: uuid.UUID | None = None) -> dict | None:
+    if user_id is None:
+        return None
+    u = db.get(User, user_id)
+    if not u:
+        return None
+    role_str = "member"
+    if team_id is not None:
+        m = db.execute(
+            select(UserTeamMembership).where(
+                UserTeamMembership.user_id == user_id,
+                UserTeamMembership.team_id == team_id,
+            )
+        ).scalar_one_or_none()
+        if m:
+            role_str = m.role.value if hasattr(m.role, "value") else str(m.role)
+    elif u.is_org_admin:
+        role_str = "org_admin"
+    return {
+        "user_id": str(u.user_id),
+        "name": u.full_name or u.email,
+        "email": u.email,
+        "role": role_str,
+    }
+
+
 def _resolve_visible_document(db, project_id, user_id, ref: str, stage_ref: str | None = None):
     """
     (doc_or_None, error_dict_or_None). A document the caller cannot see comes
@@ -138,10 +164,16 @@ def _resolve_visible_document(db, project_id, user_id, ref: str, stage_ref: str 
         return None, {
             "status": "ambiguous",
             "matches": [
-                f"{d.original_filename} (stage: '{_stage_name(db, d.stage_id)}')"
+                {
+                    "filename": d.original_filename,
+                    "stage": _stage_name(db, d.stage_id),
+                }
                 for d in visible
             ],
-            "message": "Multiple documents match that reference across different stages — ask the user which stage they mean.",
+            "message": (
+                f"Multiple documents match '{ref}'. Which one did you mean? "
+                + ", ".join(f"'{d.original_filename}' ({_stage_name(db, d.stage_id)})" for d in visible)
+            ),
         }
     return visible[0], None
 
@@ -186,22 +218,38 @@ def get_document_info(document_reference: str, stage_reference: str | None = Non
                 else "not yet submitted for approval"
             )
 
+        current_v = None
         current_version = None
         if doc.current_version_id is not None:
-            v = db.get(DocumentVersion, doc.current_version_id)
-            if v is not None:
-                current_version = v.version_number
+            current_v = db.get(DocumentVersion, doc.current_version_id)
+            if current_v is not None:
+                current_version = current_v.version_number
+
+        uploader = _user_profile(db, current_v.uploaded_by if current_v else doc.uploaded_by, doc.uploaded_as_team_id, doc.project_id)
+        if uploader:
+            uploader["uploaded_at"] = (current_v.created_at if current_v else doc.created_at).isoformat() if (current_v and current_v.created_at or doc.created_at) else None
+
+        approver = None
+        approver_id = (current_v.approved_by if current_v else None) or (wf.approved_by if wf and wf.state == WorkflowStatus.approved else None)
+        if approver_id:
+            approver = _user_profile(db, approver_id, doc.uploaded_as_team_id, doc.project_id)
+            if approver:
+                approved_time = (current_v.approved_at if current_v else None) or (wf.approval_timestamp if wf else None)
+                approver["approved_at"] = approved_time.isoformat() if approved_time else None
 
         return {
             "status": "found",
             "document": doc.original_filename,
-            "uploaded_by": _email(db, doc.uploaded_by),
+            "uploader": uploader,
+            "uploaded_by": uploader["email"] if uploader else _email(db, doc.uploaded_by),
+            "approver": approver,
             "approval_status": approval_status,
             "sensitivity": doc.sensitivity_level.name,
             "team": _team_name(db, doc.uploaded_as_team_id),
             "stage": _stage_name(db, doc.stage_id),
             "uploaded_at": doc.created_at.isoformat() if doc.created_at else None,
             "current_version": current_version,
+            "provenance_event_id": str(current_v.provenance_event_id) if current_v and current_v.provenance_event_id else None,
         }
     finally:
         db.close()
@@ -254,26 +302,34 @@ def get_version_history(document_reference: str, stage_reference: str | None = N
         # collapsed into one "current" concept.
         live = resolve_grounding_version(db, doc.document_id)
 
+        version_items = []
+        for v in versions:
+            v_uploader = _user_profile(db, v.uploaded_by, doc.uploaded_as_team_id, doc.project_id)
+            v_approver = None
+            if v.approved_by:
+                v_approver = _user_profile(db, v.approved_by, doc.uploaded_as_team_id, doc.project_id)
+                if v_approver and v.approved_at:
+                    v_approver["approved_at"] = v.approved_at.isoformat()
+
+            version_items.append({
+                "version": v.version_number,
+                "approval_outcome": v.approval_outcome.value if v.approval_outcome else None,
+                "created_at": v.created_at.isoformat() if v.created_at else None,
+                "status": v.status.value,
+                "uploader": v_uploader,
+                "approver": v_approver,
+                "provenance_event_id": str(v.provenance_event_id) if v.provenance_event_id else None,
+                "is_latest": v.version_id == doc.current_version_id,
+                "is_live": live is not None and v.version_id == live.version_id,
+            })
+
         return {
             "status": "found",
             "document": doc.original_filename,
             "version_count": len(versions),
             "latest_version": latest_version,
             "live_version": live.version_number if live is not None else None,
-            "versions": [
-                {
-                    # None (rather than a number) until this version is
-                    # actually approved — a draft/pending/rejected version
-                    # has no version number.
-                    "version": v.version_number,
-                    "approval_outcome": v.approval_outcome.value if v.approval_outcome else None,
-                    "created_at": v.created_at.isoformat() if v.created_at else None,
-                    "status": v.status.value,
-                    "is_latest": v.version_id == doc.current_version_id,
-                    "is_live": live is not None and v.version_id == live.version_id,
-                }
-                for v in versions
-            ],
+            "versions": version_items,
         }
     finally:
         db.close()
@@ -871,14 +927,21 @@ def get_project_readiness(stage_reference: str | None = None) -> dict:
 # ---------------------------------------------------------------------------
 
 @tool
-def get_project_gaps(stage_reference: str | None = None) -> dict:
+def get_project_gaps(stage_reference: str | None = None, document_reference: str | None = None) -> dict:
     """The specific compliance gaps behind "What needs attention" on the
     Intelligence dashboard: missing mandatory requirements, unapproved gate
     documents, broken dependencies, stale references, document
-    contradictions, and Scanner-flagged versions. Optionally scoped to one
-    stage via `stage_reference`. Call this for questions like "what needs
+    contradictions, document-coherence issues (duplicate content, unmet
+    requirements, and content contradictions found within a single
+    document), and Scanner-flagged versions. Optionally scoped to one stage
+    via `stage_reference` and/or narrowed to findings about ONE specific
+    document via `document_reference` (filename or document id) — use
+    `document_reference` whenever the user is asking about a particular
+    document's own flagged issue rather than the whole project/stage, so
+    the answer only covers that document instead of everything else also
+    flagged in the same stage. Call this for questions like "what needs
     attention", "what's missing", "are there any contradictions", "what
-    findings does the audit have".
+    findings does the audit have", or "why is <document> flagged".
     """
     ctx = get_query_context()
     db = _scoped_session(ctx.user_id)
@@ -896,23 +959,51 @@ def get_project_gaps(stage_reference: str | None = None) -> dict:
         if stage_id is not None and stage_id not in accessible_stages:
             return {"status": "not_found", "message": f"No stage matching '{stage_reference}' exists in this project."}
 
+        target_document_id = None
+        if document_reference:
+            matches = match_documents(db, ctx.project_id, document_reference, stage_id=stage_id)
+            visible_matches = [d for d in matches if can_view_document(db, ctx.user_id, d)]
+            if not visible_matches:
+                return {
+                    "status": "not_found",
+                    "message": f"No document matching '{document_reference}' exists in this project.",
+                }
+            if len(visible_matches) > 1:
+                return {
+                    "status": "ambiguous",
+                    "message": f"Multiple documents match '{document_reference}': "
+                    + ", ".join(d.original_filename for d in visible_matches),
+                }
+            target_document_id = visible_matches[0].document_id
+
         audit_run = execute_project_audit(db, ctx.project_id, target_stage_id=stage_id)
         visible_findings = [
             f for f in audit_run.findings
             if f.target_stage_id is None or f.target_stage_id in accessible_stages
         ]
+        if target_document_id is not None:
+            visible_findings = [f for f in visible_findings if f.affected_entity_id == target_document_id]
+
         visible_blockers = [f for f in visible_findings if f.is_blocker]
         readiness_status = "READY" if len(visible_blockers) == 0 else "NOT_READY"
 
+        if target_document_id is not None:
+            scope = f"document '{document_reference}'" + (f" in stage '{stage_reference}'" if stage_id else "")
+        elif stage_id:
+            scope = f"stage '{stage_reference}'"
+        else:
+            scope = "entire project"
+
         return {
             "status": "ok",
-            "scope": f"stage '{stage_reference}'" if stage_id else "entire project",
+            "scope": scope,
             "readiness_status": readiness_status,
             "missing_mandatory_requirements": [f.description for f in visible_findings if f.rule_code == "R001"],
             "unapproved_gate_documents": [f.description for f in visible_findings if f.rule_code in ("R002", "R008")],
             "broken_dependencies": [f.description for f in visible_findings if f.rule_code in ("R003", "R005")],
             "stale_references": [f.description for f in visible_findings if f.rule_code == "R004"],
             "document_contradictions": [f.description for f in visible_findings if f.rule_code == "R007"],
+            "document_coherence_issues": [f.description for f in visible_findings if f.rule_code == "R009"],
             "scanner_flagged_versions": [f.description for f in visible_findings if f.rule_code == "R010"],
         }
     finally:
