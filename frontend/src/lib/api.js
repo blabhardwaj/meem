@@ -644,15 +644,25 @@ export const intelligenceApi = {
     const q = stageId ? `?stage_id=${encodeURIComponent(stageId)}` : '';
     return request(`/projects/${encodeURIComponent(projectId)}/intelligence/gaps${q}`);
   },
-  findings: (projectId, { severity, ruleCode, isBlocker, stageId } = {}) => {
+  findings: (projectId, { severity, ruleCode, isBlocker, stageId, status } = {}) => {
     const params = new URLSearchParams();
     if (severity) params.append('severity', severity);
     if (ruleCode) params.append('rule_code', ruleCode);
     if (isBlocker !== undefined && isBlocker !== null) params.append('is_blocker', isBlocker);
     if (stageId) params.append('stage_id', stageId);
+    if (status) params.append('status', status);
     const qs = params.toString();
     return request(`/projects/${encodeURIComponent(projectId)}/intelligence/findings${qs ? `?${qs}` : ''}`);
   },
+  dismissFinding: (projectId, findingId, reason) =>
+    request(`/projects/${encodeURIComponent(projectId)}/intelligence/findings/${encodeURIComponent(findingId)}/dismiss`, {
+      method: 'POST',
+      body: { reason },
+    }),
+  restoreFinding: (projectId, findingId) =>
+    request(`/projects/${encodeURIComponent(projectId)}/intelligence/findings/${encodeURIComponent(findingId)}/restore`, {
+      method: 'POST',
+    }),
   neighborhood: (projectId, { nodeId, sourceTable, sourceId, depth = 1 } = {}) => {
     const params = new URLSearchParams();
     if (nodeId) params.append('node_id', nodeId);

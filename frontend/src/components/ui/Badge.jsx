@@ -16,7 +16,7 @@ const Badge = ({
   };
 
   return (
-    <span title={title} className={`inline-flex items-center leading-none px-2.5 pt-[3px] pb-[5px] rounded-full text-xs font-medium border ${variants[variant]} ${className}`}>
+    <span title={title} className={`inline-flex items-center shrink-0 whitespace-nowrap leading-none px-2.5 pt-[3px] pb-[5px] rounded-full text-xs font-medium border ${variants[variant]} ${className}`}>
       {children}
     </span>
   );

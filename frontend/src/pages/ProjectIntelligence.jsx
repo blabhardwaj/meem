@@ -75,6 +75,7 @@ const ProjectIntelligence = () => {
   // Filters & display toggles
   const [selectedStageId, setSelectedStageId] = useState(null);
   const [severityFilter, setSeverityFilter] = useState('ALL');
+  const [statusFilter, setStatusFilter] = useState('active');
   const [blockerOnly, setBlockerOnly] = useState(false);
   const [ruleCodeFilter, setRuleCodeFilter] = useState('ALL');
   const [searchQuery, setSearchQuery] = useState('');
@@ -90,10 +91,23 @@ const ProjectIntelligence = () => {
   // instead of navigating away to the Workspace tab. `searchPanelQuery` is
   // bumped to a fresh string each open so ChatPanel's initialQuery
   // auto-send fires even if the panel is reopened with the same question.
+  //
+  // `searchPanelPrefill` is a SEPARATE, non-sending channel: a suggested
+  // query the user picks should fire immediately (that's the point of
+  // suggesting it), but "Ask a custom question" must only open the panel
+  // with an empty, focused input for the user's OWN words — auto-sending a
+  // canned string there would silently ignore what the button says it does.
   const [searchPanelOpen, setSearchPanelOpen] = useState(false);
   const [searchPanelQuery, setSearchPanelQuery] = useState(null);
+  const [searchPanelPrefill, setSearchPanelPrefill] = useState(null);
   const openSearchPanel = (query) => {
     setSearchPanelQuery(query || null);
+    setSearchPanelPrefill(null);
+    setSearchPanelOpen(true);
+  };
+  const openSearchPanelForCustomQuestion = (prefill = null) => {
+    setSearchPanelQuery(null);
+    setSearchPanelPrefill(prefill || null);
     setSearchPanelOpen(true);
   };
 
@@ -328,6 +342,8 @@ const ProjectIntelligence = () => {
 
   // Filtered findings
   const allFiltered = findings.filter((f) => {
+    if (statusFilter === 'active' && f.is_dismissed) return false;
+    if (statusFilter === 'dismissed' && !f.is_dismissed) return false;
     if (selectedStageId && f.target_stage_id !== selectedStageId) return false;
     if (severityFilter !== 'ALL' && f.severity?.toUpperCase() !== severityFilter) return false;
     if (blockerOnly && !f.is_blocker) return false;
@@ -724,6 +740,17 @@ const ProjectIntelligence = () => {
                 />
               </div>
 
+              {/* Status Filter */}
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs text-gray-300 focus:border-primary focus:outline-none"
+              >
+                <option value="active">Active Only</option>
+                <option value="dismissed">Dismissed Only</option>
+                <option value="all">All Findings</option>
+              </select>
+
               {/* Severity Filter */}
               <select
                 value={severityFilter}
@@ -806,12 +833,16 @@ const ProjectIntelligence = () => {
                   >
                     <div className="space-y-1.5 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
-                        {isApproval ? (
+                        {finding.is_dismissed ? (
+                          <Badge variant="warning">DISMISSED ADVISORY</Badge>
+                        ) : isApproval ? (
                           <Badge variant="warning">GATE REVIEW REQUIRED</Badge>
                         ) : isContradiction ? (
                           <Badge variant="danger">MATERIAL CONTRADICTION</Badge>
-                        ) : (
+                        ) : finding.is_blocker ? (
                           <Badge variant="danger">GATING BLOCKER</Badge>
+                        ) : (
+                          <Badge variant="neutral">ADVISORY</Badge>
                         )}
                         <Badge variant="active">{finding.rule_code}</Badge>
                         {isGrouped ? (
@@ -1039,6 +1070,8 @@ const ProjectIntelligence = () => {
         stages={stages}
         documents={documents}
         onAskSearchAgent={openSearchPanel}
+        onAskCustomQuestion={openSearchPanelForCustomQuestion}
+        onFindingUpdated={() => loadData({ silent: true })}
       />
 
       {/* Search Agent slide-over — UI_FIXES_2026-09-15.md #18: stays on
@@ -1064,7 +1097,13 @@ const ProjectIntelligence = () => {
               </button>
             </div>
             <div className="flex-1 min-h-0 flex flex-col">
-              <ChatPanel key={searchPanelQuery || 'search-panel'} projectId={projectId} mode="search" initialQuery={searchPanelQuery} />
+              <ChatPanel
+                key={searchPanelQuery || searchPanelPrefill || 'search-panel'}
+                projectId={projectId}
+                mode="search"
+                initialQuery={searchPanelQuery}
+                prefillQuery={searchPanelPrefill}
+              />
             </div>
           </div>
         </>
