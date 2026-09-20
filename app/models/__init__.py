@@ -27,6 +27,7 @@ from app.models.graph import (
     ProjectMetricSnapshot,
     StageMetricSnapshot,
     DocumentCoherenceCheck,
+    AdvisoryDismissal,
 )
 
 __all__ = [
@@ -61,6 +62,7 @@ __all__ = [
     "ProjectMetricSnapshot",
     "StageMetricSnapshot",
     "DocumentCoherenceCheck",
+    "AdvisoryDismissal",
     "Invitation",
 ]
 

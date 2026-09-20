@@ -133,6 +133,13 @@ class Claim(Base):
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
 
+    @property
+    def scope(self) -> str:
+        if isinstance(self.source_locator, dict):
+            return self.source_locator.get("scope", "uncertain")
+        return "uncertain"
+
+
 
 class ExtractionRun(Base):
     """
@@ -369,3 +376,7 @@ class StageMetricSnapshot(Base):
     snapshot_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
+
+
+# Re-export AdvisoryDismissal so graph model consumers have unified access
+from app.models.advisory_dismissal import AdvisoryDismissal

@@ -8,8 +8,10 @@ from app.models.graph import AuditFinding, AuditRun, Edge, Node, ProjectMetricSn
 from app.models.project import Project
 from app.models.stage import Stage
 from app.schemas.graph import (
+    AdvisoryDismissalDTO,
     AuditRunResponse,
     CompletionDTO,
+    DismissFindingRequest,
     FindingDTO,
     FindingsResponse,
     GapsResponse,
@@ -24,10 +26,23 @@ from app.schemas.graph import (
     TimelineResponse,
     TriggerAuditRequest,
 )
+from app.models.required_document import RequiredDocument
+from app.models.document import Document, DocumentVersion
 from app.services.access_control import (
+    classify_documents_visibility,
+    DocumentVisibility,
     get_accessible_stages_for_user,
     has_any_project_access,
+    can_view_document,
 )
+from app.services.graph.audit_rules import _resolve_coherence_evidence_document
+from app.services.graph.advisory_dismissal_service import (
+    compute_finding_fingerprint,
+    dismiss_advisory_finding,
+    get_active_dismissals_map,
+    restore_advisory_finding,
+)
+from app.services.authorization_context import build_authorization_context
 from app.services.audit import record_audit
 from app.services.auth import ResolvedIdentity
 from app.services.graph.audit_engine import execute_project_audit, sync_and_audit_project
@@ -140,14 +155,189 @@ def get_gaps(
             detail="Access to specified stage is denied",
         )
 
+def _build_and_filter_finding_dtos(
+    db: Session,
+    identity: ResolvedIdentity,
+    project_id: uuid.UUID,
+    findings: List[AuditFinding],
+    accessible_stages: Set[uuid.UUID],
+) -> List[FindingDTO]:
+    """
+    Applies Attribute-Based Access Control (ABAC) to audit findings:
+    1. Scope check: Finding must belong to an accessible stage (or project-wide).
+    2. Affected document check: If affected_entity_type == 'document', caller must have clearance
+       via can_view_document(). If not cleared, the finding is completely suppressed.
+    3. Evidence sources check: If finding references evidence documents, each evidence document is checked
+       via can_view_document(). Any document the caller cannot view is omitted from evidence_sources.
+    4. Legacy / on-the-fly resolution: If R009 finding has empty evidence_sources, dynamically resolve them
+       and filter by ABAC.
+    """
+    # Preload docs for project to build cache
+    all_project_docs = (
+        db.query(Document)
+        .filter(Document.project_id == project_id)
+        .all()
+    )
+    doc_map = {d.document_id: d for d in all_project_docs}
+
+    # Text cache for on-the-fly R009 resolution if legacy findings have empty evidence_sources
+    project_docs_cache: Dict[uuid.UUID, Tuple[str, str]] = {}
+    for pd in all_project_docs:
+        body = ""
+        if pd.current_version_id:
+            pv = db.get(DocumentVersion, pd.current_version_id)
+            if pv and pv.file_data:
+                try:
+                    body = pv.file_data.decode("utf-8", errors="ignore")
+                except Exception:
+                    body = ""
+        project_docs_cache[pd.document_id] = (pd.original_filename, body)
+
+    active_dismissals = get_active_dismissals_map(db, project_id)
+
+    dtos = []
+    for f in findings:
+        # 1. Stage access
+        if f.target_stage_id is not None and f.target_stage_id not in accessible_stages:
+            continue
+
+        # 2. ABAC on affected document
+        if f.affected_entity_type == "document" and f.affected_entity_id:
+            aff_uuid = None
+            try:
+                aff_uuid = uuid.UUID(str(f.affected_entity_id))
+            except (ValueError, TypeError):
+                pass
+            if aff_uuid:
+                aff_doc = doc_map.get(aff_uuid)
+                if aff_doc and not can_view_document(db, identity.user_id, aff_doc):
+                    # Caller cannot view the affected document; suppress finding under ABAC
+                    continue
+
+        # 3. Evidence sources
+        ev_sources = f.evidence_sources
+        if (not ev_sources or len(ev_sources) == 0) and f.rule_code == "R009" and f.affected_entity_id:
+            try:
+                aff_uuid = uuid.UUID(str(f.affected_entity_id))
+                aff_doc = doc_map.get(aff_uuid)
+                if aff_doc:
+                    ev_sources = [
+                        {
+                            "document_id": str(aff_doc.document_id),
+                            "filename": aff_doc.original_filename,
+                            "role": "affected",
+                        }
+                    ]
+                    issue_mock = {
+                        "related_context": (f.details or {}).get("related_context", ""),
+                        "description": f.description or "",
+                    }
+                    conflicting_info = _resolve_coherence_evidence_document(
+                        db, project_id, issue_mock, aff_doc.document_id, project_docs_cache
+                    )
+                    if conflicting_info:
+                        cid, cfname = conflicting_info
+                        ev_sources.append({
+                            "document_id": str(cid),
+                            "filename": cfname,
+                            "role": "conflicting" if (f.details or {}).get("issue_type") == "contradiction" else "reference",
+                        })
+            except Exception:
+                pass
+
+        # 4. ABAC filter on evidence sources
+        filtered_ev_sources = []
+        if ev_sources and isinstance(ev_sources, list):
+            for src in ev_sources:
+                if not isinstance(src, dict):
+                    continue
+                d_id_raw = src.get("document_id")
+                if not d_id_raw:
+                    continue
+                try:
+                    d_uuid = uuid.UUID(str(d_id_raw))
+                except (ValueError, TypeError):
+                    continue
+                d_obj = doc_map.get(d_uuid)
+                if d_obj and can_view_document(db, identity.user_id, d_obj):
+                    filtered_ev_sources.append(src)
+                # If caller lacks clearance for d_obj, it is omitted!
+
+        # 5. Deterministic fingerprint & durable dismissal resolution
+        fingerprint = compute_finding_fingerprint(
+            rule_code=f.rule_code,
+            affected_entity_id=f.affected_entity_id,
+            details=f.details,
+            evidence_sources=filtered_ev_sources or ev_sources,
+        )
+
+        # Dismissal Safety Invariant:
+        # An AdvisoryDismissal may only affect a finding while the current AuditFinding
+        # has is_blocker == False. If a later audit classifies the same fingerprint
+        # as a gate blocker, the dismissal is ignored for that run and the blocker remains fully active.
+        dismissal_obj = None
+        is_dismissed = False
+        dismissal_info = None
+
+        if not f.is_blocker:
+            dismissal_obj = active_dismissals.get(fingerprint)
+            if dismissal_obj:
+                is_dismissed = True
+                dismissal_info = {
+                    "dismissal_id": str(dismissal_obj.dismissal_id),
+                    "reason": dismissal_obj.reason,
+                    "dismissed_by": str(dismissal_obj.dismissed_by),
+                    "dismissed_at": dismissal_obj.dismissed_at.isoformat() if dismissal_obj.dismissed_at else None,
+                }
+
+        dtos.append(
+            FindingDTO(
+                finding_id=str(f.finding_id),
+                rule_code=f.rule_code,
+                severity=f.severity,
+                is_blocker=f.is_blocker,
+                title=f.title,
+                description=f.description,
+                affected_entity_type=f.affected_entity_type,
+                affected_entity_id=str(f.affected_entity_id),
+                target_stage_id=str(f.target_stage_id) if f.target_stage_id else None,
+                evidence_sources=filtered_ev_sources,
+                details=f.details,
+                created_at=f.created_at.isoformat() if f.created_at else None,
+                finding_fingerprint=fingerprint,
+                is_dismissed=is_dismissed,
+                dismissal=dismissal_info,
+            )
+        )
+
+    return dtos
+
+
+@router.get("/gaps", response_model=GapsResponse)
+def get_gaps(
+    project_id: uuid.UUID,
+    stage_id: Optional[uuid.UUID] = Query(None, description="Optional target stage scope"),
+    db: Session = Depends(get_db_with_tenant),
+    identity: ResolvedIdentity = Depends(get_current_user),
+):
+    """
+    Returns current project blockers and gaps partitioned by gap type
+    (missing requirements, broken dependencies, reference breaches, gate approvals, contradictions).
+    """
+    accessible_stages = _check_project_access(db, identity, project_id)
+    if stage_id and stage_id not in accessible_stages:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access to specified stage is denied",
+        )
+
     # Execute deterministic audit evaluation
     audit_run = execute_project_audit(db, project_id, target_stage_id=stage_id, triggered_by=identity.user_id)
 
-    # Filter findings to accessible stages
-    visible_findings = [
-        f for f in audit_run.findings
-        if f.target_stage_id is None or f.target_stage_id in accessible_stages
-    ]
+    # Apply ABAC stage and document filtering
+    visible_dtos = _build_and_filter_finding_dtos(
+        db, identity, project_id, audit_run.findings, accessible_stages
+    )
 
     missing_reqs: List[FindingDTO] = []
     broken_deps: List[FindingDTO] = []
@@ -155,31 +345,17 @@ def get_gaps(
     unapproved_gate: List[FindingDTO] = []
     contradictions: List[FindingDTO] = []
 
-    for f in visible_findings:
-        dto = FindingDTO(
-            finding_id=str(f.finding_id),
-            rule_code=f.rule_code,
-            severity=f.severity,
-            is_blocker=f.is_blocker,
-            title=f.title,
-            description=f.description,
-            affected_entity_type=f.affected_entity_type,
-            affected_entity_id=str(f.affected_entity_id),
-            target_stage_id=str(f.target_stage_id) if f.target_stage_id else None,
-            evidence_sources=f.evidence_sources,
-            details=f.details,
-            created_at=f.created_at.isoformat() if f.created_at else None,
-        )
-        if f.rule_code == "R001":
+    for dto in visible_dtos:
+        if dto.rule_code == "R001":
             missing_reqs.append(dto)
-        elif f.rule_code in ("R003", "R005"):
+        elif dto.rule_code in ("R003", "R005"):
             broken_deps.append(dto)
-        elif f.rule_code == "R002":
+        elif dto.rule_code == "R002":
             unapproved_gate.append(dto)
-        elif f.rule_code == "R007":
+        elif dto.rule_code in ("R007", "R009"):
             contradictions.append(dto)
 
-    total_blockers = len([f for f in visible_findings if f.is_blocker])
+    total_blockers = len([dto for dto in visible_dtos if dto.is_blocker])
 
     return GapsResponse(
         project_id=str(project_id),
@@ -202,6 +378,7 @@ def get_findings(
     rule_code: Optional[str] = Query(None, description="Filter by rule code (e.g. R001, R002)"),
     is_blocker: Optional[bool] = Query(None, description="Filter by blocker status"),
     stage_id: Optional[uuid.UUID] = Query(None, description="Filter by target stage"),
+    status: Optional[str] = Query("all", description="Status filter: all, active, dismissed"),
     db: Session = Depends(get_db_with_tenant),
     identity: ResolvedIdentity = Depends(get_current_user),
 ):
@@ -233,37 +410,98 @@ def get_findings(
 
     raw_findings = query.all()
 
-    # Apply ABAC stage filtering
-    visible_findings = [
-        f for f in raw_findings
-        if f.target_stage_id is None or f.target_stage_id in accessible_stages
-    ]
+    # Apply ABAC stage, affected document, and evidence sources filtering
+    dtos = _build_and_filter_finding_dtos(
+        db, identity, project_id, raw_findings, accessible_stages
+    )
 
-    dtos = [
-        FindingDTO(
-            finding_id=str(f.finding_id),
-            rule_code=f.rule_code,
-            severity=f.severity,
-            is_blocker=f.is_blocker,
-            title=f.title,
-            description=f.description,
-            affected_entity_type=f.affected_entity_type,
-            affected_entity_id=str(f.affected_entity_id),
-            target_stage_id=str(f.target_stage_id) if f.target_stage_id else None,
-            evidence_sources=f.evidence_sources,
-            details=f.details,
-            created_at=f.created_at.isoformat() if f.created_at else None,
-        )
-        for f in visible_findings
-    ]
+    # Status filter (all, active, dismissed)
+    status_clean = (status or "all").strip().lower()
+    if status_clean == "active":
+        dtos = [d for d in dtos if not d.is_dismissed]
+    elif status_clean == "dismissed":
+        dtos = [d for d in dtos if d.is_dismissed]
 
-    blockers_count = len([f for f in visible_findings if f.is_blocker])
+    blockers_count = len([d for d in dtos if d.is_blocker])
 
     return FindingsResponse(
         project_id=str(project_id),
         total_findings=len(dtos),
         blockers_count=blockers_count,
         findings=dtos,
+    )
+
+
+@router.post("/findings/{finding_id}/dismiss", response_model=AdvisoryDismissalDTO)
+def dismiss_finding_endpoint(
+    project_id: uuid.UUID,
+    finding_id: uuid.UUID,
+    req: DismissFindingRequest,
+    db: Session = Depends(get_db_with_tenant),
+    identity: ResolvedIdentity = Depends(get_current_user),
+):
+    """
+    Dismisses an advisory finding (is_blocker == False) with mandatory reason.
+    Strictly restricted to Team Lead+ on the project, Project Admin, or Org Admin.
+    Rejects any gating blockers (is_blocker == True) with HTTP 400.
+    """
+    _check_project_access(db, identity, project_id)
+    dismissal = dismiss_advisory_finding(
+        db=db,
+        identity=identity,
+        project_id=project_id,
+        finding_id=finding_id,
+        reason=req.reason,
+    )
+    return AdvisoryDismissalDTO(
+        dismissal_id=str(dismissal.dismissal_id),
+        project_id=str(dismissal.project_id),
+        finding_fingerprint=dismissal.finding_fingerprint,
+        rule_code=dismissal.rule_code,
+        affected_entity_type=dismissal.affected_entity_type,
+        affected_entity_id=str(dismissal.affected_entity_id),
+        initial_finding_id=str(dismissal.initial_finding_id),
+        is_active=dismissal.is_active,
+        reason=dismissal.reason,
+        dismissed_by=str(dismissal.dismissed_by),
+        dismissed_at=dismissal.dismissed_at.isoformat() if dismissal.dismissed_at else "",
+        restored_by=str(dismissal.restored_by) if dismissal.restored_by else None,
+        restored_at=dismissal.restored_at.isoformat() if dismissal.restored_at else None,
+    )
+
+
+@router.post("/findings/{finding_id}/restore", response_model=AdvisoryDismissalDTO)
+def restore_finding_endpoint(
+    project_id: uuid.UUID,
+    finding_id: uuid.UUID,
+    db: Session = Depends(get_db_with_tenant),
+    identity: ResolvedIdentity = Depends(get_current_user),
+):
+    """
+    Restores a previously dismissed advisory finding back to active status.
+    Strictly restricted to Team Lead+ on the project, Project Admin, or Org Admin.
+    """
+    _check_project_access(db, identity, project_id)
+    dismissal = restore_advisory_finding(
+        db=db,
+        identity=identity,
+        project_id=project_id,
+        finding_id=finding_id,
+    )
+    return AdvisoryDismissalDTO(
+        dismissal_id=str(dismissal.dismissal_id),
+        project_id=str(dismissal.project_id),
+        finding_fingerprint=dismissal.finding_fingerprint,
+        rule_code=dismissal.rule_code,
+        affected_entity_type=dismissal.affected_entity_type,
+        affected_entity_id=str(dismissal.affected_entity_id),
+        initial_finding_id=str(dismissal.initial_finding_id),
+        is_active=dismissal.is_active,
+        reason=dismissal.reason,
+        dismissed_by=str(dismissal.dismissed_by),
+        dismissed_at=dismissal.dismissed_at.isoformat() if dismissal.dismissed_at else "",
+        restored_by=str(dismissal.restored_by) if dismissal.restored_by else None,
+        restored_at=dismissal.restored_at.isoformat() if dismissal.restored_at else None,
     )
 
 
@@ -342,15 +580,65 @@ def get_neighborhood(
         else:
             break
 
-    # Apply ABAC filtering: if node is a stage or document, check user access
+    # Apply full ABAC filtering across stages, documents (sensitivity clearance), and requirements
+    auth_context = build_authorization_context(db, user_id=identity.user_id, project_id=project_id)
+
+    doc_source_ids = [n.source_id for n in visited_nodes.values() if n.source_table == "documents" and n.source_id]
+    version_parent_doc_ids = []
+    for n in visited_nodes.values():
+        if n.source_table == "document_versions" and n.properties:
+            doc_id_str = n.properties.get("document_id")
+            if doc_id_str:
+                try:
+                    version_parent_doc_ids.append(uuid.UUID(doc_id_str))
+                except (ValueError, TypeError):
+                    pass
+    all_doc_ids = list(set(doc_source_ids + version_parent_doc_ids))
+    doc_visibility = classify_documents_visibility(db, auth_context, all_doc_ids) if all_doc_ids else {}
+
+    req_source_ids = [n.source_id for n in visited_nodes.values() if n.source_table == "required_documents" and n.source_id]
+    req_stage_map: Dict[uuid.UUID, Optional[uuid.UUID]] = {}
+    if req_source_ids:
+        req_rows = (
+            db.query(RequiredDocument.requirement_id, RequiredDocument.stage_id)
+            .filter(RequiredDocument.requirement_id.in_(req_source_ids))
+            .all()
+        )
+        req_stage_map = {r.requirement_id: r.stage_id for r in req_rows}
+
     def is_visible(node: Node) -> bool:
         if node.source_table == "stages":
             return node.source_id in accessible_stages
         if node.source_table == "documents":
-            stage_id = node.properties.get("stage_id")
-            if stage_id:
-                return uuid.UUID(stage_id) in accessible_stages
+            # Must satisfy both stage access AND document sensitivity/confidentiality clearance
+            return doc_visibility.get(node.source_id) == DocumentVisibility.fully_allowed
+        if node.source_table == "document_versions":
+            doc_id_str = node.properties.get("document_id") if node.properties else None
+            if doc_id_str:
+                try:
+                    parent_doc_id = uuid.UUID(doc_id_str)
+                    return doc_visibility.get(parent_doc_id) == DocumentVisibility.fully_allowed
+                except (ValueError, TypeError):
+                    return False
+            return False
+        if node.source_table == "required_documents":
+            stg_id = req_stage_map.get(node.source_id)
+            if stg_id is not None:
+                return stg_id in accessible_stages
+            prop_stage_id = node.properties.get("stage_id") if node.properties else None
+            if prop_stage_id:
+                try:
+                    return uuid.UUID(prop_stage_id) in accessible_stages
+                except (ValueError, TypeError):
+                    pass
+            return True
         return True
+
+    if not is_visible(center_node):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to view this entity's graph neighborhood",
+        )
 
     filtered_node_ids = {nid for nid, n in visited_nodes.items() if is_visible(n)}
 
