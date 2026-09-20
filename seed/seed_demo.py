@@ -897,6 +897,7 @@ def main():
     args = parser.parse_args()
 
     db = SessionLocal()
+    db.info["tenant_id"] = LUMEN_TENANT_ID
     try:
         if args.verify:
             success = run_verification(db)
