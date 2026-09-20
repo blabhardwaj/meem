@@ -311,6 +311,12 @@ A claim is a concrete, checkable statement the document makes — a timeline, a 
 technology choice, a security/compliance requirement, a performance target, or any other specific
 commitment. Do NOT extract vague statements, opinions, or anything without a concrete value.
 
+IMPORTANT SCOPE RULES:
+- DO NOT extract document artifact metadata or authoring provenance:
+  * Do NOT extract: "document preparation date", "prepared by", "document author", "reviewed by", sign-off dates, document version, or generation timestamps.
+  These describe when or by whom this specific text file was written, NOT project commitments.
+- DO extract project-wide commitments, business rules, architectural choices, compliance mandates, SLAs, budgets, and project milestones (e.g. "Policy target: gross NPA <= 4.5%", "Effective date: 1 October 2026", "Review frequency: Annual", "Policy owner: Alice").
+
 Return ONLY a JSON array, no prose:
 [
   {
@@ -351,6 +357,8 @@ def extract_claims_llm(content: str) -> list[dict]:
     if not isinstance(raw, list):
         return []
 
+    from app.services.graph.claims_analyzer import classify_claim_scope
+
     results = []
     for item in raw:
         if not isinstance(item, dict):
@@ -371,14 +379,17 @@ def extract_claims_llm(content: str) -> list[dict]:
         if confidence < LOW_CONFIDENCE_FLOOR:
             continue
 
-        results.append({
+        claim_dict = {
             "subject": subject.strip(),
             "predicate": predicate.strip(),
             "object": obj.strip(),
             "polarity": polarity,
             "snippet": snippet.strip(),
             "confidence": float(confidence),
-        })
+        }
+        scope = classify_claim_scope(claim_dict)
+        claim_dict["source_locator"] = {"scope": scope}
+        results.append(claim_dict)
 
     return results
 

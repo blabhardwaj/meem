@@ -54,10 +54,26 @@ def _resolve_requirement_evidence(
     evidence, or None if no evidence exists. matched_via is "graph_edge" or
     "semantic".
 
-    Graph-edge branch: edges are ordered by confidence DESC, created_at ASC
-    (highest-confidence edge wins; ties broken by extraction order) rather
-    than incidental database row order — this ordering was never previously
-    given an explicit, meaningful definition.
+    Graph-edge branch priority (highest first):
+      1. Deterministic/title-matched edges (properties.source == "regex",
+         relationship_extractor.py's title_or_content_evidence rule) over
+         LLM-inferred edges (properties.source == "llm") at the same
+         confidence tier. A document whose filename/title IS the
+         requirement (e.g. "03_product_concept_and_differentiation.md" for
+         a "Product concept" requirement) is a stronger, more deliberate
+         evidence claim than an LLM noticing a related section inside a
+         document about something else (e.g. a "Product Concept" heading
+         inside a Business Case doc) — the latter is real evidence but
+         should not outrank a document purpose-built for the requirement.
+      2. Confidence, descending, within a priority tier.
+      3. created_at, ascending (oldest first) — the final tiebreak only
+         once neither of the above distinguishes two edges (e.g. two
+         same-tier LLM edges at equal confidence).
+    This ordering was never previously given an explicit, meaningful
+    definition; recency alone (the pre-existing tiebreak) let an old,
+    tangentially-related document keep "winning" over a new, purpose-built
+    one forever, since nothing about a later regex/LLM pass could ever
+    outrank an equal-or-higher-confidence edge already on record.
 
     Semantic branch (Master Plan v2, item 7): reuses the EXISTING RAG Qdrant
     infrastructure (same collection, same dense embedding model) rather than
@@ -87,8 +103,14 @@ def _resolve_requirement_evidence(
             # direct evidence — only surfaced for manual review elsewhere.
             Edge.confidence >= DIRECT_FACT_CONFIDENCE_FLOOR,
         )
-        .order_by(Edge.confidence.desc(), Edge.created_at.asc())
         .all()
+    )
+    evidence_edges.sort(
+        key=lambda e: (
+            0 if (e.properties or {}).get("source") == "regex" else 1,
+            -e.confidence,
+            e.created_at,
+        )
     )
 
     for edge in evidence_edges:
@@ -891,6 +913,7 @@ def evaluate_r009_document_coherence(
     project_id: uuid.UUID,
     evaluated_stage_ids: List[uuid.UUID],
     stage_name_map: Dict[uuid.UUID, str],
+    evidence_by_requirement: Optional[Dict[uuid.UUID, Optional[Tuple[uuid.UUID, str]]]] = None,
 ) -> List[FindingSpec]:
     """
     R009: Document-Level Coherence (Master Plan v2, item 10) — the actual
@@ -906,6 +929,120 @@ def evaluate_r009_document_coherence(
     actually re-finalized). The cache is populated once per finalize by
     coherence.run_document_coherence_check(), called from
     audit_engine.extract_sync_and_audit_document().
+
+    evidence_by_requirement (same precomputed map R001/RequirementSatisfaction
+    use, see execute_project_audit) lets an "unmet_requirement" issue be
+    checked against reality: the cached issue is historical (it was true of
+    THIS document's content when it was checked) and is never deleted, but
+    it should only surface as a live, actionable finding while this document
+    is STILL the one currently selected as evidence for that requirement. If
+    a better document has since been uploaded and now serves as the
+    requirement's evidence (see _resolve_requirement_evidence's priority
+    ordering), the old document's coherence complaint about a requirement
+    it's no longer being relied on for is suppressed — it would otherwise
+    block the project forever on a document nobody is treating as the
+    answer to that requirement anymore. A coherence issue on the document
+    that IS currently selected as evidence still fires exactly as before;
+    this only prevents a stale, superseded complaint from blocking.
+
+    Matching an issue to a requirement is done by name lookup (the cached
+    issue's "related_context" field is a free-form string, most commonly
+    "Requirement: <name>" per coherence.py's _gather_related_context — there
+    is no requirement_id stored on older or current issues). This is a
+    best-effort match: an issue whose related_context doesn't identify a
+    requirement in scope (contradiction/duplicate issues; requirements
+    outside evaluated_stage_ids) is never suppressed by this check, only
+    ever a name-matched unmet_requirement issue that resolves to a
+    requirement whose CURRENT evidence document differs from this one.
+    """
+    findings: List[FindingSpec] = []
+    if not evaluated_stage_ids:
+        return findings
+
+def _resolve_coherence_evidence_document(
+    db: Session,
+    project_id: uuid.UUID,
+    issue: dict,
+    current_doc_id: uuid.UUID,
+    project_docs_cache: Dict[uuid.UUID, Tuple[str, str]],
+) -> Optional[Tuple[uuid.UUID, str]]:
+    """
+    Resolves the conflicting or evidence document for an R009 issue.
+    First checks issue.get("evidence_document_id").
+    Falls back to matching document filenames, parenthesized section titles,
+    quoted text, or text snippets in project documents.
+    """
+    ev_id = issue.get("evidence_document_id")
+    if ev_id:
+        try:
+            ev_uuid = uuid.UUID(str(ev_id))
+            if ev_uuid != current_doc_id and ev_uuid in project_docs_cache:
+                return ev_uuid, project_docs_cache[ev_uuid][0]
+            elif ev_uuid != current_doc_id:
+                d = db.get(Document, ev_uuid)
+                if d:
+                    return d.document_id, d.original_filename
+        except Exception:
+            pass
+
+    related_ctx = str(issue.get("related_context") or "")
+    desc = str(issue.get("description") or "")
+    combined_text = f"{related_ctx} {desc}".lower()
+
+    # 1. Match other document filenames or recognizable stem
+    import re
+    for d_id, (fname, body) in project_docs_cache.items():
+        if d_id == current_doc_id:
+            continue
+        fname_lower = fname.lower()
+        if fname_lower in combined_text:
+            return d_id, fname
+        stem = re.sub(r"^\d+_", "", fname).replace(".md", "").replace("_", " ").strip().lower()
+        if len(stem) >= 8 and stem in combined_text:
+            return d_id, fname
+
+    # 2. Match parenthesized sections, quotes, or snippets
+    patterns = [
+        r'\(([\d\w\s\.\-]+)\)', # e.g. (1. Executive Summary)
+        r'"([^"]+)"',           # quotes
+        r'“([^”]+)”',
+    ]
+    candidates = []
+    for pat in patterns:
+        for match in re.findall(pat, related_ctx):
+            m = match.strip()
+            if len(m) >= 5:
+                candidates.append(m)
+
+    for line in related_ctx.split("\n"):
+        line = line.strip()
+        if len(line) >= 15 and not line.startswith("Requirement:"):
+            candidates.append(line)
+
+    for cand in candidates:
+        cand_lower = cand.lower()
+        for d_id, (fname, body) in project_docs_cache.items():
+            if d_id == current_doc_id:
+                continue
+            if cand_lower in body.lower():
+                return d_id, fname
+
+    return None
+
+
+def evaluate_r009_document_coherence(
+    db: Session,
+    tenant_id: uuid.UUID,
+    project_id: uuid.UUID,
+    evaluated_stage_ids: List[uuid.UUID],
+    stage_name_map: Dict[uuid.UUID, str],
+    evidence_by_requirement: Optional[Dict[uuid.UUID, Tuple[uuid.UUID, uuid.UUID]]] = None,
+) -> List[FindingSpec]:
+    """
+    R009: Document-Level Coherence Issue.
+    Reads cached DocumentCoherenceCheck rows for each document's current version
+    and surfaces issues as findings.
+    Populates evidence_sources with the affected document and the conflicting/reference evidence document.
     """
     findings: List[FindingSpec] = []
     if not evaluated_stage_ids:
@@ -916,6 +1053,33 @@ def evaluate_r009_document_coherence(
         .filter(Document.project_id == project_id, Document.stage_id.in_(evaluated_stage_ids))
         .all()
     )
+
+    all_project_docs = (
+        db.query(Document)
+        .filter(Document.project_id == project_id)
+        .all()
+    )
+    project_docs_cache: Dict[uuid.UUID, Tuple[str, str]] = {}
+    for pd in all_project_docs:
+        body = ""
+        if pd.current_version_id:
+            pv = db.get(DocumentVersion, pd.current_version_id)
+            if pv and pv.file_data:
+                try:
+                    body = pv.file_data.decode("utf-8", errors="ignore")
+                except Exception:
+                    body = ""
+        project_docs_cache[pd.document_id] = (pd.original_filename, body)
+
+    # Name -> requirement_id lookup, scoped to requirements in the evaluated
+    # stages, for matching an issue's free-form related_context text back to
+    # the requirement it's actually about.
+    reqs_in_scope = (
+        db.query(RequiredDocument)
+        .filter(RequiredDocument.stage_id.in_(evaluated_stage_ids))
+        .all()
+    )
+    requirement_id_by_name = {req.name: req.requirement_id for req in reqs_in_scope}
 
     for doc in docs:
         if not doc.current_version_id:
@@ -946,9 +1110,44 @@ def evaluate_r009_document_coherence(
                 continue
 
             issue_type = issue.get("type", "unknown")
+
+            if issue_type == "unmet_requirement" and evidence_by_requirement:
+                related_context = issue.get("related_context", "") or ""
+                matched_req_id = None
+                for name, req_id in requirement_id_by_name.items():
+                    if name in related_context:
+                        matched_req_id = req_id
+                        break
+                if matched_req_id is not None:
+                    current_evidence = evidence_by_requirement.get(matched_req_id)
+                    if current_evidence is not None and current_evidence[0] != doc.document_id:
+                        # A different, currently-selected document now
+                        # serves as this requirement's evidence — this
+                        # document's old complaint about failing to meet
+                        # the requirement is no longer actionable.
+                        continue
+
             # Duplication is informational (not necessarily wrong), unlike an
             # actual contradiction or a claimed-but-unmet requirement.
             is_blocker = issue_type in ("contradiction", "unmet_requirement")
+
+            evidence_sources = [
+                {
+                    "document_id": str(doc.document_id),
+                    "filename": doc.original_filename,
+                    "role": "affected",
+                }
+            ]
+            conflicting_info = _resolve_coherence_evidence_document(
+                db, project_id, issue, doc.document_id, project_docs_cache
+            )
+            if conflicting_info:
+                conflicting_id, conflicting_fname = conflicting_info
+                evidence_sources.append({
+                    "document_id": str(conflicting_id),
+                    "filename": conflicting_fname,
+                    "role": "conflicting" if issue_type == "contradiction" else "reference",
+                })
 
             findings.append(
                 FindingSpec(
@@ -960,6 +1159,7 @@ def evaluate_r009_document_coherence(
                     affected_entity_type="document",
                     affected_entity_id=doc.document_id,
                     target_stage_id=doc.stage_id,
+                    evidence_sources=evidence_sources,
                     details={
                         "stage_name": stage_name,
                         "entity_label": doc.original_filename,

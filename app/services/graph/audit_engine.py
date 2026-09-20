@@ -189,12 +189,15 @@ def execute_project_audit(
     rules_evaluated_count = len(RULE_REGISTRY)
 
     for rule_code, rule_fn in RULE_REGISTRY:
-        # R001 is the one deliberate exception to every rule sharing an
-        # identical signature — it's the only rule with a second consumer
-        # (RequirementSatisfaction persistence, below) needing its
-        # evaluation-time evidence resolution, so it alone takes the
-        # precomputed evidence_by_requirement map.
-        if rule_code == "R001":
+        # R001 and R009 are the deliberate exceptions to every other rule
+        # sharing an identical signature. R001 is the one with a second
+        # consumer (RequirementSatisfaction persistence, below) needing its
+        # evaluation-time evidence resolution. R009 needs the same map for a
+        # different reason: an "unmet_requirement" coherence issue cached
+        # against an old document must be suppressed once a different,
+        # currently-selected document supersedes it as that requirement's
+        # evidence — see evaluate_r009_document_coherence's own docstring.
+        if rule_code in ("R001", "R009"):
             rule_findings = rule_fn(
                 db=db,
                 tenant_id=tenant_id,

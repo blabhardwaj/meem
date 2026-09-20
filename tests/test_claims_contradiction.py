@@ -27,11 +27,14 @@ from app.services.graph.audit_engine import execute_project_audit
 from app.services.graph.sync import sync_project_graph
 
 
+from sqlalchemy import text
+
 class TestClaimsContradiction(unittest.TestCase):
     def setUp(self):
         self.db = SessionLocal()
         self.tenant = self.db.query(Tenant).first()
         self.assertIsNotNone(self.tenant, "Tenant required")
+        self.db.execute(text(f"SET app.current_tenant_id = '{self.tenant.tenant_id}'"))
         self.user = self.db.query(User).filter(User.tenant_id == self.tenant.tenant_id).first()
         self.assertIsNotNone(self.user, "User required")
 

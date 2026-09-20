@@ -86,9 +86,23 @@ def _gather_related_context(db: Session, document: Document, content: str) -> li
                 payload = point.payload or {}
                 section = payload.get("section_title", "")
                 chunk_text = payload.get("chunk_text", "")
+                doc_id_str = payload.get("document_id")
+                doc_filename = None
+                if doc_id_str:
+                    try:
+                        rel_doc = db.get(Document, uuid.UUID(str(doc_id_str)))
+                        if rel_doc:
+                            doc_filename = rel_doc.original_filename
+                    except Exception:
+                        pass
+
                 if chunk_text:
+                    label_prefix = f"Document: {doc_filename}" if doc_filename else "Existing document content"
+                    label = f"{label_prefix} ({section})" if section else label_prefix
                     context.append({
-                        "label": f"Existing document content ({section})" if section else "Existing document content",
+                        "document_id": doc_id_str,
+                        "filename": doc_filename,
+                        "label": label,
                         "text": chunk_text,
                     })
         except Exception:
@@ -157,6 +171,25 @@ def run_document_coherence_check(
     try:
         related_context = _gather_related_context(db, document, content or "")
         issues = assess_document_coherence(content or "", related_context) if related_context else []
+
+        # Correlate evidence document info onto issues
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            ctx_ref = str(issue.get("related_context") or "").lower()
+            desc_ref = str(issue.get("description") or "").lower()
+            for c in related_context:
+                c_doc_id = c.get("document_id")
+                c_label = str(c.get("label") or "").lower()
+                c_fname = str(c.get("filename") or "").lower()
+                c_text = str(c.get("text") or "").lower()
+                if not c_doc_id:
+                    continue
+                # Match if label or filename appears in related_context or description, or if snippet is quoted
+                if (c_label and c_label in ctx_ref) or (c_fname and (c_fname in ctx_ref or c_fname in desc_ref)) or (len(ctx_ref) > 20 and ctx_ref in c_text):
+                    issue["evidence_document_id"] = str(c_doc_id)
+                    issue["evidence_filename"] = c.get("filename")
+                    break
 
         check.issues = issues
         check.status = "completed"

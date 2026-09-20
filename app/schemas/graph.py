@@ -71,6 +71,29 @@ class FindingDTO(BaseModel):
     evidence_sources: List[Any] = Field(default_factory=list)
     details: Dict[str, Any] = Field(default_factory=dict)
     created_at: Optional[str] = None
+    finding_fingerprint: Optional[str] = None
+    is_dismissed: bool = False
+    dismissal: Optional[Dict[str, Any]] = None
+
+
+class DismissFindingRequest(BaseModel):
+    reason: str = Field(..., min_length=5, description="Substantive rationale for dismissing this advisory finding")
+
+
+class AdvisoryDismissalDTO(BaseModel):
+    dismissal_id: str
+    project_id: str
+    finding_fingerprint: str
+    rule_code: str
+    affected_entity_type: str
+    affected_entity_id: str
+    initial_finding_id: str
+    is_active: bool
+    reason: str
+    dismissed_by: str
+    dismissed_at: str
+    restored_by: Optional[str] = None
+    restored_at: Optional[str] = None
 
 
 class FindingsResponse(BaseModel):

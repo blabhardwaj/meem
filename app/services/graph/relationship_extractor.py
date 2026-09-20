@@ -241,10 +241,25 @@ def extract_document_relationships(
                 # dot) between the title's words, matching either form.
                 req_words = [re.escape(w) for w in req_title.split()]
                 title_pattern = r"[\s\-_.]+".join(req_words) if req_words else req_escaped
-                # Match against document filename or content
-                doc_name_match = bool(re.search(rf"\b{title_pattern}\b", doc_label, re.IGNORECASE))
-                content_match = bool(re.search(rf"(?:satisfies|implements|fulfills|validates|establishes)\s+[^.\n]*\b{title_pattern}\b", content, re.IGNORECASE))
-
+                # `\b` treats "_" as a word character, so it never fires
+                # between "concept" and the next word in a filename like
+                # "03_product_concept_and_differentiation.md" — the whole
+                # match is glued to trailing text and silently never counts
+                # as a title match. Use lookarounds keyed on the SAME
+                # separator set the pattern above already accepts BETWEEN
+                # words, so a title match is only rejected when it's
+                # actually fused into a longer alphanumeric run (e.g.
+                # "concept" inside "conceptual"), not merely followed by
+                # another underscore/hyphen-joined word or a file extension.
+                boundary = r"(?:^|[\s\-_.]|$)"
+                doc_name_match = bool(re.search(
+                    rf"{boundary}{title_pattern}{boundary}", doc_label, re.IGNORECASE
+                ))
+                content_match = bool(re.search(
+                    rf"(?:satisfies|implements|fulfills|validates|establishes)\s+[^.\n]*"
+                    rf"{boundary}{title_pattern}{boundary}",
+                    content, re.IGNORECASE,
+                ))
                 if doc_name_match or content_match:
                     req_node = _upsert_node(
                         db=db,

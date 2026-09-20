@@ -5,6 +5,7 @@ from app.models.document import Document, DocumentStatus, DocumentVersion
 from app.models.graph import (
     AuditFinding,
     AuditRun,
+    DocumentCoherenceCheck,
     Edge,
     Node,
     ProjectMetricSnapshot,
@@ -12,6 +13,7 @@ from app.models.graph import (
 )
 from app.models.project import Project
 from app.models.required_document import RequiredDocument
+from app.models.requirement_satisfaction import RequirementSatisfaction
 from app.models.stage import Stage, StageReference
 from app.models.team import Team, UserTeamMembership, TeamRole
 from app.models.tenant import Tenant
@@ -466,6 +468,260 @@ class TestAuditRulesExpanded(unittest.TestCase):
             if f.rule_code == "R001" and f.affected_entity_id == req_arch.requirement_id and f.target_stage_id == engineering.stage_id
         ]
         self.assertEqual(len(arch_resolved), 0)
+
+    def test_r009_suppressed_when_superseded_by_better_evidence(self):
+        """
+        Regression test for the "R009 looks broken" bug: an old, generic
+        document (e.g. a Business Case with an incidental "Product Concept"
+        section) gets an EVIDENCES edge to a requirement via LLM inference,
+        and a cached R009 unmet_requirement finding says its content doesn't
+        actually satisfy that requirement. A NEW, purpose-built document
+        (e.g. "03_product_concept_and_differentiation.md") is then uploaded
+        with a deterministic (regex, title-matched) EVIDENCES edge to the
+        SAME requirement, at the SAME confidence. Two things must now be true:
+
+        1. _resolve_requirement_evidence must prefer the deterministic/
+           title-matched edge over the LLM-inferred one, regardless of which
+           was created first (the priority-hierarchy fix, not a recency
+           tiebreak) -- so RequirementSatisfaction/R001 point at the NEW doc.
+        2. R009's cached unmet_requirement finding on the OLD document must
+           be suppressed (no longer surfaced as a live, blocking finding),
+           because the old document is no longer the requirement's current
+           evidence -- while a genuine coherence issue cached against the
+           document that IS the current evidence must still fire.
+        """
+        stage = Stage(project_id=self.project.project_id, name="Product Definition", order_index=1, requires_approval=False)
+        self.db.add(stage)
+        self.db.commit()
+
+        requirement = RequiredDocument(
+            stage_id=stage.stage_id,
+            name="Product concept",
+            description="High-level credit-line concept and differentiation from competitors.",
+            is_mandatory=True,
+        )
+        self.db.add(requirement)
+        self.db.commit()
+
+        # Old, generic document: gets its EVIDENCES edge via LLM inference
+        # (properties.source == "llm"), created FIRST.
+        old_doc = Document(
+            tenant_id=self.tenant.tenant_id,
+            project_id=self.project.project_id,
+            stage_id=stage.stage_id,
+            uploaded_by=self.user.user_id,
+            uploaded_as_team_id=self.team.team_id,
+            original_filename="02_product_business_case.md",
+            mime_type="text/markdown",
+        )
+        self.db.add(old_doc)
+        self.db.commit()
+        old_version = DocumentVersion(
+            document_id=old_doc.document_id, uploaded_by=self.user.user_id,
+            file_data=b"...", file_size_bytes=3, status=DocumentStatus.indexed, version_number=1,
+        )
+        self.db.add(old_version)
+        self.db.commit()
+        old_doc.current_version_id = old_version.version_id
+        self.db.commit()
+
+        # New, purpose-built document: gets its EVIDENCES edge via the
+        # deterministic regex/title-match rule (properties.source ==
+        # "regex"), created SECOND -- i.e. the pre-fix tiebreak (created_at
+        # ASC) would have picked the OLD document here, which is exactly
+        # the bug being regression-tested.
+        new_doc = Document(
+            tenant_id=self.tenant.tenant_id,
+            project_id=self.project.project_id,
+            stage_id=stage.stage_id,
+            uploaded_by=self.user.user_id,
+            uploaded_as_team_id=self.team.team_id,
+            original_filename="03_product_concept_and_differentiation.md",
+            mime_type="text/markdown",
+        )
+        self.db.add(new_doc)
+        self.db.commit()
+        new_version = DocumentVersion(
+            document_id=new_doc.document_id, uploaded_by=self.user.user_id,
+            file_data=b"...", file_size_bytes=3, status=DocumentStatus.indexed, version_number=1,
+        )
+        self.db.add(new_version)
+        self.db.commit()
+        new_doc.current_version_id = new_version.version_id
+        self.db.commit()
+
+        sync_project_graph(self.db, self.project.project_id)
+
+        req_node = self.db.query(Node).filter(
+            Node.project_id == self.project.project_id,
+            Node.source_table == "required_documents",
+            Node.source_id == requirement.requirement_id,
+        ).first()
+        old_doc_node = self.db.query(Node).filter(
+            Node.project_id == self.project.project_id,
+            Node.source_table == "documents",
+            Node.source_id == old_doc.document_id,
+        ).first()
+        new_doc_node = self.db.query(Node).filter(
+            Node.project_id == self.project.project_id,
+            Node.source_table == "documents",
+            Node.source_id == new_doc.document_id,
+        ).first()
+
+        _upsert_edge(
+            db=self.db, tenant_id=self.tenant.tenant_id, project_id=self.project.project_id,
+            source_node_id=old_doc_node.node_id, target_node_id=req_node.node_id,
+            edge_type="EVIDENCES", properties={"source": "llm", "reason": "mentions product concept"},
+            confidence=0.95,
+        )
+        self.db.commit()
+        _upsert_edge(
+            db=self.db, tenant_id=self.tenant.tenant_id, project_id=self.project.project_id,
+            source_node_id=new_doc_node.node_id, target_node_id=req_node.node_id,
+            edge_type="EVIDENCES",
+            properties={"source": "regex", "rule": "title_or_content_evidence", "matched_requirement": "Product concept"},
+            confidence=0.95,
+        )
+        self.db.commit()
+
+        # Cached coherence checks: OLD doc has an unmet_requirement issue
+        # (its content doesn't actually deliver differentiation); NEW doc
+        # has no issues (it does).
+        old_check = DocumentCoherenceCheck(
+            tenant_id=self.tenant.tenant_id, project_id=self.project.project_id,
+            document_id=old_doc.document_id, version_id=old_version.version_id,
+            content_hash="old-hash", checker_version="1.0.0", status="completed",
+            issues=[{
+                "type": "unmet_requirement",
+                "description": "Describes the credit line but does not provide differentiation from competitors.",
+                "confidence": 0.9,
+                "related_context": "Requirement: Product concept",
+            }],
+        )
+        new_check = DocumentCoherenceCheck(
+            tenant_id=self.tenant.tenant_id, project_id=self.project.project_id,
+            document_id=new_doc.document_id, version_id=new_version.version_id,
+            content_hash="new-hash", checker_version="1.0.0", status="completed",
+            issues=[],
+        )
+        self.db.add_all([old_check, new_check])
+        self.db.commit()
+
+        audit = execute_project_audit(self.db, self.project.project_id, target_stage_id=stage.stage_id)
+
+        # 1. Evidence resolution must prefer the deterministic/title-matched
+        # edge (new_doc) over the LLM-inferred one (old_doc), despite old_doc's
+        # edge being created first.
+        satisfaction = (
+            self.db.query(RequirementSatisfaction)
+            .filter(RequirementSatisfaction.requirement_id == requirement.requirement_id)
+            .first()
+        )
+        self.assertIsNotNone(satisfaction, "Requirement should have resolved evidence")
+        self.assertEqual(satisfaction.document_id, new_doc.document_id)
+
+        # 2a. The OLD document's cached unmet_requirement finding must be
+        # suppressed -- it is no longer the requirement's current evidence.
+        old_r009 = [
+            f for f in audit.findings
+            if f.rule_code == "R009" and f.affected_entity_id == old_doc.document_id
+        ]
+        self.assertEqual(len(old_r009), 0, "Superseded document's stale unmet_requirement finding must be suppressed")
+
+        # 2b. R001 must NOT report this requirement missing -- it has
+        # (better) evidence now.
+        r001_missing = [
+            f for f in audit.findings
+            if f.rule_code == "R001" and f.affected_entity_id == requirement.requirement_id
+        ]
+        self.assertEqual(len(r001_missing), 0)
+
+    def test_r009_still_fires_when_selected_document_has_issue(self):
+        """
+        Converse of the suppression test above: if the document CURRENTLY
+        selected as a requirement's evidence itself has a cached
+        unmet_requirement coherence issue, R009 must still fire. Suppression
+        only applies to a SUPERSEDED document's stale complaint -- it must
+        never silently hide a real, current problem just because some other
+        document happens to exist in the stage.
+        """
+        stage = Stage(project_id=self.project.project_id, name="Product Definition", order_index=1, requires_approval=False)
+        self.db.add(stage)
+        self.db.commit()
+
+        requirement = RequiredDocument(
+            stage_id=stage.stage_id,
+            name="Product concept",
+            description="High-level credit-line concept and differentiation from competitors.",
+            is_mandatory=True,
+        )
+        self.db.add(requirement)
+        self.db.commit()
+
+        doc = Document(
+            tenant_id=self.tenant.tenant_id,
+            project_id=self.project.project_id,
+            stage_id=stage.stage_id,
+            uploaded_by=self.user.user_id,
+            uploaded_as_team_id=self.team.team_id,
+            original_filename="03_product_concept_and_differentiation.md",
+            mime_type="text/markdown",
+        )
+        self.db.add(doc)
+        self.db.commit()
+        version = DocumentVersion(
+            document_id=doc.document_id, uploaded_by=self.user.user_id,
+            file_data=b"...", file_size_bytes=3, status=DocumentStatus.indexed, version_number=1,
+        )
+        self.db.add(version)
+        self.db.commit()
+        doc.current_version_id = version.version_id
+        self.db.commit()
+
+        sync_project_graph(self.db, self.project.project_id)
+
+        req_node = self.db.query(Node).filter(
+            Node.project_id == self.project.project_id,
+            Node.source_table == "required_documents",
+            Node.source_id == requirement.requirement_id,
+        ).first()
+        doc_node = self.db.query(Node).filter(
+            Node.project_id == self.project.project_id,
+            Node.source_table == "documents",
+            Node.source_id == doc.document_id,
+        ).first()
+
+        _upsert_edge(
+            db=self.db, tenant_id=self.tenant.tenant_id, project_id=self.project.project_id,
+            source_node_id=doc_node.node_id, target_node_id=req_node.node_id,
+            edge_type="EVIDENCES",
+            properties={"source": "regex", "rule": "title_or_content_evidence", "matched_requirement": "Product concept"},
+            confidence=0.95,
+        )
+        self.db.commit()
+
+        check = DocumentCoherenceCheck(
+            tenant_id=self.tenant.tenant_id, project_id=self.project.project_id,
+            document_id=doc.document_id, version_id=version.version_id,
+            content_hash="only-hash", checker_version="1.0.0", status="completed",
+            issues=[{
+                "type": "unmet_requirement",
+                "description": "Still missing a real differentiation section.",
+                "confidence": 0.9,
+                "related_context": "Requirement: Product concept",
+            }],
+        )
+        self.db.add(check)
+        self.db.commit()
+
+        audit = execute_project_audit(self.db, self.project.project_id, target_stage_id=stage.stage_id)
+
+        r009_findings = [
+            f for f in audit.findings
+            if f.rule_code == "R009" and f.affected_entity_id == doc.document_id
+        ]
+        self.assertEqual(len(r009_findings), 1, "A real issue on the currently-selected document must still fire")
+        self.assertTrue(r009_findings[0].is_blocker)
 
     def test_all_rules_wired_into_engine(self):
         """

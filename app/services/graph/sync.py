@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.models.graph import Edge, Node
 from app.models.project import Project
 from app.models.stage import Stage, StageReference, TeamStageAccess
-from app.models.document import Document
+from app.models.document import Document, DocumentVersion
 from app.models.required_document import RequiredDocument
 from app.models.team import Team, ProjectAdmin, UserTeamMembership
 from app.models.user import User
@@ -149,6 +149,9 @@ def sync_project_graph(db: Session, project_id: uuid.UUID) -> SyncResult:
     active_member_of_pairs: Set[Tuple[uuid.UUID, uuid.UUID]] = set()
     active_belongs_to_stage_pairs: Set[Tuple[uuid.UUID, uuid.UUID]] = set()
     active_owned_by_pairs: Set[Tuple[uuid.UUID, uuid.UUID]] = set()
+    active_has_version_pairs: Set[Tuple[uuid.UUID, uuid.UUID]] = set()
+    active_uploaded_pairs: Set[Tuple[uuid.UUID, uuid.UUID]] = set()
+    active_approved_by_pairs: Set[Tuple[uuid.UUID, uuid.UUID]] = set()
 
     # Active source_ids per node source_table that can genuinely disappear
     # from this project (documents are never hard-deleted today, so their
@@ -156,6 +159,7 @@ def sync_project_graph(db: Session, project_id: uuid.UUID) -> SyncResult:
     active_requirement_ids: Set[uuid.UUID] = set()
     active_team_ids: Set[uuid.UUID] = set()
     active_user_ids: Set[uuid.UUID] = set()
+    active_version_ids: Set[uuid.UUID] = set()
 
     # 1. Sync Project Node
     proj_node = _upsert_node(
@@ -281,6 +285,7 @@ def sync_project_graph(db: Session, project_id: uuid.UUID) -> SyncResult:
                 "is_mandatory": req.is_mandatory,
                 "description": req.description,
                 "source": str(req.source) if req.source else "custom",
+                "stage_id": str(req.stage_id) if req.stage_id else None,
             },
         )
         node_map[("required_documents", req.requirement_id)] = r_node
@@ -428,13 +433,38 @@ def sync_project_graph(db: Session, project_id: uuid.UUID) -> SyncResult:
                 result.edges_synced += 1
 
 
-    # 7. Sync Documents
+    # 7. Sync Documents & Document Versions
     docs = (
         db.query(Document)
         .filter(Document.project_id == project_id)
         .all()
     )
     for doc in docs:
+        versions = (
+            db.query(DocumentVersion)
+            .filter(DocumentVersion.document_id == doc.document_id)
+            .order_by(DocumentVersion.version_number.asc())
+            .all()
+        )
+        current_ver = (
+            next((v for v in versions if v.version_id == doc.current_version_id), None)
+            or (versions[-1] if versions else None)
+        )
+
+        latest_uploader = None
+        current_approver = None
+        current_approval_status = "pending"
+        if current_ver:
+            if current_ver.uploaded_by:
+                u_row = db.query(User).filter(User.user_id == current_ver.uploaded_by).first()
+                if u_row:
+                    latest_uploader = u_row.full_name or u_row.email
+            if current_ver.approved_by:
+                a_row = db.query(User).filter(User.user_id == current_ver.approved_by).first()
+                if a_row:
+                    current_approver = a_row.full_name or a_row.email
+                    current_approval_status = "approved"
+
         d_node = _upsert_node(
             db=db,
             tenant_id=tenant_id,
@@ -452,6 +482,9 @@ def sync_project_graph(db: Session, project_id: uuid.UUID) -> SyncResult:
                 # accessible stages — it was never actually set here, silently
                 # weakening that redaction for every document node. Fixed.
                 "stage_id": str(doc.stage_id) if doc.stage_id else None,
+                "latest_uploader": latest_uploader,
+                "current_approver": current_approver,
+                "current_approval_status": current_approval_status,
             },
         )
         node_map[("documents", doc.document_id)] = d_node
@@ -487,6 +520,110 @@ def sync_project_graph(db: Session, project_id: uuid.UUID) -> SyncResult:
                 )
                 result.edges_synced += 1
 
+        # Sync DocumentVersion nodes and governance edges
+        for v in versions:
+            v_node = _upsert_node(
+                db=db,
+                tenant_id=tenant_id,
+                project_id=project_id,
+                entity_type="document_version",
+                source_table="document_versions",
+                source_id=v.version_id,
+                label=f"{doc.original_filename or 'Document'} v{v.version_number}",
+                properties={
+                    "document_id": str(doc.document_id),
+                    "version_number": v.version_number,
+                    "stage_id": str(doc.stage_id) if doc.stage_id else None,
+                    "created_at": v.created_at.isoformat() if v.created_at else None,
+                    "approved_at": v.approved_at.isoformat() if v.approved_at else None,
+                    "provenance_event_id": str(v.provenance_event_id) if v.provenance_event_id else None,
+                },
+            )
+            node_map[("document_versions", v.version_id)] = v_node
+            result.nodes_synced += 1
+            active_version_ids.add(v.version_id)
+
+            # Document -> HAS_VERSION -> DocumentVersion
+            active_has_version_pairs.add((d_node.node_id, v_node.node_id))
+            _upsert_edge(
+                db=db,
+                tenant_id=tenant_id,
+                project_id=project_id,
+                source_node_id=d_node.node_id,
+                target_node_id=v_node.node_id,
+                edge_type="HAS_VERSION",
+                properties={"version_number": v.version_number},
+            )
+            result.edges_synced += 1
+
+            # User -> UPLOADED -> DocumentVersion
+            if v.uploaded_by:
+                u_node = node_map.get(("users", v.uploaded_by))
+                if not u_node:
+                    u_inst = db.query(User).filter(User.user_id == v.uploaded_by).first()
+                    if u_inst:
+                        u_node = _upsert_node(
+                            db=db,
+                            tenant_id=tenant_id,
+                            project_id=project_id,
+                            entity_type="user",
+                            source_table="users",
+                            source_id=u_inst.user_id,
+                            label=u_inst.full_name or u_inst.email,
+                        )
+                        node_map[("users", u_inst.user_id)] = u_node
+                        result.nodes_synced += 1
+                        active_user_ids.add(u_inst.user_id)
+                if u_node:
+                    active_uploaded_pairs.add((u_node.node_id, v_node.node_id))
+                    _upsert_edge(
+                        db=db,
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                        source_node_id=u_node.node_id,
+                        target_node_id=v_node.node_id,
+                        edge_type="UPLOADED",
+                        properties={
+                            "timestamp": v.created_at.isoformat() if v.created_at else None,
+                            "provenance_event_id": str(v.provenance_event_id) if v.provenance_event_id else None,
+                        },
+                    )
+                    result.edges_synced += 1
+
+            # User -> APPROVED_BY -> DocumentVersion
+            if v.approved_by:
+                app_node = node_map.get(("users", v.approved_by))
+                if not app_node:
+                    app_inst = db.query(User).filter(User.user_id == v.approved_by).first()
+                    if app_inst:
+                        app_node = _upsert_node(
+                            db=db,
+                            tenant_id=tenant_id,
+                            project_id=project_id,
+                            entity_type="user",
+                            source_table="users",
+                            source_id=app_inst.user_id,
+                            label=app_inst.full_name or app_inst.email,
+                        )
+                        node_map[("users", app_inst.user_id)] = app_node
+                        result.nodes_synced += 1
+                        active_user_ids.add(app_inst.user_id)
+                if app_node:
+                    active_approved_by_pairs.add((app_node.node_id, v_node.node_id))
+                    _upsert_edge(
+                        db=db,
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                        source_node_id=app_node.node_id,
+                        target_node_id=v_node.node_id,
+                        edge_type="APPROVED_BY",
+                        properties={
+                            "timestamp": v.approved_at.isoformat() if v.approved_at else None,
+                            "provenance_event_id": str(v.provenance_event_id) if v.provenance_event_id else None,
+                        },
+                    )
+                    result.edges_synced += 1
+
     # 8. Stale-edge cleanup — same pattern as the existing PRECEDES cleanup
     # above, extended to every other edge type this function owns (verified
     # each is written ONLY here, never by relationship_extractor.py/
@@ -501,6 +638,9 @@ def sync_project_graph(db: Session, project_id: uuid.UUID) -> SyncResult:
         ("MEMBER_OF", active_member_of_pairs),
         ("BELONGS_TO_STAGE", active_belongs_to_stage_pairs),
         ("OWNED_BY", active_owned_by_pairs),
+        ("HAS_VERSION", active_has_version_pairs),
+        ("UPLOADED", active_uploaded_pairs),
+        ("APPROVED_BY", active_approved_by_pairs),
     )
     for edge_type, active_pairs in edge_types_and_active_pairs:
         current_edges = (
@@ -522,6 +662,7 @@ def sync_project_graph(db: Session, project_id: uuid.UUID) -> SyncResult:
         ("required_documents", active_requirement_ids),
         ("teams", active_team_ids),
         ("users", active_user_ids),
+        ("document_versions", active_version_ids),
     )
     for source_table, active_ids in node_types_and_active_ids:
         current_nodes = (
