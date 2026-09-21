@@ -1,6 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
-import { Layers } from 'lucide-react';
 import BackButton from '../components/ui/BackButton';
 import SourcePanel from '../components/sources/SourcePanel';
 import ChatPanel from '../components/chat/ChatPanel';
@@ -279,17 +278,6 @@ const ProjectWorkspace = () => {
             {teamNames.length ? teamNames.join(', ') : '—'}
           </span>
         </button>
-
-        <div
-          title="Pipeline stages in this project"
-          className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-2.5 py-1 text-xs font-medium text-gray-300 shrink-0"
-        >
-          <Layers size={13} className="text-primary" />
-          Stages
-          <span className="text-gray-500 max-w-[260px] truncate">
-            {(wsProject?.stages || []).map((s) => s.name).join(' → ') || '—'}
-          </span>
-        </div>
 
         {DOCUMENT_AND_TEAM_SCOPE_REQUESTS_ENABLED && requestableTeams.length > 0 && (
           <button
