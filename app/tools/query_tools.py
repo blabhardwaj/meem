@@ -25,14 +25,14 @@ import os
 import re
 import uuid
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 
 from app.database import SessionLocal
 from app.models.document import Document, DocumentVersion
 from app.models.project import Project
 from app.models.required_document import RequiredDocument
 from app.models.stage import Stage, TeamStageAccess
-from app.models.team import Team, TeamRole, UserTeamMembership
+from app.models.team import GrantTier, Team, TeamRole, UserTeamMembership
 from app.models.user import User
 from app.models.workflow import WorkflowState
 from app.services.access_control import (
@@ -44,6 +44,7 @@ from app.services.access_control import (
     can_view_document,
     classify_documents_visibility,
     get_accessible_stages_for_user,
+    get_active_stage_grants_for_user,
     has_permission,
     has_stage_access,
 )
@@ -459,16 +460,31 @@ def check_my_access(stage_or_team_reference: str) -> dict:
     try:
         ref = (stage_or_team_reference or "").strip()
 
-        team_id = resolve_team(db, ctx.project_id, ref)
-        if team_id is not None:
-            return {
-                "status": "team_access",
-                "team": _team_name(db, team_id),
-                "can_view": has_permission(db, ctx.user_id, "view", team_id, ctx.project_id),
-                "can_upload": has_permission(db, ctx.user_id, "upload", team_id, ctx.project_id),
-            }
+        # An EXACT stage-name match is checked before team resolution:
+        # resolve_team()'s forgiving substring match (`t_norm in clean_norm`)
+        # can otherwise capture a stage query whose name happens to contain
+        # a team's name (e.g. team "Risk" vs stage "Risk & Compliance")
+        # before resolve_stage() ever gets a chance to try its own exact
+        # match — confirmed against real seeded data, not hypothetical.
+        stage_id = db.execute(
+            select(Stage.stage_id).where(
+                Stage.project_id == ctx.project_id,
+                Stage.deleted_at.is_(None),
+                func.lower(Stage.name) == ref.lower(),
+            )
+        ).scalar_one_or_none()
 
-        stage_id = resolve_stage(db, ctx.project_id, ref)
+        if stage_id is None:
+            team_id = resolve_team(db, ctx.project_id, ref)
+            if team_id is not None:
+                return {
+                    "status": "team_access",
+                    "team": _team_name(db, team_id),
+                    "can_view": has_permission(db, ctx.user_id, "view", team_id, ctx.project_id),
+                    "can_upload": has_permission(db, ctx.user_id, "upload", team_id, ctx.project_id),
+                }
+            stage_id = resolve_stage(db, ctx.project_id, ref)
+
         if stage_id is not None:
             stage = db.get(Stage, stage_id)
             if _is_org_admin(db, ctx.user_id) or _is_project_admin(db, ctx.user_id, ctx.project_id):
@@ -494,13 +510,29 @@ def check_my_access(stage_or_team_reference: str) -> dict:
                     if _TEAM_ROLE_RANK[m.role] >= _TEAM_ROLE_RANK[TeamRole.contributor]:
                         upload_team = m.team_id
                         break
-            grant_team = upload_team or view_team
+
+            # has_stage_access() above only covers NATIVE team_stage_access —
+            # a personal, request-approved confidential-access grant
+            # (get_active_stage_grants_for_user) is a separate per-USER
+            # entitlement that can apply even with zero native access, so it
+            # must be checked independently and merged in, not folded into
+            # the has_stage_access() call above.
+            grant = get_active_stage_grants_for_user(db, ctx.user_id).get(stage_id)
+            if grant is not None:
+                if view_team is None:
+                    view_team = grant.team_id
+                if upload_team is None and grant.tier in (
+                    GrantTier.contributor, GrantTier.contributor_confidential
+                ):
+                    upload_team = grant.team_id
+
+            via_team = upload_team or view_team
             return {
                 "status": "stage_access",
                 "stage": stage.name,
                 "can_view": view_team is not None,
                 "can_upload": upload_team is not None,
-                "via_team": _team_name(db, grant_team),
+                "via_team": _team_name(db, via_team),
             }
 
         return {
@@ -517,12 +549,14 @@ def check_my_access(stage_or_team_reference: str) -> dict:
 
 @tool
 def get_project_structure() -> dict:
-    """Structural overview of this project: its stages in order (each with
-    whether it requires approval) and the teams in it. Takes NO arguments —
-    not even a stage. For a stage's document CHECKLIST/requirements, use
-    get_stage_requirements instead (its `stage_reference` argument is
-    optional: omit it for a project-wide requirements list across every
-    stage, or pass one to scope to a single stage).
+    """Structural overview of the ENTIRE project: every stage in order (each
+    with whether it requires approval) and every team in it — UNFILTERED by
+    the caller's own access (use get_my_accessible_stages instead for "which
+    stages can I see/upload to"). Takes NO arguments — not even a stage. For
+    a stage's document CHECKLIST/requirements, use get_stage_requirements
+    instead (its `stage_reference` argument is optional: omit it for a
+    project-wide requirements list across every stage, or pass one to scope
+    to a single stage).
     """
     ctx = get_query_context()
     db = _scoped_session(ctx.user_id)
@@ -543,6 +577,66 @@ def get_project_structure() -> dict:
                 {"name": s.name, "requires_approval": s.requires_approval} for s in stages
             ],
             "teams": [t.name for t in teams],
+        }
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# 6b. get_my_accessible_stages
+# ---------------------------------------------------------------------------
+
+@tool
+def get_my_accessible_stages() -> dict:
+    """Which stages in THIS project the caller can currently see/upload to —
+    "which stages do I have access to". Takes NO arguments. Unlike
+    get_project_structure (every stage, unfiltered), this is scoped to the
+    caller's real access: native team_stage_access grants via their team
+    memberships, PLUS any personal confidential-access-request grant
+    (get_active_stage_grants_for_user) — so a stage newly opened up by an
+    approved access request shows up here immediately, even with no
+    matching team membership. org_admin/project_admin see every stage
+    (their real access is unrestricted, per get_accessible_stages_for_user's
+    own bypass).
+    """
+    ctx = get_query_context()
+    db = _scoped_session(ctx.user_id)
+    try:
+        project = db.get(Project, ctx.project_id)
+        accessible_ids = set(get_accessible_stages_for_user(db, ctx.user_id, ctx.project_id))
+        if not accessible_ids:
+            return {
+                "status": "ok",
+                "project": project.name if project else None,
+                "stages": [],
+                "message": "You don't currently have access to any stage in this project.",
+            }
+
+        stages = db.execute(
+            select(Stage)
+            .where(Stage.stage_id.in_(accessible_ids), Stage.deleted_at.is_(None))
+            .order_by(Stage.order_index.asc())
+        ).scalars().all()
+
+        grants = get_active_stage_grants_for_user(db, ctx.user_id)
+        is_admin = _is_org_admin(db, ctx.user_id) or _is_project_admin(db, ctx.user_id, ctx.project_id)
+
+        return {
+            "status": "ok",
+            "project": project.name if project else None,
+            "stages": [
+                {
+                    "name": s.name,
+                    "requires_approval": s.requires_approval,
+                    "via": (
+                        "org_admin/project_admin"
+                        if is_admin
+                        else "confidential-access grant" if s.stage_id in grants
+                        else "team membership"
+                    ),
+                }
+                for s in stages
+            ],
         }
     finally:
         db.close()

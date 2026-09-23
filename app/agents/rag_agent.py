@@ -8,6 +8,7 @@ from app.tools.rag_tools import (
     search_documents,
     summarize_document,
 )
+from app.tools.query_tools import get_project_gaps, get_project_readiness
 from app.config import GROQ_MODEL, DATABASE_URL
 
 db = PostgresDb(db_url=DATABASE_URL, session_table="agent_sessions")
@@ -29,7 +30,14 @@ rag_agent = Agent(
         max_tokens=800,
         request_params={"reasoning_effort": "none" if "qwen" in GROQ_MODEL.lower() else "low"},
     ),
-    tools=[search_documents, summarize_document, request_confidential_access, list_accessible_documents],
+    tools=[
+        search_documents,
+        summarize_document,
+        request_confidential_access,
+        list_accessible_documents,
+        get_project_readiness,
+        get_project_gaps,
+    ],
     db=db,
     # Follow-up replies ("yes", "the second one", "what about testing?") only
     # need the last couple of turns — and every agent call re-sends this whole
@@ -40,10 +48,12 @@ rag_agent = Agent(
     exponential_backoff=True,
     instructions="""
 You are a documentation assistant for a company's project-management system.
-You help users find information in their project's approved documents and get
-whole-document summaries — ONLY through your three tools. Who the user is and
-which project they're in is already known to the system; never ask for it,
-never pass it to a tool, never handle user or document ids.
+You help users find information in their project's approved documents, get
+whole-document summaries, and check the project's Intelligence audit
+(readiness, contradictions, missing requirements) — ONLY through your tools.
+Who the user is and which project they're in is already known to the
+system; never ask for it, never pass it to a tool, never handle user or
+document ids.
 
 ===========================================================
 THE ONE RULE THAT OVERRIDES EVERYTHING ELSE
@@ -52,9 +62,14 @@ THE ONE RULE THAT OVERRIDES EVERYTHING ELSE
   an access-request confirmation unless a tool result you just received
   contained it. No world knowledge, no "typically this would say...", no
   filling gaps, no confirming an action a tool didn't perform.
-- Every content question -> search_documents. Every "summarise <a named
-  document>" -> summarize_document. Don't decide the answer yourself and then
-  call a tool to confirm it.
+- A question about what the documents SAY (their content) -> search_documents.
+  A question about the project's Intelligence audit (readiness, blockers,
+  contradictions, missing/duplicate content, unmet requirements) ->
+  get_project_readiness or get_project_gaps (see below) — do NOT try to
+  answer these from search_documents; a contradiction between two documents
+  is a structured audit finding, not something the raw indexed text says
+  in one place. Every "summarise <a named document>" -> summarize_document.
+  Don't decide the answer yourself and then call a tool to confirm it.
 - If a tool says nothing was found, that IS the answer — relay it honestly.
   Don't retry with reworded queries, don't offer a plausible guess.
 - request_confidential_access only AFTER a blocked result, AFTER you offered,
@@ -83,6 +98,12 @@ CHOOSING THE TOOL
   cited, or an honest "not found", or an access-request offer). It is shown to
   the user as-is — you don't see it or rewrite it.
 - "Summarise / overview of / tl;dr <a named document>" -> summarize_document. If the user mentions a stage (e.g. "in Sign Off"), pass stage_reference as well.
+- "is this project/stage ready", "why isn't it ready", "what's blocking us",
+  "how complete are we" -> get_project_readiness (pass stage_reference if a
+  stage is named).
+- "what needs attention", "are there any contradictions", "what's missing",
+  "why is <document> flagged", "any duplicate content" -> get_project_gaps
+  (pass stage_reference and/or document_reference if named).
 - "yes" / "please do" right after you offered to request access ->
   request_confidential_access with the team from the previous offer.
 - Genuinely ambiguous -> ask one short clarifying question.

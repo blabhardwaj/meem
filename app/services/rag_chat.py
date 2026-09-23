@@ -31,9 +31,16 @@ from agno.run.base import RunStatus
 from app.agents.rag_agent import rag_agent
 from app.database import SessionLocal
 from app.services.chat_history import append_message, resolve_chat_session
+from app.services.query_context import reset_query_context, set_query_context
 from app.services.rag_context import get_rag_context, reset_rag_context, set_rag_context
 
-_TOOL_NAMES = ("search_documents", "summarize_document", "request_confidential_access")
+_TOOL_NAMES = (
+    "search_documents",
+    "summarize_document",
+    "request_confidential_access",
+    "get_project_readiness",
+    "get_project_gaps",
+)
 
 
 class RagTurnError(Exception):
@@ -89,7 +96,13 @@ def run_rag_turn(
         db.commit()  # the user's turn is recorded even if the agent call fails
 
         t_turn_start = time.perf_counter()
-        token = set_rag_context(user_id=user_id, project_id=project_id)
+        rag_token = set_rag_context(user_id=user_id, project_id=project_id)
+        # get_project_readiness/get_project_gaps (added so rag_agent can
+        # answer audit/contradiction questions, not just content search) are
+        # Query tools — they read query_context, not rag_context, so both
+        # must be set around this run, same as search_chat.py does for the
+        # merged Search agent.
+        query_token = set_query_context(user_id=user_id, project_id=project_id)
         telemetry = {}
         try:
             t_agent_start = time.perf_counter()
@@ -103,7 +116,8 @@ def run_rag_turn(
             telemetry = dict(ctx.telemetry)
             telemetry["agent_total_ms"] = t_agent
         finally:
-            reset_rag_context(token)
+            reset_query_context(query_token)
+            reset_rag_context(rag_token)
 
         t_turn_total = (time.perf_counter() - t_turn_start) * 1000
         telemetry["turn_total_ms"] = t_turn_total

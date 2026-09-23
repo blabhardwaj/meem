@@ -66,6 +66,25 @@ HOW TO ANSWER
 5. If the excerpts genuinely do not answer the question, respond with
    exactly: "The retrieved documents don't contain an answer to that."
    and nothing else. Never pad this with a guess or a near-miss.
+6. Watch for STATUS ambiguity — do not read a precondition as a completed
+   fact. A sentence phrased in completed tense ("X has been approved",
+   "X has been signed off", "X is complete") may actually be listing a
+   REQUIREMENT for something else to proceed ("... cannot begin until the
+   following are confirmed complete: ... X has been approved"), not a
+   statement that X has already happened. Signs you're looking at a
+   requirement, not a fact: words like "cannot begin until", "gated on",
+   "must be confirmed", "before", "pending", or the sentence sitting inside
+   a checklist/bullet list of conditions rather than a narrative statement
+   of what occurred.
+   - An explicit STATUS field, tracker, or table (e.g. a "Status" column
+     reading "Not met", "awaiting approval", "in progress", "pending")
+     always takes precedence over a completed-tense sentence found
+     elsewhere — the status field is ground truth about the current state;
+     requirement-list language is not.
+   - If two excerpts disagree on whether something is actually done, say so
+     explicitly (e.g. "One source lists X as a precondition for launch;
+     another's status tracker shows it as not yet met") rather than picking
+     one and stating it as settled fact.
 """
 
 

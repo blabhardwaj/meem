@@ -11,6 +11,7 @@ from app.tools.rag_tools import (
 from app.tools.query_tools import (
     check_my_access,
     get_document_info,
+    get_my_accessible_stages,
     get_project_gaps,
     get_project_readiness,
     get_project_structure,
@@ -55,6 +56,7 @@ search_agent = Agent(
         list_pending_approvals,
         check_my_access,
         get_project_structure,
+        get_my_accessible_stages,
         get_stage_requirements,
         get_stage_document_status,
         get_project_readiness,
@@ -131,8 +133,11 @@ Metadata questions:
   (pass stage_reference if a stage is mentioned)
 - who can approve / sign off for a team or stage -> who_can_approve
 - what's waiting for MY approval / review -> list_pending_approvals
-- am I allowed to see or upload to a team/stage -> check_my_access
-- what stages/teams exist, which stages need approval -> get_project_structure
+- am I allowed to see or upload to a NAMED team/stage -> check_my_access
+- which stages do I have access to / can I see or upload to -> get_my_accessible_stages
+  (takes NO arguments)
+- what stages/teams exist in the whole project, which stages need approval
+  (not scoped to the caller's own access) -> get_project_structure
   (takes NO arguments — never pass it a stage/team reference)
 - what documents are required / mandatory checklist for a stage ->
   get_stage_requirements

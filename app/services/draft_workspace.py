@@ -54,21 +54,37 @@ class DraftPermissionError(Exception):
 # fills these in itself (see UI_FIXES: drafts left with unresolved
 # brackets even after finalize), so this substitutes deterministically
 # instead of relying on another model rewrite.
+#
+# Two ways the "preparer" placeholder shows up:
+#   1. Standalone, always literally "[Author Name]" or "[Owner Name]".
+#   2. After a "Prepared by:" label, where the LLM's bracket wording varies
+#      by document type ("[Test Lead Name]", "[Prepared By]", etc.) — matched
+#      on the LABEL, not the bracket contents, so any such variant resolves.
+# Deliberately NOT extended to "Reviewed by:" / "Approved by:" placeholders —
+# those name a DIFFERENT person than the drafter, who hasn't actually
+# reviewed or approved anything yet at draft time (that happens later, via
+# the real workflow — see WorkflowState.approved_by). Auto-filling those
+# with the drafter's own name would fabricate an approval that never
+# happened, which is exactly what the drafting agent's own prompt forbids.
 _NAME_PLACEHOLDER_RE = re.compile(r"\[\s*(?:Author|Owner)\s+Name\s*\]", re.IGNORECASE)
+_PREPARED_BY_RE = re.compile(r"(Prepared\s+by\s*:?\s*)\[[^\]\n]*\]", re.IGNORECASE)
 _DATE_PLACEHOLDER_RE = re.compile(r"\[\s*Date\s*\]", re.IGNORECASE)
 
 
 def apply_author_placeholder(content: str, author_name: str | None) -> str:
     """
-    Deterministically replaces "[Author Name]" / "[Owner Name]" placeholders
-    with `author_name`, and "[Date]" placeholders with the current local
+    Deterministically replaces "[Author Name]" / "[Owner Name]" placeholders,
+    and any bracketed placeholder immediately following a "Prepared by:"
+    label (whatever its wording — e.g. "[Test Lead Name]"), with
+    `author_name`; and "[Date]" placeholders with the current local
     timestamp. No-op if `author_name` is falsy or content has no such
     placeholder — never invents a "Prepared by" line that wasn't already
-    there.
+    there, and never touches "Reviewed by:" / "Approved by:" placeholders.
     """
     if not author_name or not content:
         return content
     result = _NAME_PLACEHOLDER_RE.sub(author_name, content)
+    result = _PREPARED_BY_RE.sub(lambda m: f"{m.group(1)}{author_name}", result)
     if _DATE_PLACEHOLDER_RE.search(result):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         result = _DATE_PLACEHOLDER_RE.sub(timestamp, result)
