@@ -3,6 +3,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# development (default) or production — gates production-only validation
+# below (e.g. Qdrant must not silently fall back to embedded/local mode).
+ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
+
 DATABASE_URL: str = os.getenv("DATABASE_URL")
 GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
@@ -57,4 +61,10 @@ if not SESSION_TOKEN_SECRET or len(SESSION_TOKEN_SECRET) < 32:
     raise RuntimeError("SESSION_TOKEN_SECRET must be set and at least 32 characters")
 
 if not GROQ_API_KEY:
-    raise RuntimeError("GROQ_API_KEY must be set")
+    raise RuntimeError("GROQ_API_KEY must be set")
+
+if ENVIRONMENT == "production" and not QDRANT_URL:
+    raise RuntimeError(
+        "QDRANT_URL is required when ENVIRONMENT=production — "
+        "embedded/local Qdrant (QDRANT_LOCAL_PATH) is a development-only fallback."
+    )
