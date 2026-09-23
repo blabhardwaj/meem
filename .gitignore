@@ -16,6 +16,7 @@ frontend/dist/
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
 
 # Generated output — not source code
 drafts/
@@ -24,6 +25,7 @@ draft generation/
 # Dev-server logs and ad-hoc working scripts — not project source
 frontend/*.log
 scratch/
+seed/
 
 # Subagent-driven-development scratch workspace (ledgers, briefs, review packages)
 .superpowers/
@@ -37,6 +39,8 @@ docs for meridian pay/
 PRODUCTION_READINESS_PLAN.md
 TODAY_IMPLEMENTATION_TRACKER.md
 FRONTEND_CHANGES_REQUIRED.md
+ADVISORY_DISMISSAL_TRACKER.md
+CLAUDE.md
 
 # IDE
 .vscode/
