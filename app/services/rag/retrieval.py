@@ -61,7 +61,14 @@ COARSE_LIMIT = 50
 # Chunks handed to generation. Kept small on purpose: every chunk is re-sent
 # as prompt context on the generate_answer call, and the cross-encoder rerank
 # above means the top few are almost always where the answer actually is.
-TOP_K = 4
+# Was 4 — raised to 6 (matching reranking.py's own docstring, which already
+# assumed TOP_K=6) after a real Ragas-caught faithfulness gap: for
+# "is <product> ready for go-live", 3 of the top 4 slots were near-duplicate
+# generic "1. Purpose" boilerplate sections from different documents (they
+# score high because they repeat "go-live"/"launch" keywords), crowding out
+# the one chunk — an actual "Status" section carrying a real caveat
+# ("...pending final Business and Compliance sign-off") — which ranked #6.
+TOP_K = 6
 
 
 class NoProjectAccessError(Exception):
