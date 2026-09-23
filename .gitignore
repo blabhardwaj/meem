@@ -5,6 +5,7 @@ venv/
 *.env
 *.db
 *.sqlite
+*.sqlite3
 frontend/.env
 frontend/.env.local
 
@@ -43,6 +44,12 @@ ADVISORY_DISMISSAL_TRACKER.md
 sanity_check.py
 standalone.py
 CLAUDE.md
+DEMO_SCRIPT.md
+
+# Demo-only semantic response cache (rehearsal/live-run tooling, not the app)
+app/services/demo_cache.py
+demo_cache.sqlite3
+record_demo_cache.py
 
 # IDE
 .vscode/

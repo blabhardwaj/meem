@@ -32,6 +32,18 @@ from app.services.chat_history import append_message, resolve_chat_session
 from app.services.rag_context import get_rag_context, reset_rag_context, set_rag_context
 from app.services.query_context import reset_query_context, set_query_context
 
+try:
+    # app/services/demo_cache.py is gitignored (demo-rehearsal tooling, not
+    # committed) — optional on purpose, so a clone without it still boots and
+    # behaves exactly as if DEMO_CACHE_MODE were unset (no-op both ways).
+    from app.services.demo_cache import find_cached_response, record_response
+except ModuleNotFoundError:
+    def find_cached_response(project_id, question):  # noqa: ANN001, ARG001
+        return None
+
+    def record_response(project_id, question, response):  # noqa: ANN001, ARG001
+        pass
+
 _TOOL_NAMES = (
     "search_documents",
     "summarize_document",
@@ -103,12 +115,31 @@ def run_search_turn(
         append_message(db, session_id=canonical, role="user", content=message)
         db.commit()  # the user's turn is recorded even if the agent call fails
 
+        t_turn_start = time.perf_counter()
+
+        # Demo-cache lookup (see app/services/demo_cache.py) — a no-op unless
+        # DEMO_CACHE_MODE=replay. A hit skips the live agent call (and its AI
+        # usage charge) entirely; a miss falls through to the real call below
+        # exactly as if caching were off.
+        cached = find_cached_response(project_id, message or "")
+        if cached is not None:
+            reply = cached.get("reply", "")
+            tools = cached.get("tools_called", [])
+            append_message(db, session_id=canonical, role="assistant", content=reply)
+            db.commit()
+            t_turn_total = (time.perf_counter() - t_turn_start) * 1000
+            return {
+                "reply": reply,
+                "tools_called": tools,
+                "session_id": str(canonical),
+                "timing": {"turn_total_ms": t_turn_total, "demo_cache_hit": True},
+            }
+
         # Change 4 (PRODUCTION_READINESS_PLAN.md) — committed immediately so
         # an attempted call counts even if the agent run itself fails below.
         check_and_consume_ai_usage(db, tenant_id)
         db.commit()
 
-        t_turn_start = time.perf_counter()
         rag_token = set_rag_context(user_id=user_id, project_id=project_id, tenant_id=tenant_id)
         query_token = set_query_context(user_id=user_id, project_id=project_id)
         telemetry = {}
@@ -141,6 +172,11 @@ def run_search_turn(
 
         append_message(db, session_id=canonical, role="assistant", content=reply)
         db.commit()
+
+        # Demo-cache record (see app/services/demo_cache.py) — a no-op unless
+        # DEMO_CACHE_MODE=record. Run during rehearsal to build up the cache
+        # from real live calls before switching to replay for the live demo.
+        record_response(project_id, message or "", {"reply": reply, "tools_called": tools})
 
         return {
             "reply": reply,
