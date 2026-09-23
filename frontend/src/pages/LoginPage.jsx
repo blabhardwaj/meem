@@ -44,7 +44,7 @@ const LoginPage = () => {
         setJustRegisteredOrg(true);
       }
     } catch (err) {
-      setError(err.detail?.detail || err.message || 'Something went wrong.');
+      setError(err.message || 'Something went wrong.');
     } finally {
       setBusy(false);
     }

@@ -52,7 +52,7 @@ const ProfilePage = () => {
       await refresh();
       setNameModalOpen(false);
     } catch (err) {
-      setNameError(err.detail?.detail || err.message || 'Could not update your name.');
+      setNameError(err.message || 'Could not update your name.');
     } finally {
       setNameBusy(false);
     }
@@ -98,7 +98,7 @@ const ProfilePage = () => {
       setConfirmPassword('');
       setNotice('Password changed. You have been signed out of every other session.');
     } catch (err) {
-      setError(err.detail?.detail || err.message || 'Could not change your password.');
+      setError(err.message || 'Could not change your password.');
     } finally {
       setBusy(false);
     }

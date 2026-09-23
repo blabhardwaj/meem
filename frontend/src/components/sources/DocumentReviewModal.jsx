@@ -58,7 +58,7 @@ const DocumentReviewModal = ({ document: doc, canOverrideScan, onApprove, onReje
     try {
       await onApprove(override);
     } catch (err) {
-      setActionError(err.detail?.detail?.message || err.message || 'Approval failed.');
+      setActionError(err.message || 'Approval failed.');
     } finally {
       setBusyAction(null);
     }

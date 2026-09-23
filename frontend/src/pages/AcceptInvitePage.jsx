@@ -24,7 +24,7 @@ const AcceptInvitePage = () => {
     try {
       await acceptInvite({ token, password: form.password, full_name: form.full_name });
     } catch (err) {
-      setError(err.detail?.detail || err.message || 'Could not accept this invite.');
+      setError(err.message || 'Could not accept this invite.');
     } finally {
       setBusy(false);
     }

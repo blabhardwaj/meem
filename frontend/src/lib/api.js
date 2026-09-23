@@ -68,10 +68,19 @@ async function request(path, { method = 'GET', body, auth = true, credentials } 
     try { payload = JSON.parse(text); } catch { payload = text; }
   }
   if (!response.ok) {
+    // payload.detail can be a plain string (most HTTPExceptions), an array of
+    // Pydantic validation errors (422 — {type,loc,msg,input,ctx} objects), or
+    // an app-defined object (e.g. workflow.py's {message, scan}). Whatever
+    // its shape, `detail` here (and therefore err.message) must always end
+    // up a plain string — an uncaught object/array reaching a React child
+    // crashes the whole page (this is exactly what broke accept-invite:
+    // a short password produced a 422 array, rendered raw).
     let detail = response.statusText || 'Request failed';
     if (payload && typeof payload.detail === 'string') detail = payload.detail;
-    else if (payload && Array.isArray(payload.detail) && payload.detail[0]?.msg) {
+    else if (payload && Array.isArray(payload.detail) && typeof payload.detail[0]?.msg === 'string') {
       detail = payload.detail[0].msg;
+    } else if (payload && payload.detail && typeof payload.detail.message === 'string') {
+      detail = payload.detail.message;
     }
     throw new ApiError(detail, response.status, payload);
   }
