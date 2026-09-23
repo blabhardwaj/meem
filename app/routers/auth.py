@@ -96,6 +96,10 @@ class ChangePasswordRequest(BaseModel):
     new_password: str = Field(min_length=8, max_length=256)
 
 
+class SetPasswordRequest(BaseModel):
+    new_password: str = Field(min_length=8, max_length=256)
+
+
 class UpdateProfileRequest(BaseModel):
     full_name: str = Field(min_length=1, max_length=255)
 
@@ -124,6 +128,10 @@ class MeResponse(BaseModel):
     user_id: str
     email: str
     full_name: str | None = None
+    # False for an account that has only ever signed in via Google (no
+    # password_hash was ever set) — the frontend uses this to offer "Set a
+    # password" instead of "Change password" (which requires knowing one).
+    has_password: bool = True
     tenant_id: str
     tenant_name: str
     is_org_admin: bool
@@ -287,6 +295,7 @@ def me(
         user_id=str(identity.user_id),
         email=identity.email,
         full_name=user.full_name if user else None,
+        has_password=bool(user and user.password_hash),
         tenant_id=str(identity.tenant_id),
         tenant_name=tenant.name if tenant else "",
         is_org_admin=identity.is_org_admin,
@@ -421,6 +430,46 @@ def change_password(
     return TokenResponse(
         access_token=create_session_token(str(user.user_id), user.token_version)
     )
+
+
+@router.post("/set-password")
+def set_password(
+    body: SetPasswordRequest,
+    identity: ResolvedIdentity = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Set a password for the first time — for an account that has only ever
+    signed in via Google (password_hash is None). change_password() above
+    can never work for this case: it unconditionally requires verifying a
+    CURRENT password against the stored hash, which doesn't exist yet, so
+    it always 401s with the misleading "Current password is incorrect"
+    regardless of what's entered. This is the only path such an account has
+    to gain email+password login as an alternative to Google sign-in.
+
+    Deliberately does NOT bump token_version: unlike change_password(),
+    there is no pre-existing password-based session to invalidate — doing
+    so would only sign the user out of their other Google-authenticated
+    sessions for no protective reason.
+    """
+    user = db.get(User, identity.user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.password_hash:
+        raise HTTPException(
+            status_code=409,
+            detail="This account already has a password — use Change Password instead.",
+        )
+
+    user.password_hash = hash_password(body.new_password)
+    db.add(user)
+    record_audit(
+        db, actor_id=user.user_id, action="SET_PASSWORD", resource_type="user",
+        resource_id=user.user_id, details={},
+    )
+    db.commit()
+
+    return {"status": "ok"}
 
 
 @router.put("/profile", response_model=ProfileResponse)

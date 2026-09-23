@@ -78,6 +78,8 @@ const ProfilePage = () => {
     setError('');
   };
 
+  const hasPassword = user?.has_password !== false;
+
   const handleChangePassword = async (e) => {
     e.preventDefault();
     setError('');
@@ -88,17 +90,27 @@ const ProfilePage = () => {
     }
     setBusy(true);
     try {
-      const { access_token } = await authApi.changePassword(currentPassword, newPassword);
-      // The old token is now invalid everywhere (token_version bumped) — the
-      // response carries a fresh one for THIS session so the user isn't logged out.
-      setToken(access_token);
+      if (hasPassword) {
+        const { access_token } = await authApi.changePassword(currentPassword, newPassword);
+        // The old token is now invalid everywhere (token_version bumped) —
+        // the response carries a fresh one for THIS session so the user
+        // isn't logged out.
+        setToken(access_token);
+        setNotice('Password changed. You have been signed out of every other session.');
+      } else {
+        // First-time set for a Google-only account — no current password to
+        // verify, and no other session gets invalidated (see set-password's
+        // own docstring for why it doesn't bump token_version).
+        await authApi.setPassword(newPassword);
+        await refresh();
+        setNotice('Password set. You can now sign in with your email and this password too.');
+      }
       setPasswordModalOpen(false);
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
-      setNotice('Password changed. You have been signed out of every other session.');
     } catch (err) {
-      setError(err.message || 'Could not change your password.');
+      setError(err.message || (hasPassword ? 'Could not change your password.' : 'Could not set a password.'));
     } finally {
       setBusy(false);
     }
@@ -164,7 +176,7 @@ const ProfilePage = () => {
               <Badge variant="active">Organization Admin</Badge>
             )}
             <Button type="button" variant="secondary" icon={KeyRound} onClick={() => setPasswordModalOpen(true)}>
-              Change password
+              {hasPassword ? 'Change password' : 'Set a password'}
             </Button>
             {notice && <p className="text-sm text-emerald-400">{notice}</p>}
           </div>
@@ -218,18 +230,24 @@ const ProfilePage = () => {
       <Modal
         open={passwordModalOpen}
         onClose={closePasswordModal}
-        title="Change password"
-        description="Changing your password signs you out of every other session immediately."
+        title={hasPassword ? 'Change password' : 'Set a password'}
+        description={
+          hasPassword
+            ? 'Changing your password signs you out of every other session immediately.'
+            : "You signed up with Google and don't have a password yet — set one to also be able to sign in with your email."
+        }
       >
         <form onSubmit={handleChangePassword} className="space-y-4">
-          <Input
-            label="Current password"
-            type="password"
-            required
-            value={currentPassword}
-            onChange={(e) => setCurrentPassword(e.target.value)}
-            placeholder="••••••••"
-          />
+          {hasPassword && (
+            <Input
+              label="Current password"
+              type="password"
+              required
+              value={currentPassword}
+              onChange={(e) => setCurrentPassword(e.target.value)}
+              placeholder="••••••••"
+            />
+          )}
           <Input
             label="New password"
             type="password"
@@ -253,7 +271,7 @@ const ProfilePage = () => {
           <div className="flex justify-end gap-3">
             <Button type="button" variant="secondary" onClick={closePasswordModal}>Cancel</Button>
             <Button type="submit" icon={KeyRound} loading={busy}>
-              Change password
+              {hasPassword ? 'Change password' : 'Set password'}
             </Button>
           </div>
         </form>

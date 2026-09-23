@@ -121,6 +121,10 @@ export const authApi = {
       method: 'PUT',
       body: { current_password: currentPassword, new_password: newPassword },
     }),
+  // set a FIRST password for an account that only ever signed in via Google
+  // (no current password to verify) -- 409s if one already exists.
+  setPassword: (newPassword) =>
+    request('/auth/set-password', { method: 'POST', body: { new_password: newPassword } }),
   // update own display name -> { full_name }
   updateProfile: (fullName) =>
     request('/auth/profile', { method: 'PUT', body: { full_name: fullName } }),
