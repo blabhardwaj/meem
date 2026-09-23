@@ -49,6 +49,7 @@ from app.services.document_persistence import (
     sanitize_filename,
     validate_file_magic,
 )
+from app.services.ai_usage import AIUsageLimitExceededError
 from app.services.document_diff import diff_summary
 from app.services.document_finalize import GrantOnlyAccessError
 from app.services.document_review_chat import run_review_turn
@@ -467,13 +468,26 @@ def review_message(
 
     _check_revision_permission(db, identity.user_id, document)
 
+    # PRODUCTION_READINESS_PLAN.md Change 1: the reads above (get_current_user's
+    # SET LOCAL + membership lookups, this Document fetch, the permission
+    # check) run in one transaction opened lazily by the first query — end it
+    # here so the connection returns to the pool before run_review_turn's
+    # multi-second Groq call, instead of sitting idle-in-transaction for its
+    # duration. Mirrors agents.py's search_message (db.close()) and
+    # draft_chat.py's run_draft_turn (commit before agent.run()) — same
+    # session object stays usable afterward, SQLAlchemy just re-acquires a
+    # connection lazily on the next query (e.g. inside finalize_document_revision).
+    db.commit()
+
     try:
         turn = run_review_turn(
             db, session_id=body.session_id, document_id=document.document_id,
-            user_id=identity.user_id, message=body.message,
+            user_id=identity.user_id, tenant_id=identity.tenant_id, message=body.message,
         )
     except GrantOnlyAccessError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except AIUsageLimitExceededError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 — Groq / rate-limit / parse failures
         raise HTTPException(
             status_code=502,
@@ -621,15 +635,24 @@ def version_review_message(
             detail="Only the document's uploader, a team lead, or a project/org admin can revise this document.",
         )
 
+    # PRODUCTION_READINESS_PLAN.md Change 1: same bug, same fix, as
+    # review_message above — this endpoint's reads (SET LOCAL, Document
+    # fetch, can_edit_document) were never committed before the AI call
+    # either. End the transaction here so the connection returns to the
+    # pool before run_version_review_turn's Groq call.
+    db.commit()
+
     try:
         turn = run_version_review_turn(
             db, session_id=body.session_id, document_id=document.document_id,
-            user_id=identity.user_id, message=body.message,
+            user_id=identity.user_id, tenant_id=identity.tenant_id, message=body.message,
         )
     except GrantOnlyAccessError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except WorkflowPermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except AIUsageLimitExceededError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 — Groq / rate-limit / parse failures
         raise HTTPException(
             status_code=502,

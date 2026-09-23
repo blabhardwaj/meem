@@ -35,6 +35,7 @@ from app.models.project import Project
 from app.models.team import Team
 from app.models.user import User
 from app.services.access_control import has_any_project_access, resolve_sensitivity
+from app.services.ai_usage import AIUsageLimitExceededError
 from app.services.auth import ResolvedIdentity
 from app.services.chat_history import SessionScopeError
 from app.services.document_parser import DocumentParseError, UnsupportedDocumentTypeError, parse_document_to_markdown
@@ -128,6 +129,8 @@ def draft_message(
             layout=[s.model_dump() for s in body.layout] if body.layout else None,
             author_name=author_name,
         )
+    except AIUsageLimitExceededError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 — Groq / rate-limit / parse failures
         raise HTTPException(
             status_code=502,
@@ -281,6 +284,8 @@ def search_message(
         )
     except SessionScopeError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except AIUsageLimitExceededError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except SearchTurnError as exc:
         raise HTTPException(
             status_code=502,

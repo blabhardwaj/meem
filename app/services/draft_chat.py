@@ -26,6 +26,7 @@ from app.agents.drafting_agent import drafting_agent
 from app.database import SessionLocal
 from app.models.chat import ChatMessage, ChatSession
 from app.services import draft_workspace
+from app.services.ai_usage import check_and_consume_ai_usage
 from app.services.chat_history import append_message, resolve_chat_session
 
 logger = logging.getLogger(__name__)
@@ -172,6 +173,15 @@ def run_draft_turn(
                 db.rollback()
 
     try:
+        # Change 4 (PRODUCTION_READINESS_PLAN.md): only gated when a tenant
+        # is actually known (db is non-None only inside the
+        # uid/project_id/tenant_id branch above) — the CLI's fully
+        # decoupled-from-persistence path has no tenant to gate against by
+        # design, same reasoning as the DB/ABAC skip above.
+        if db is not None:
+            check_and_consume_ai_usage(db, tenant_id)
+            db.commit()  # durable immediately — an attempted call counts even if the AI call itself fails
+
         prefix = build_context_prefix(canonical, layout=layout)
         before = draft_workspace.read_working_draft(canonical)
         response = drafting_agent.run(prefix + (message or "continue"), session_id=canonical)

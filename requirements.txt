@@ -5,7 +5,7 @@ psycopg2-binary==2.9.9
 alembic==1.13.2
 python-dotenv==1.0.1
 pydantic==2.9.2
-pydantic-settings==2.5.2
+pydantic-settings==2.15.0  # bumped for ragas (requires >=2.10.1); not used directly by app code
 python-multipart==0.0.9
 qdrant-client==1.19.0
 fastembed==0.8.0
@@ -16,4 +16,8 @@ python-magic-bin==0.4.14
 groq>=0.11.0  # used directly in draft_generator.py, rag/generation.py, graph/llm_extraction.py, etc.
 agno>=1.2.0  # agent framework backing app/agents/* (drafting, RAG, revision, scanner)
 docling>=2.0.0  # PDF/DOCX -> markdown parsing, app/services/document_parser.py
+ragas==0.4.3  # dev-only RAG quality eval, app/services/rag/evaluation.py + scripts/eval_rag_ragas.py.
+              # Pinned exact: 0.4.3 has two known packaging bugs worked around in
+              # evaluation.py's module docstring — re-check that workaround before bumping.
+openai>=1.0.0  # judge LLM client for ragas eval, pointed at Groq's OpenAI-compatible endpoint
 

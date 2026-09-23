@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.agents.drafting_agent import drafting_agent
 from app.services import draft_workspace
+from app.services.ai_usage import check_and_consume_ai_usage
 from app.services.draft_chat import build_context_prefix
 from app.services.document_finalize import finalize_document_revision
 
@@ -31,7 +32,10 @@ def _tool_called(response, name: str) -> bool:
     )
 
 
-def run_review_turn(db: Session, *, session_id: str, document_id: uuid.UUID, user_id: uuid.UUID, message: str) -> dict:
+def run_review_turn(
+    db: Session, *, session_id: str, document_id: uuid.UUID, user_id: uuid.UUID,
+    tenant_id: uuid.UUID, message: str,
+) -> dict:
     """
     Run one document-review turn for `session_id`.
 
@@ -47,6 +51,14 @@ def run_review_turn(db: Session, *, session_id: str, document_id: uuid.UUID, use
           "failed_criteria": list[str],  # criteria below PER_CRITERION_MINIMUM, finalize only
         }
     """
+    # Change 4 (PRODUCTION_READINESS_PLAN.md) — committed immediately so an
+    # attempted call counts even if the agent run itself fails below. Placed
+    # after Change 1's router-level db.commit() (the transaction this
+    # session started with is already ended by the time this runs), so this
+    # opens/ends its own short transaction rather than riding on that one.
+    check_and_consume_ai_usage(db, tenant_id)
+    db.commit()
+
     prefix = build_context_prefix(session_id)
     before = draft_workspace.read_working_draft(session_id)
     response = drafting_agent.run(prefix + (message or "continue"), session_id=session_id)

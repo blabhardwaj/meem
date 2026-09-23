@@ -24,6 +24,7 @@ from app.agents.revision_agent import revision_agent
 from app.models.document import Document, DocumentVersion
 from app.services import draft_workspace
 from app.services.access_control import can_edit_document
+from app.services.ai_usage import check_and_consume_ai_usage
 from app.services.document_diff import diff_summary
 from app.services.document_finalize import failed_criteria, run_full_scan, scan_passed
 from app.services.document_finalize import finalize_document_revision
@@ -206,7 +207,8 @@ def _build_context_prefix(session_id: str) -> str:
 
 
 def run_version_review_turn(
-    db: Session, *, session_id: str, document_id: uuid.UUID, user_id: uuid.UUID, message: str
+    db: Session, *, session_id: str, document_id: uuid.UUID, user_id: uuid.UUID,
+    tenant_id: uuid.UUID, message: str,
 ) -> dict:
     """
     One turn of the version-review conversation. On a revision, recomputes
@@ -229,6 +231,11 @@ def run_version_review_turn(
           "workflow_reset": bool,          # True if a prior approval was reset to draft
         }
     """
+    # Change 4 (PRODUCTION_READINESS_PLAN.md) — committed immediately so an
+    # attempted call counts even if the agent run itself fails below.
+    check_and_consume_ai_usage(db, tenant_id)
+    db.commit()
+
     prefix = _build_context_prefix(session_id)
     before = draft_workspace.read_working_draft(session_id)
     response = revision_agent.run(prefix + (message or "continue"), session_id=session_id)

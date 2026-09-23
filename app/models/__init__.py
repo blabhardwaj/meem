@@ -17,6 +17,7 @@ from app.models.audit import AuditLog
 from app.models.notification import Notification, NotificationType
 from app.models.chat import ChatSession, ChatMessage
 from app.models.invitation import Invitation
+from app.models.ai_usage import AIUsage
 from app.models.graph import (
     Node,
     Edge,
@@ -64,5 +65,6 @@ __all__ = [
     "DocumentCoherenceCheck",
     "AdvisoryDismissal",
     "Invitation",
+    "AIUsage",
 ]
 

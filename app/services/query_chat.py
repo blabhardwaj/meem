@@ -37,6 +37,7 @@ _TOOL_NAMES = (
     "list_pending_approvals",
     "check_my_access",
     "get_project_structure",
+    "get_my_accessible_stages",
     "get_stage_requirements",
     "get_stage_document_status",
 )

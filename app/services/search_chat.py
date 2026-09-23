@@ -27,6 +27,7 @@ from sqlalchemy import text
 
 from app.agents.search_agent import search_agent
 from app.database import SessionLocal
+from app.services.ai_usage import check_and_consume_ai_usage
 from app.services.chat_history import append_message, resolve_chat_session
 from app.services.rag_context import get_rag_context, reset_rag_context, set_rag_context
 from app.services.query_context import reset_query_context, set_query_context
@@ -42,6 +43,7 @@ _TOOL_NAMES = (
     "list_pending_approvals",
     "check_my_access",
     "get_project_structure",
+    "get_my_accessible_stages",
     "get_stage_requirements",
     "get_stage_document_status",
     "get_project_readiness",
@@ -100,6 +102,11 @@ def run_search_turn(
         canonical = session.session_id
         append_message(db, session_id=canonical, role="user", content=message)
         db.commit()  # the user's turn is recorded even if the agent call fails
+
+        # Change 4 (PRODUCTION_READINESS_PLAN.md) — committed immediately so
+        # an attempted call counts even if the agent run itself fails below.
+        check_and_consume_ai_usage(db, tenant_id)
+        db.commit()
 
         t_turn_start = time.perf_counter()
         rag_token = set_rag_context(user_id=user_id, project_id=project_id, tenant_id=tenant_id)
