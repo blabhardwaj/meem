@@ -79,6 +79,12 @@ const ProjectWorkspace = () => {
   const [newTeamName, setNewTeamName] = useState('');
   const [creatingTeam, setCreatingTeam] = useState(false);
   const [teamError, setTeamError] = useState('');
+  // "View members" expansion (project/org admin only) — lazy-loaded per team,
+  // cached by team_id so re-expanding doesn't re-fetch.
+  const [expandedTeamId, setExpandedTeamId] = useState(null);
+  const [teamMembersById, setTeamMembersById] = useState({});
+  const [teamMembersLoadingId, setTeamMembersLoadingId] = useState(null);
+  const [teamMembersErrorId, setTeamMembersErrorId] = useState({});
 
   const load = useCallback(async ({ silent = false } = {}) => {
     if (!silent) setLoading(true);
@@ -184,19 +190,39 @@ const ProjectWorkspace = () => {
   const canManageStages = ['org_admin', 'project_admin'].includes(role) || Boolean(user?.is_org_admin);
   const canManageTeams = ['org_admin', 'project_admin'].includes(role);
 
-  const teamNames = (wsProject?.teams || []).map((t) => t.name);
-
   const openTeams = async () => {
     setTeamsOpen(true);
     setTeamError('');
     setNewTeamName('');
     setTeamsLoading(true);
+    setExpandedTeamId(null);
+    setTeamMembersById({});
+    setTeamMembersErrorId({});
     try {
       setTeams(await teamsApi.list(projectId));
     } catch (err) {
       setTeamError(err.message || 'Could not load teams.');
     } finally {
       setTeamsLoading(false);
+    }
+  };
+
+  const toggleTeamMembers = async (teamId) => {
+    if (expandedTeamId === teamId) {
+      setExpandedTeamId(null);
+      return;
+    }
+    setExpandedTeamId(teamId);
+    if (teamMembersById[teamId]) return; // already cached
+    setTeamMembersLoadingId(teamId);
+    setTeamMembersErrorId((prev) => ({ ...prev, [teamId]: '' }));
+    try {
+      const members = await teamsApi.members(projectId, teamId);
+      setTeamMembersById((prev) => ({ ...prev, [teamId]: members }));
+    } catch (err) {
+      setTeamMembersErrorId((prev) => ({ ...prev, [teamId]: err.message || 'Could not load members.' }));
+    } finally {
+      setTeamMembersLoadingId(null);
     }
   };
 
@@ -273,10 +299,7 @@ const ProjectWorkspace = () => {
           title="Teams in this project"
           className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-2.5 py-1 text-xs font-medium text-gray-300 hover:border-primary/50 hover:text-gray-100 transition-colors shrink-0"
         >
-          Teams
-          <span className="text-gray-500 max-w-[220px] truncate">
-            {teamNames.length ? teamNames.join(', ') : '—'}
-          </span>
+          Team Detail
         </button>
 
         {DOCUMENT_AND_TEAM_SCOPE_REQUESTS_ENABLED && requestableTeams.length > 0 && (
@@ -357,14 +380,50 @@ const ProjectWorkspace = () => {
           ) : (
             <div className="space-y-2">
               {teams.length === 0 && <p className="text-sm text-gray-500">This project has no teams yet.</p>}
-              {teams.map((t) => (
-                <div key={t.team_id} className="flex items-center justify-between rounded-lg border border-border bg-background px-3 py-2.5">
-                  <span className="text-sm text-gray-200">{t.name}</span>
-                  <span className="text-xs text-gray-500">
-                    {t.member_count} member{t.member_count === 1 ? '' : 's'}
-                  </span>
-                </div>
-              ))}
+              {teams.map((t) => {
+                const isExpanded = expandedTeamId === t.team_id;
+                const members = teamMembersById[t.team_id];
+                const memberError = teamMembersErrorId[t.team_id];
+                const row = (
+                  <div className="flex items-center justify-between px-3 py-2.5">
+                    <span className="text-sm text-gray-200">{t.name}</span>
+                    <span className="flex items-center gap-2 text-xs text-gray-500">
+                      {t.member_count} member{t.member_count === 1 ? '' : 's'}
+                      <span aria-hidden="true">{isExpanded ? '▲' : '▼'}</span>
+                    </span>
+                  </div>
+                );
+                return (
+                  <div key={t.team_id} className="rounded-lg border border-border bg-background">
+                    <button
+                      type="button"
+                      onClick={() => toggleTeamMembers(t.team_id)}
+                      className="w-full text-left"
+                      aria-expanded={isExpanded}
+                    >
+                      {row}
+                    </button>
+                    {isExpanded && (
+                      <div className="border-t border-border/60 px-3 py-2 space-y-1">
+                        {teamMembersLoadingId === t.team_id ? (
+                          <p className="text-xs text-gray-500">Loading members…</p>
+                        ) : memberError ? (
+                          <p className="text-xs text-red-400">{memberError}</p>
+                        ) : members && members.length === 0 ? (
+                          <p className="text-xs text-gray-500">No members assigned to this team yet.</p>
+                        ) : (
+                          (members || []).map((m) => (
+                            <div key={m.user_id} className="flex items-center justify-between text-xs">
+                              <span className="text-gray-300">{m.name}</span>
+                              <span className="text-gray-500 capitalize">{m.role.replace('_', ' ')}</span>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
 

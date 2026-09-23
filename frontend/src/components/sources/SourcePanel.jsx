@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, Pencil, ArrowUp, ArrowDown, ShieldCheck, Trash2, Settings2, Link2, Users, UploadCloud, ListChecks, Check, Circle, X as XIcon } from 'lucide-react';
+import { Plus, Pencil, ArrowUp, ArrowDown, ShieldCheck, Trash2, Settings2, Users, UploadCloud, ListChecks, Check, Circle, X as XIcon } from 'lucide-react';
 import { STAGES } from '../../constants/stages';
 import StageSection from './StageSection';
 import RequirementsChecklistModal from './RequirementsChecklistModal';
@@ -68,7 +68,6 @@ const SourcePanel = ({
   const [settingsStage, setSettingsStage] = useState(null);
   const [editName, setEditName] = useState('');
   const [reqApproval, setReqApproval] = useState(false);
-  const [refIds, setRefIds] = useState([]); // stage_ids this stage references
   const [teamAccessIds, setTeamAccessIds] = useState([]); // team_ids granted access to this stage
   const [reassignTo, setReassignTo] = useState('');
   // Which stage-settings action is in flight, if any — a string key rather
@@ -107,7 +106,6 @@ const SourcePanel = ({
     setSettingsStage(stage);
     setEditName(stage.name);
     setReqApproval(Boolean(stage.requires_approval));
-    setRefIds(stage.references || []);
     setTeamAccessIds(stage.team_access || []);
     setReassignTo('');
     setStageErr(''); setStageNotice('');
@@ -252,32 +250,11 @@ const SourcePanel = ({
       setSettingsStage(updated);
       setEditName(updated.name);
       setReqApproval(Boolean(updated.requires_approval));
-      setRefIds(updated.references || []);
       setTeamAccessIds(updated.team_access || []);
       if (successMsg) setStageNotice(successMsg);
       await refresh();
     } catch (err) {
       setStageErr(err.message || 'Could not update the stage.');
-    } finally {
-      setStageBusyAction(null);
-    }
-  };
-
-  const toggleReference = async (targetId) => {
-    const next = refIds.includes(targetId)
-      ? refIds.filter((id) => id !== targetId)
-      : [...refIds, targetId];
-    setRefIds(next); // optimistic
-    setStageBusyAction('references'); setStageErr(''); setStageNotice('');
-    try {
-      const updated = await stagesApi.setReferences(projectId, settingsStage.stage_id, next);
-      setSettingsStage(updated);
-      setRefIds(updated.references || []);
-      setStageNotice('References updated.');
-      await refresh();
-    } catch (err) {
-      setRefIds(refIds); // roll back
-      setStageErr(err.message || 'Could not update references.');
     } finally {
       setStageBusyAction(null);
     }
@@ -516,40 +493,6 @@ const SourcePanel = ({
               </button>
             </div>
 
-            {/* Stage references */}
-            <div className="border-t border-border/60 pt-4">
-              <p className="text-sm font-medium text-gray-300 flex items-center gap-1.5">
-                <Link2 size={14} className="text-primary" /> References
-              </p>
-              <p className="text-xs text-gray-500 mt-0.5 mb-2">
-                Other stages this one depends on. Retrieval scoped to
-                &ldquo;{settingsStage.name}&rdquo; also pulls from these (one-way).
-              </p>
-              {orderedStages.filter((s) => s.stage_id !== settingsStage.stage_id).length === 0 ? (
-                <p className="text-xs text-gray-600">No other stages in this project.</p>
-              ) : (
-                <div className="space-y-1">
-                  {orderedStages
-                    .filter((s) => s.stage_id !== settingsStage.stage_id)
-                    .map((s) => (
-                      <label
-                        key={s.stage_id}
-                        className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-gray-300 hover:bg-surface-hover cursor-pointer"
-                      >
-                        <input
-                          type="checkbox"
-                          className="accent-primary"
-                          disabled={stageBusy}
-                          checked={refIds.includes(s.stage_id)}
-                          onChange={() => toggleReference(s.stage_id)}
-                        />
-                        {s.name}
-                      </label>
-                    ))}
-                </div>
-              )}
-            </div>
-
             {/* Team access */}
             <div className="border-t border-border/60 pt-4">
               <p className="text-sm font-medium text-gray-300 flex items-center gap-1.5">
@@ -582,10 +525,10 @@ const SourcePanel = ({
               )}
             </div>
 
-            {/* Required documents (stage completion checklist) */}
+            {/* Document requirements (stage completion checklist) */}
             <div className="border-t border-border/60 pt-4">
               <p className="text-sm font-medium text-gray-300 flex items-center gap-1.5">
-                <ListChecks size={14} className="text-primary" /> Required documents
+                <ListChecks size={14} className="text-primary" /> Document requirements
               </p>
               <p className="text-xs text-gray-500 mt-0.5 mb-2">
                 What &ldquo;{settingsStage.name}&rdquo; needs to be considered complete. Mandatory items

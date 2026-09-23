@@ -102,6 +102,10 @@ def _details_to_text(details: dict | None) -> str | None:
     return "; ".join(f"{k}={v}" for k, v in details.items())
 
 
+def _user_display(u: User) -> str:
+    return u.full_name or u.email
+
+
 def _as_uuid(value) -> uuid.UUID | None:
     if isinstance(value, uuid.UUID):
         return value
@@ -170,11 +174,12 @@ def list_audit_log(db: Session, identity, limit: int = 200) -> list[dict]:
     ).all()
 
     # --- scope-resolution helpers, preloaded to avoid per-row queries ---------
-    tenant_project_ids = {
-        p.project_id for p in db.execute(
+    projects = {
+        p.project_id: p for p in db.execute(
             select(Project).where(Project.tenant_id == identity.tenant_id)
         ).scalars()
     }
+    tenant_project_ids = set(projects)
     teams = {
         t.team_id: t for t in db.execute(
             select(Team).where(Team.project_id.in_(tenant_project_ids))
@@ -183,6 +188,14 @@ def list_audit_log(db: Session, identity, limit: int = 200) -> list[dict]:
     access_requests = {
         r.request_id: r for r in db.execute(select(AccessRequest)).scalars()
         if r.team_id in teams
+    }
+    # user_id -> User, for resolving details/resource ids that name a person
+    # (target of a role change, requester of an access grant, ...) to a
+    # readable email/name instead of the raw UUID the Audit Log used to show.
+    users = {
+        u.user_id: u for u in db.execute(
+            select(User).where(User.tenant_id == identity.tenant_id)
+        ).scalars()
     }
     reqs_by_user_team: dict[tuple, list] = {}
     for r in access_requests.values():
@@ -222,6 +235,119 @@ def list_audit_log(db: Session, identity, limit: int = 200) -> list[dict]:
             return True
         return False
 
+    # Detail keys that name another record by raw UUID -> (lookup dict, display fn).
+    # Used both to relabel the Resource column and to swap these same UUIDs out
+    # of the Details text for something a human can actually read.
+    _ID_DETAIL_KEYS = {
+        "team_id": ("team", lambda tid: teams[tid].name if tid in teams else None),
+        "project_id": ("project", lambda pid: projects[pid].name if pid in projects else None),
+        "requester_id": ("requester", lambda uid: _user_display(users[uid]) if uid in users else None),
+    }
+
+    def _resource_display(a: AuditLog) -> str:
+        """Human-readable 'Resource' cell: the type plus a name/email instead
+        of the bare resource_id UUID, falling back to the UUID only when no
+        name can be resolved (e.g. the record was since deleted)."""
+        d = a.details or {}
+        rid = a.resource_id
+        label = None
+        if a.resource_type == "user":
+            label = d.get("email") or (_user_display(users[rid]) if rid in users else None)
+        elif a.resource_type == "team":
+            label = d.get("team") or (teams[rid].name if rid in teams else None)
+        elif a.resource_type == "access_request":
+            label = d.get("team")
+        elif a.resource_type == "audit_finding":
+            label = d.get("rule_code")
+        elif a.resource_type == "project":
+            label = d.get("project") or (projects[rid].name if rid in projects else None)
+        if label is None and rid is not None:
+            label = str(rid)
+        return f"{a.resource_type} · {label}" if label else a.resource_type
+
+    def _humanized_dict(a: AuditLog) -> dict:
+        """a.details with team_id/project_id/requester_id UUIDs swapped for
+        the team/project/requester name they refer to (falling back to the
+        raw id if it can't be resolved), so nothing downstream ever has to
+        decode a UUID by hand."""
+        d = a.details or {}
+        resolved: dict[str, object] = {}
+        for k, v in d.items():
+            if k in _ID_DETAIL_KEYS and v:
+                new_key, resolver = _ID_DETAIL_KEYS[k]
+                if new_key in d:
+                    continue  # a human-readable version is already present -- drop the raw id
+                resolved[new_key] = resolver(_as_uuid(v)) or v
+                continue
+            resolved[k] = v
+        return resolved
+
+    def _humanize_details(a: AuditLog) -> str | None:
+        resolved = _humanized_dict(a)
+        return "; ".join(f"{k}={v}" for k, v in resolved.items()) if resolved else None
+
+    def _target_display(a: AuditLog, d: dict) -> str:
+        """Best-effort name/email of the row's TARGET -- the account being
+        assigned/removed/granted, as opposed to the actor who did it."""
+        if a.resource_type == "user":
+            if d.get("email"):
+                return d["email"]
+            if a.resource_id in users:
+                return _user_display(users[a.resource_id])
+        return "the user"
+
+    # One human sentence per action, describing what was done -- the actor's
+    # name is prepended by the caller. Deliberately covers exactly
+    # AUDIT_LOG_ACTIONS; anything else falls through to the generic branch.
+    def _action_summary(a: AuditLog, d: dict, outcome: str | None) -> str:
+        role = d.get("role")
+        team = d.get("team")
+        project = d.get("project")
+        target = _target_display(a, d)
+
+        if a.action == "SIGNUP":
+            method = {
+                "password": "email and password", "google": "Google sign-in",
+                "register_org": "registering a new organization", "accept_invite": "accepting an invitation",
+            }.get(d.get("method"), d.get("method") or "signing up")
+            return f"signed up via {method}."
+        if a.action in ("INVITE_USER", "CREATE_USER"):
+            verb = "invited" if a.action == "INVITE_USER" else "created"
+            where = f" as {role} to team {team} ({project})" if role and team else (f" to {project}" if project else "")
+            return f"{verb} {target}{where}."
+        if a.action == "ASSIGN_ROLE":
+            note = " A new account was created for them." if d.get("new_user") else ""
+            return f"assigned {target} as {role} on team {team} ({project}).{note}"
+        if a.action == "UPDATE_ROLE":
+            return f"changed {target}'s role to {role} on team {team} ({project})."
+        if a.action == "REMOVE_ROLE":
+            return f"removed {target} ({role}) from team {team} ({project})."
+        if a.action == "GRANT_PROJECT_ADMIN":
+            return f"granted {target} Project Admin on {project}."
+        if a.action == "REVOKE_PROJECT_ADMIN":
+            return f"revoked {target}'s Project Admin on {project}."
+        if a.action == "GRANT_ORG_ADMIN":
+            return f"granted {target} Organization Admin."
+        if a.action == "REVOKE_ORG_ADMIN":
+            return f"revoked {target}'s Organization Admin."
+        if a.action == "REQUEST_CONFIDENTIAL_ACCESS":
+            scope = f" — {d['scope']} scope" if d.get("scope") else ""
+            reason = f" Reason: {d['reason']}" if d.get("reason") else ""
+            status = f" Status: {outcome}." if outcome else ""
+            return f"requested confidential access to team {team} ({project}){scope}.{reason}{status}"
+        if a.action in ("APPROVE_ACCESS_REQUEST", "DENY_ACCESS_REQUEST"):
+            verb = "approved" if a.action == "APPROVE_ACCESS_REQUEST" else "denied"
+            requester = d.get("requester", "a user")
+            return f"{verb} {requester}'s access request for team {team}."
+        if a.action in ("DISMISS_ADVISORY_FINDING", "RESTORE_ADVISORY_FINDING"):
+            verb = "dismissed" if a.action == "DISMISS_ADVISORY_FINDING" else "restored"
+            rule = d.get("rule_code")
+            where = f" {rule} " if rule else " an "
+            return f"{verb}{where}advisory finding on {project}."
+
+        kv = "; ".join(f"{k}={v}" for k, v in d.items())
+        return f"performed {a.action.replace('_', ' ').lower()} on {_resource_display(a)}" + (f" ({kv})" if kv else "") + "."
+
     def _outcome(a: AuditLog) -> str | None:
         if a.action == "APPROVE_ACCESS_REQUEST":
             return "approved"
@@ -243,15 +369,26 @@ def list_audit_log(db: Session, identity, limit: int = 200) -> list[dict]:
     for a, email in candidates:
         if not _visible(a):
             continue
+        actor_name = _user_display(users[a.user_id]) if a.user_id in users else email
+        outcome = _outcome(a)
+        summary = _action_summary(a, _humanized_dict(a), outcome)
         out.append({
             "log_id": str(a.log_id),
             "user_id": str(a.user_id),
             "actor_email": email,
+            "actor_name": actor_name,
             "action": a.action,
             "resource_type": a.resource_type,
             "resource_id": str(a.resource_id) if a.resource_id else None,
-            "details": _details_to_text(a.details),
-            "status": _outcome(a),
+            "resource_label": _resource_display(a),
+            # "Details" merges the old Resource + Details columns into one
+            # structured sentence -- who (actor_name) did what (summary) --
+            # instead of forcing the reader to decode a resource type plus a
+            # raw key=value dump. `details` stays available as the plain
+            # fallback (actor + summary, one string) for any other consumer.
+            "summary": summary,
+            "details": f"{actor_name} {summary}",
+            "status": outcome,
             "created_at": a.created_at.isoformat(),
             "timestamp": a.created_at.isoformat(),
         })

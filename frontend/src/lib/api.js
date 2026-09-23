@@ -286,6 +286,9 @@ export const teamsApi = {
     clearWorkspaceCache();
     return r;
   },
+  // -> [{ user_id, name, role }]  (project/org admin only)
+  members: (projectId, teamId) =>
+    request(`/projects/${encodeURIComponent(projectId)}/teams/${encodeURIComponent(teamId)}/members`),
 };
 
 // ---------- Documents ----------

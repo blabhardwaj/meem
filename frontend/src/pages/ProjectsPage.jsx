@@ -7,8 +7,9 @@ import Input from '../components/ui/Input';
 import Modal from '../components/ui/Modal';
 import Button from '../components/ui/Button';
 import Textarea from '../components/ui/Textarea';
-import { projectsApi } from '../lib/api';
+import { projectsApi, workspaceApi } from '../lib/api';
 import { useAuth } from '../context/AuthContext';
+import { teamBreakdownForProject } from '../components/projects/ProjectAccessModal';
 
 const slugify = (name) =>
   `${name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'project'}-${Date.now().toString(36)}`;
@@ -33,6 +34,7 @@ const ProjectsPage = () => {
   const { user } = useAuth();
   const [greeting, setGreeting] = useState(getKolkataGreeting);
   const [projects, setProjects] = useState([]);
+  const [workspace, setWorkspace] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
@@ -64,6 +66,14 @@ const ProjectsPage = () => {
       window.clearInterval(interval);
       window.removeEventListener('focus', refreshOnFocus);
     };
+  }, []);
+
+  useEffect(() => {
+    // Per-team stage access isn't part of GET /projects -- /workspace already
+    // computes it (native TeamStageAccess grants for the caller's own teams),
+    // pulled in here so each card's access modal can say which stage(s) a
+    // team actually sees, not just its role.
+    workspaceApi.get().then(setWorkspace).catch(() => setWorkspace(null));
   }, []);
 
   useEffect(() => {
@@ -144,9 +154,7 @@ const ProjectsPage = () => {
                 : isProjectAdmin
                   ? 'project_admin'
                   : 'member';
-              const myTeams = myMemberships
-                .filter((m) => m.role !== 'project_admin' && m.team_name)
-                .map((m) => ({ team: m.team_name, role: m.role }));
+              const myTeams = teamBreakdownForProject(project, workspace, user?.user_id, accessLevel);
               return (
                 <ProjectCard
                   key={project.project_id}

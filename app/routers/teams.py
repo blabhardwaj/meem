@@ -3,8 +3,9 @@ Team management within a project — creating the teams THEMSELVES (not assignin
 users to them; that's /admin/assign-roles). Until now teams only ever existed
 via the one seeded on project creation, or raw SQL — same gap stages had.
 
-  GET  /projects/{project_id}/teams   list this project's teams (+ member counts)
-  POST /projects/{project_id}/teams   create a team                (project_admin+)
+  GET  /projects/{project_id}/teams                    list this project's teams (+ member counts)
+  GET  /projects/{project_id}/teams/{team_id}/members  list a team's members     (any project member)
+  POST /projects/{project_id}/teams                    create a team              (project_admin+)
 
 "project_admin+" = org_admin (tenant-wide) or a ProjectAdmin scope on this
 project — the same gate as stage creation. A newly created team shows up
@@ -23,6 +24,7 @@ from sqlalchemy.orm import Session
 from app.api.dependencies import get_current_user, get_db_with_tenant
 from app.models.project import Project
 from app.models.team import Team, UserTeamMembership
+from app.models.user import User
 from app.services.audit import record_audit
 from app.services.auth import ResolvedIdentity
 
@@ -40,11 +42,24 @@ class TeamOut(BaseModel):
     member_count: int
 
 
+class TeamMemberOut(BaseModel):
+    user_id: str
+    name: str
+    role: str
+
+
 def _load_project(db: Session, identity: ResolvedIdentity, project_id: uuid.UUID) -> Project:
     project = db.get(Project, project_id)
     if project is None or project.tenant_id != identity.tenant_id:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
+
+
+def _load_team(db: Session, project_id: uuid.UUID, team_id: uuid.UUID) -> Team:
+    team = db.get(Team, team_id)
+    if team is None or team.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Team not found")
+    return team
 
 
 def _can_see_project(identity: ResolvedIdentity, project_id: uuid.UUID) -> bool:
@@ -58,7 +73,7 @@ def _require_project_admin(identity: ResolvedIdentity, project_id: uuid.UUID) ->
         return
     raise HTTPException(
         status_code=403,
-        detail="Only project admins (or organization admins) can create teams.",
+        detail="Only project admins (or organization admins) can do this.",
     )
 
 
@@ -94,6 +109,33 @@ def list_teams(
         select(Team).where(Team.project_id == project_id).order_by(Team.name)
     ).scalars().all()
     return [_serialize(t, counts.get(t.team_id, 0)) for t in teams]
+
+
+@router.get("/{project_id}/teams/{team_id}/members", response_model=list[TeamMemberOut])
+def list_team_members(
+    project_id: uuid.UUID,
+    team_id: uuid.UUID,
+    identity: ResolvedIdentity = Depends(get_current_user),
+    db: Session = Depends(get_db_with_tenant),
+):
+    _load_project(db, identity, project_id)
+    _load_team(db, project_id, team_id)
+    if not _can_see_project(identity, project_id):
+        raise HTTPException(status_code=403, detail="You do not have access to this project")
+
+    rows = db.execute(
+        select(UserTeamMembership, User.email)
+        .join(User, User.user_id == UserTeamMembership.user_id)
+        .where(
+            UserTeamMembership.project_id == project_id,
+            UserTeamMembership.team_id == team_id,
+        )
+        .order_by(User.email)
+    ).all()
+    return [
+        TeamMemberOut(user_id=str(m.user_id), name=email, role=m.role.value)
+        for m, email in rows
+    ]
 
 
 @router.post("/{project_id}/teams", response_model=TeamOut, status_code=201)

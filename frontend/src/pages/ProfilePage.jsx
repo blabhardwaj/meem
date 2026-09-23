@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { User as UserIcon, KeyRound, FolderKanban, CircleHelp } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { authApi, projectsApi, setToken } from '../lib/api';
+import { authApi, projectsApi, workspaceApi, setToken } from '../lib/api';
 import Card from '../components/ui/Card';
 import Input from '../components/ui/Input';
 import Button from '../components/ui/Button';
@@ -9,19 +9,13 @@ import Modal from '../components/ui/Modal';
 import Badge from '../components/ui/Badge';
 import BackButton from '../components/ui/BackButton';
 import TutorialPopup from '../components/layout/TutorialPopup';
-
-const ROLE_LABEL = {
-  viewer: 'Viewer',
-  contributor: 'Contributor',
-  team_lead: 'Team Lead',
-  project_admin: 'Project Admin',
-  org_admin: 'Organization Admin',
-};
+import { ProjectAccessDetail, ACCESS_LABEL, teamBreakdownForProject } from '../components/projects/ProjectAccessModal';
 
 const ProfilePage = () => {
   const { user } = useAuth();
   const [projects, setProjects] = useState([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
+  const [workspace, setWorkspace] = useState(null);
 
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
   const [currentPassword, setCurrentPassword] = useState('');
@@ -37,6 +31,11 @@ const ProfilePage = () => {
       .then(setProjects)
       .catch(() => setProjects([]))
       .finally(() => setProjectsLoading(false));
+    // Per-team stage access isn't part of GET /projects — /workspace already
+    // computes it (native TeamStageAccess grants for the caller's own teams),
+    // so we pull it in just to resolve "which stage(s) does this team
+    // actually see" instead of leaving that unstated next to each role.
+    workspaceApi.get().then(setWorkspace).catch(() => setWorkspace(null));
   }, []);
 
   const closePasswordModal = () => {
@@ -73,16 +72,28 @@ const ProfilePage = () => {
     }
   };
 
-  // Every project the user actually has a role in, paired with that role —
-  // an honest per-project breakdown, not the old single ambiguous
-  // "first role found" label (see UI_FIXES_2026-09-15.md #11 for why that
-  // was misleading).
+  // Every project the user actually has a role in, paired with a generic
+  // accessLevel ('org_admin' | 'project_admin' | 'member') for the
+  // project-level badge -- the specific per-team role is stated once, in
+  // the per-team breakdown below, so it isn't shown twice for the same
+  // project (see ACCESS_LABEL above). Mirrors ProjectsPage.jsx's own
+  // accessLevel computation for ProjectCard.
   const myProjects = projects
-    .map((p) => ({
-      ...p,
-      role: user?.is_org_admin ? 'org_admin' : user?.project_roles?.[p.project_id],
-    }))
-    .filter((p) => p.role);
+    .map((p) => {
+      const myMemberships = (p.members || []).filter((m) => m.user_id === user?.user_id);
+      const isProjectAdmin =
+        user?.project_roles?.[p.project_id] === 'project_admin' ||
+        myMemberships.some((m) => m.role === 'project_admin');
+      const accessLevel = user?.is_org_admin
+        ? 'org_admin'
+        : isProjectAdmin
+          ? 'project_admin'
+          : myMemberships.length
+            ? 'member'
+            : null;
+      return { ...p, accessLevel };
+    })
+    .filter((p) => p.accessLevel);
 
   return (
     <div className="flex-1 p-8 max-w-2xl mx-auto w-full">
@@ -131,14 +142,23 @@ const ProfilePage = () => {
           ) : myProjects.length === 0 ? (
             <p className="text-sm text-gray-500">You don't have a role on any project yet.</p>
           ) : (
-            <div className="space-y-2">
+            <div className="space-y-3">
               {myProjects.map((p) => (
-                <div key={p.project_id} className="flex items-center justify-between gap-3 rounded-lg border border-border bg-background/60 px-3 py-2.5">
-                  <span className="flex items-center gap-2 text-sm text-gray-200 min-w-0">
-                    <FolderKanban size={15} className="text-primary shrink-0" />
-                    <span className="truncate">{p.project_name}</span>
-                  </span>
-                  <Badge variant="neutral">{ROLE_LABEL[p.role] || p.role}</Badge>
+                <div key={p.project_id} className="rounded-lg border border-border bg-background/60 overflow-hidden">
+                  <div className="flex items-center justify-between gap-3 px-3 py-2.5">
+                    <span className="flex items-center gap-2 text-sm text-gray-200 min-w-0">
+                      <FolderKanban size={15} className="text-primary shrink-0" />
+                      <span className="truncate">{p.project_name}</span>
+                    </span>
+                    <Badge variant="neutral">{ACCESS_LABEL[p.accessLevel] || p.accessLevel}</Badge>
+                  </div>
+                  <div className="border-t border-border/50 px-3 py-3">
+                    <ProjectAccessDetail
+                      accessLevel={p.accessLevel}
+                      myTeams={teamBreakdownForProject(p, workspace, user?.user_id, p.accessLevel)}
+                      showSummary={false}
+                    />
+                  </div>
                 </div>
               ))}
             </div>
