@@ -34,6 +34,9 @@ qdrant_storage/
 # Internal planning/design docs and verification reports — not for GitHub
 docs/
 docs for meridian pay/
+PRODUCTION_READINESS_PLAN.md
+TODAY_IMPLEMENTATION_TRACKER.md
+FRONTEND_CHANGES_REQUIRED.md
 
 # IDE
 .vscode/
