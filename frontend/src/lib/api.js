@@ -112,6 +112,9 @@ export const authApi = {
       method: 'PUT',
       body: { current_password: currentPassword, new_password: newPassword },
     }),
+  // update own display name -> { full_name }
+  updateProfile: (fullName) =>
+    request('/auth/profile', { method: 'PUT', body: { full_name: fullName } }),
 };
 
 // ---------- Workspace helper (project/team/stage names + ids) ----------

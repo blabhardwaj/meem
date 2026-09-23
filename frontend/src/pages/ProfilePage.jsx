@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { User as UserIcon, KeyRound, FolderKanban, CircleHelp } from 'lucide-react';
+import { User as UserIcon, KeyRound, FolderKanban, CircleHelp, Pencil } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { authApi, projectsApi, workspaceApi, setToken } from '../lib/api';
 import Card from '../components/ui/Card';
@@ -12,7 +12,7 @@ import TutorialPopup from '../components/layout/TutorialPopup';
 import { ProjectAccessDetail, ACCESS_LABEL, teamBreakdownForProject } from '../components/projects/ProjectAccessModal';
 
 const ProfilePage = () => {
-  const { user } = useAuth();
+  const { user, refresh } = useAuth();
   const [projects, setProjects] = useState([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
   const [workspace, setWorkspace] = useState(null);
@@ -25,6 +25,38 @@ const ProfilePage = () => {
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
   const [tutorialOpen, setTutorialOpen] = useState(false);
+
+  const hasRealName = Boolean(user?.full_name) && user.full_name !== user?.email;
+  const [nameModalOpen, setNameModalOpen] = useState(false);
+  const [nameInput, setNameInput] = useState('');
+  const [nameError, setNameError] = useState('');
+  const [nameBusy, setNameBusy] = useState(false);
+
+  const openNameModal = () => {
+    setNameInput(hasRealName ? user.full_name : '');
+    setNameError('');
+    setNameModalOpen(true);
+  };
+
+  const handleSaveName = async (e) => {
+    e.preventDefault();
+    const trimmed = nameInput.trim();
+    if (!trimmed) {
+      setNameError('Name cannot be empty.');
+      return;
+    }
+    setNameError('');
+    setNameBusy(true);
+    try {
+      await authApi.updateProfile(trimmed);
+      await refresh();
+      setNameModalOpen(false);
+    } catch (err) {
+      setNameError(err.detail?.detail || err.message || 'Could not update your name.');
+    } finally {
+      setNameBusy(false);
+    }
+  };
 
   useEffect(() => {
     projectsApi.list()
@@ -109,13 +141,24 @@ const ProfilePage = () => {
       <div className="space-y-6">
         <Card title="Account">
           <div className="space-y-3">
-            <div className="space-y-1">
-              {user?.full_name && user.full_name !== user.email && (
-                <p className="text-sm text-gray-200">{user.full_name}</p>
-              )}
-              <p className={user?.full_name && user.full_name !== user.email ? 'text-sm text-gray-500' : 'text-sm text-gray-200'}>
-                {user?.email}
-              </p>
+            <div className="flex items-start justify-between gap-2">
+              <div className="space-y-1 min-w-0">
+                {hasRealName && (
+                  <p className="text-sm text-gray-200 truncate">{user.full_name}</p>
+                )}
+                <p className={hasRealName ? 'text-sm text-gray-500 truncate' : 'text-sm text-gray-200 truncate'}>
+                  {user?.email}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={openNameModal}
+                className="shrink-0 p-1.5 text-gray-500 hover:text-primary hover:bg-surface-hover rounded-md transition-colors"
+                title={hasRealName ? 'Edit name' : 'Add your name'}
+                aria-label={hasRealName ? 'Edit name' : 'Add your name'}
+              >
+                <Pencil size={15} />
+              </button>
             </div>
             {user?.is_org_admin && (
               <Badge variant="active">Organization Admin</Badge>
@@ -211,6 +254,32 @@ const ProfilePage = () => {
             <Button type="button" variant="secondary" onClick={closePasswordModal}>Cancel</Button>
             <Button type="submit" icon={KeyRound} loading={busy}>
               Change password
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal
+        open={nameModalOpen}
+        onClose={() => setNameModalOpen(false)}
+        title={hasRealName ? 'Edit name' : 'Add your name'}
+      >
+        <form onSubmit={handleSaveName} className="space-y-4">
+          <Input
+            label="Full name"
+            required
+            autoFocus
+            value={nameInput}
+            onChange={(e) => setNameInput(e.target.value)}
+            placeholder="Jane Doe"
+          />
+
+          {nameError && <p className="text-sm text-red-400">{nameError}</p>}
+
+          <div className="flex justify-end gap-3">
+            <Button type="button" variant="secondary" onClick={() => setNameModalOpen(false)}>Cancel</Button>
+            <Button type="submit" icon={Pencil} loading={nameBusy}>
+              Save
             </Button>
           </div>
         </form>

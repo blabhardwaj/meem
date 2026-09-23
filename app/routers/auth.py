@@ -96,6 +96,14 @@ class ChangePasswordRequest(BaseModel):
     new_password: str = Field(min_length=8, max_length=256)
 
 
+class UpdateProfileRequest(BaseModel):
+    full_name: str = Field(min_length=1, max_length=255)
+
+
+class ProfileResponse(BaseModel):
+    full_name: str
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
@@ -413,3 +421,31 @@ def change_password(
     return TokenResponse(
         access_token=create_session_token(str(user.user_id), user.token_version)
     )
+
+
+@router.put("/profile", response_model=ProfileResponse)
+def update_profile(
+    body: UpdateProfileRequest,
+    identity: ResolvedIdentity = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Update the caller's own display name. The only way to set this today
+    otherwise is the name field on the accept-invite form — an org_admin
+    created via register-org, or a user whose invite was accepted without
+    entering a name, has no other path to add or fix it.
+    """
+    user = db.get(User, identity.user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.full_name = body.full_name.strip()
+    db.add(user)
+    record_audit(
+        db, actor_id=user.user_id, action="UPDATE_PROFILE", resource_type="user",
+        resource_id=user.user_id, details={"full_name": user.full_name},
+    )
+    db.commit()
+    db.refresh(user)
+
+    return ProfileResponse(full_name=user.full_name)
