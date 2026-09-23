@@ -87,18 +87,29 @@ def _gather_related_context(db: Session, document: Document, content: str) -> li
                 section = payload.get("section_title", "")
                 chunk_text = payload.get("chunk_text", "")
                 doc_id_str = payload.get("document_id")
-                doc_filename = None
-                if doc_id_str:
-                    try:
-                        rel_doc = db.get(Document, uuid.UUID(str(doc_id_str)))
-                        if rel_doc:
-                            doc_filename = rel_doc.original_filename
-                    except Exception:
-                        pass
+                if not doc_id_str:
+                    continue
+                try:
+                    rel_doc = db.get(Document, uuid.UUID(str(doc_id_str)))
+                except Exception:
+                    rel_doc = None
+                if rel_doc is None:
+                    # Qdrant and Postgres can drift: a point can outlive the
+                    # document row it was indexed for (e.g. a document
+                    # deleted or replaced outside index_document()'s own
+                    # delete-then-upsert, or a leftover from earlier seed
+                    # iterations). Silently falling back to a generic label
+                    # here previously fed a real R009 false positive: a
+                    # long-deleted document's stale content ("Not ready for
+                    # go-live") kept getting handed to the LLM as if it were
+                    # live project content, indefinitely contradicting the
+                    # actual current document that superseded it. Skip
+                    # rather than guess.
+                    continue
+                doc_filename = rel_doc.original_filename
 
                 if chunk_text:
-                    label_prefix = f"Document: {doc_filename}" if doc_filename else "Existing document content"
-                    label = f"{label_prefix} ({section})" if section else label_prefix
+                    label = f"Document: {doc_filename} ({section})" if section else f"Document: {doc_filename}"
                     context.append({
                         "document_id": doc_id_str,
                         "filename": doc_filename,
