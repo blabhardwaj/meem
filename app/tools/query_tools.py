@@ -34,7 +34,7 @@ from app.models.required_document import RequiredDocument
 from app.models.stage import Stage, TeamStageAccess
 from app.models.team import GrantTier, Team, TeamRole, UserTeamMembership
 from app.models.user import User
-from app.models.workflow import WorkflowState
+from app.models.workflow import WorkflowState, WorkflowStatus
 from app.services.access_control import (
     DocumentVisibility,
     _get_team_membership,
