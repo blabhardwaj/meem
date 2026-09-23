@@ -13,7 +13,11 @@ from app.models.graph import Edge, ExtractionRun, Node
 from app.models.project import Project
 from app.models.required_document import RequiredDocument
 from app.models.stage import Stage
-from app.services.graph.llm_extraction import DIRECT_FACT_CONFIDENCE_FLOOR, extract_references_llm
+from app.services.graph.llm_extraction import (
+    DIRECT_FACT_CONFIDENCE_FLOOR,
+    REFERENCE_RELATIONSHIP_TYPES,
+    extract_references_llm,
+)
 from app.services.graph.sync import _upsert_edge, _upsert_node
 
 logger = logging.getLogger(__name__)
@@ -36,7 +40,23 @@ logger = logging.getLogger(__name__)
 # as equivalent — this bump is what makes existing documents get
 # re-extracted with the fix instead of silently keeping their stale (wrong)
 # edges forever.
-EXTRACTOR_VERSION = "2.1.0"
+#
+# Bumped again, 2.1.0 -> 2.2.0: this function never deleted an edge it had
+# previously created — every pass only ever added or upserted-overwrote an
+# edge when a NEW match fired. A document revised to remove the text that
+# originally triggered an EVIDENCES/REFERENCES/etc. edge (e.g. a master
+# lending agreement's boilerplate that happened to name a specific
+# disclosure document by title) kept that edge FOREVER, wrongly satisfying
+# a requirement the new content no longer actually addresses. Fixed by
+# deleting every edge this extractor owns (REFERENCE_RELATIONSHIP_TYPES,
+# imported from llm_extraction.py so the two can never drift apart) sourced
+# from this document, before re-extracting — mirrors claims_analyzer.py's
+# persist_claims()/persist_llm_claims() delete-then-insert pattern, just
+# scoped to the document's graph node (edges aren't version-tagged) instead
+# of a version_id. A cached 2.1.0 run predates this fix and may still be
+# carrying a stale edge from an earlier version's content — this bump
+# forces re-extraction so the cleanup actually runs once per document.
+EXTRACTOR_VERSION = "2.2.0"
 
 ALLOWED_EDGE_TYPES: Set[str] = {
     "PRECEDES",
@@ -154,6 +174,16 @@ def extract_document_relationships(
             source_id=doc.document_id,
             label=doc_label,
         )
+
+        # Delete every edge this extractor owns, sourced from this document,
+        # before re-extracting — see the EXTRACTOR_VERSION 2.2.0 note above.
+        # Edges aren't version-tagged (the source node is the DOCUMENT, not
+        # a specific version), so this must be scoped by node + owned edge
+        # types, not by version_id the way persist_claims() scopes by it.
+        db.query(Edge).filter(
+            Edge.source_node_id == doc_node.node_id,
+            Edge.edge_type.in_(REFERENCE_RELATIONSHIP_TYPES),
+        ).delete(synchronize_session=False)
 
         provenance_metadata = {
             "run_id": str(run.run_id),
