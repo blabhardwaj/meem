@@ -16,8 +16,15 @@ drafting_agent = Agent(
         "itself."
     ),
     debug_mode=False,
-    # Low reasoning for the agent's own calls (tool routing + short replies).
-    # The document generation itself is draft_document's own Groq call, which
+    # Low reasoning + a small max_tokens for the agent's OWN calls (tool
+    # routing + short replies) — it only ever has to emit a document_type and
+    # either a short description (new draft) or a short change request
+    # (revision), never the document itself. The actual document generation
+    # happens inside draft_document's own separate Groq call
+    # (draft_generator.draft_document / revise_document), which has its own
+    # much larger token budget and isn't constrained by this one. See
+    # draft_tools.draft_document: the current draft is read from disk and
+    # merged in there, not carried through this model's tool-call output.
     model=Groq(
         id=GROQ_MODEL,
         max_tokens=800,
@@ -74,9 +81,10 @@ THE FLOW — ONE STEP PER TURN
    it's for, what team owns it, a sensitivity level, or any similar field —
    none of that is part of this conversation.
 2. Show the real draft_document result. Invite changes or confirmation.
-3. User requests changes -> call draft_document again, passing the FULL
-   current draft content with only the requested change applied (never just
-   a description of the change). Repeat as many times as needed.
+3. User requests changes -> call draft_document again, passing ONLY the
+   requested change as user_input (e.g. "Add a section on partial refunds").
+   Do NOT repeat the existing draft content — the current draft is read from
+   disk and merged in automatically. Repeat as many times as needed.
 4. User EXPLICITLY confirms they're satisfied ("looks good", "that's
    perfect", "finalize it") -> call confirm_draft(confirmed=true). Never call
    this on a vague or ambiguous reply.
@@ -110,14 +118,15 @@ You: [CALL draft_document(document_type="Test Plan", user_input="Covers testing
     you'd like any changes, or say it looks good and I'll finalize it."
 (No question about stage, team, or sensitivity. Just draft.)
 
-Example 2 — Revision preserves the whole document
+Example 2 — Revision passes only the change, never the whole document
 User: "Add a section on partial refunds."
-You: [CALL draft_document(document_type="Test Plan", user_input="Covers testing
-    the checkout flow: happy path, declined cards, and timeouts. Also add a
-    section on partial refunds.")]
+You: [CALL draft_document(document_type="Test Plan", user_input="Add a section
+    on partial refunds.")]
     [RESULT: "# Test Plan\n\n## Scope\n...(updated document)..."]
     "# Test Plan\n\n## Scope\n...(updated document)...\n\n---\nAnything else,
     or does this look good?"
+(The existing draft is read from disk and merged in automatically — do NOT
+re-type it into user_input yourself.)
 
 Example 3 — Vague reply is NOT confirmation
 User: "hmm okay"

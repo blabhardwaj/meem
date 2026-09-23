@@ -44,8 +44,9 @@ def _format_layout_block(layout: list[dict]) -> str:
     outline_extraction.py — both share the same {name, purpose} shape) to
     fold into user_input the first time draft_document is called this
     session. Only ever injected on the session's first real drafting turn
-    (see run_draft_turn) — retrofitting a layout onto an in-progress draft
-    doesn't fit draft_document's one-shot "full current content" contract.
+    (see run_draft_turn) — a layout describes the document's overall section
+    structure, which doesn't fit the "requested change" contract a revision
+    turn passes to draft_document instead.
     """
     lines = "\n".join(f"- {s['name']}: {s['purpose']}" for s in layout if s.get("name"))
     return (
@@ -70,9 +71,10 @@ def build_context_prefix(session_id: str, layout: list[dict] | None = None) -> s
     return (
         "[A draft currently exists — the exact working copy below is what is on "
         "disk right now.\n"
-        "- If the user requests ANY edit, pass this FULL text back into "
-        "draft_document's user_input with only the requested change applied — "
-        "preserve all other sections, headings, formatting, and wording.\n"
+        "- If the user requests ANY edit, call draft_document again with ONLY "
+        "the requested change as user_input (e.g. \"Add a section on partial "
+        "refunds\"). Do NOT repeat this draft's text back into user_input — it "
+        "is read from disk and merged in for you automatically.\n"
         "- If the user confirms or approves this draft, call confirm_draft.\n"
         "- If the user is just answering a question, reply conversationally.]\n\n"
         f"--- CURRENT WORKING DRAFT ---\n{current}\n--- END CURRENT DRAFT ---\n\n"

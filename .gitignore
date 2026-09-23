@@ -1,5 +1,6 @@
 # Environment — NEVER commit secrets
 venv/
+.venv/
 .env
 *.env
 *.db

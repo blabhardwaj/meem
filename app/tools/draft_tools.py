@@ -17,25 +17,34 @@ from agno.run import RunContext
 from agno.tools import tool
 
 from app.services.draft_generator import draft_document as _draft_document
-from app.services.draft_workspace import write_working_draft
+from app.services.draft_generator import revise_document as _revise_document
+from app.services.draft_workspace import read_working_draft, write_working_draft
 
 
 @tool
 def draft_document(document_type: str, user_input: str, run_context: RunContext) -> str:
     """
-    Drafts a new document from a document type and the user's free-form
-    description of what it should contain. Use this when the user wants
-    to create, write, or draft a new document — including revisions,
-    which call this again with the FULL updated description.
+    Drafts a new document, or revises the session's existing one, from a
+    document type and a description.
 
     Args:
         document_type: e.g. "Test Plan", "Design Doc", "Requirements Spec" etc.
-        user_input: free-form text describing everything the document
-                    should cover — bullets, paragraphs, or a mix
+        user_input: For a NEW document (no draft exists yet this session):
+                    free-form text describing everything the document should
+                    cover — bullets, paragraphs, or a mix.
+                    For a REVISION (a draft already exists this session):
+                    ONLY the requested change (e.g. "Add a section on partial
+                    refunds," or "Swap sections 11 and 12"). Never repeat the
+                    existing draft content here — it is read from disk
+                    automatically and merged in for you.
     """
     # `run_context` is injected by agno (hidden from the model). We use its
-    # session_id so each conversation writes only its own working file.
-    result = _draft_document(document_type, user_input)
+    # session_id so each conversation reads/writes only its own working file.
+    current = read_working_draft(run_context.session_id)
+    if current:
+        result = _revise_document(document_type, current, user_input)
+    else:
+        result = _draft_document(document_type, user_input)
     write_working_draft(run_context.session_id, result)
     return result
 

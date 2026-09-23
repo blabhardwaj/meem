@@ -30,6 +30,17 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
+@app.on_event("startup")
+def _warm_up_docling():
+    # Docling's model weights load lazily on its first real PDF/DOCX
+    # conversion (~20-30s), not when the converter object is constructed.
+    # Paying that cost here, once, at boot means the first real upload after
+    # the server starts doesn't stall waiting on it — important for a live
+    # demo, where that first upload is often the one someone's watching.
+    from app.services.document_parser import warm_up
+    warm_up()
+
+
 _raw_origins = os.environ.get("ALLOWED_ORIGINS", f"{FRONTEND_URL},http://localhost:5173,http://127.0.0.1:5173")
 ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 
