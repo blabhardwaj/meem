@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from app.api.dependencies import get_current_user, get_db_with_tenant
 from app.models.project import Project
 from app.models.stage import Stage, StageReference, TeamStageAccess
-from app.models.team import Team
+from app.models.team import Team, TeamRole
 from app.services.access_control import (
     get_accessible_stages_for_user,
     get_active_stage_grants_for_user,
@@ -58,12 +58,17 @@ class StageOut(BaseModel):
     # meant N sequential GET /access-requests/status calls after the page
     # had already rendered everything else). Computed from two bulk
     # queries per caller (get_active_stage_grants_for_user,
-    # get_pending_stage_requests_for_user), not one per stage. This is
-    # deliberately NOT the full resolve_effective_access() precedence
-    # (org/project-admin bypass, native team_lead auto-unlock, denied
-    # history) -- has_access above already answers "can I see this
-    # stage's documents at all"; this field only answers "is there an
-    # active or pending REQUEST for it", which is all the button needs.
+    # get_pending_stage_requests_for_user), plus org_admin/project_admin
+    # and native team_lead auto-unlock (mirroring
+    # classify_document_visibility()'s bypass rules) reported as an
+    # implicit 'granted' / 'contributor_confidential' so those callers
+    # never see a "Request confidential access" prompt for something they
+    # can already read without asking. Not the full
+    # resolve_effective_access() precedence (per-user document/team
+    # grants, denied history) -- has_access above already answers "can I
+    # see this stage's documents at all"; this field only answers "does
+    # the caller already have (or is there a pending REQUEST for)
+    # confidential-tier access", which is all the button needs.
     access_request_status: str = "none"
     access_request_tier: str | None = None
 
@@ -171,6 +176,24 @@ def get_workspace(
         ).scalars():
             team_access_by_stage.setdefault(ta.stage_id, []).append(str(ta.team_id))
 
+        # Stages where the caller already has confidential-tier access
+        # without ever filing an AccessRequest: org_admin/project_admin
+        # bypass everything, and a team_lead auto-unlocks confidential
+        # docs on any stage their team NATIVELY holds (TeamStageAccess),
+        # exactly mirroring classify_document_visibility()'s bypass rules
+        # in app/services/access_control.py.
+        if admin_here:
+            auto_confidential_stage_ids = set(accessible_ids)
+        else:
+            team_lead_team_ids = {
+                str(m.team_id) for m in memberships_by_project.get(pid, [])
+                if m.role == TeamRole.team_lead
+            }
+            auto_confidential_stage_ids = {
+                sid for sid in accessible_ids
+                if team_lead_team_ids & set(team_access_by_stage.get(sid, []))
+            }
+
         projects_out.append(ProjectOut(
             project_id=str(pid),
             name=project.name,
@@ -185,12 +208,16 @@ def get_workspace(
                     references=refs_by_stage.get(s.stage_id, []) if s.stage_id in accessible_ids else [],
                     team_access=team_access_by_stage.get(s.stage_id, []) if s.stage_id in accessible_ids else [],
                     access_request_status=(
-                        "granted" if s.stage_id in active_stage_grants
+                        "granted" if (
+                            s.stage_id in active_stage_grants
+                            or s.stage_id in auto_confidential_stage_ids
+                        )
                         else "pending" if s.stage_id in pending_stage_ids
                         else "none"
                     ),
                     access_request_tier=(
-                        active_stage_grants[s.stage_id].tier.value
+                        "contributor_confidential" if s.stage_id in auto_confidential_stage_ids
+                        else active_stage_grants[s.stage_id].tier.value
                         if s.stage_id in active_stage_grants else None
                     ),
                 )

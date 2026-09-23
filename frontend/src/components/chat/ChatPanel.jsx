@@ -573,22 +573,28 @@ const ChatPanel = ({ projectId, mode = 'search', reviewSession = null, initialQu
         ) : (
           <div className="space-y-6">
             {messages.map((msg) => {
+              // Once a draft is finalized, the msg.finalized block below (Structure
+              // Scanner + the finalized DraftDocumentCard) is the complete picture --
+              // rendering the un-finalized draft card here too would just show the
+              // same document content a second time.
               const isDraftDoc =
                 !msg.isError &&
                 msg.sender === 'bot' &&
+                !msg.finalized &&
                 (msg.drafted || Boolean(msg.draftContent) || (isDraft && msg.text && msg.text.includes('# ')));
+              const isWideMessage = isDraftDoc || msg.finalized;
 
               return (
                 <div key={msg.id} className={`flex gap-3 ${msg.sender === 'user' ? 'flex-row-reverse' : ''}`}>
                   <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${msg.sender === 'user' ? 'bg-primary/20 text-primary-light' : 'bg-surface border border-border text-gray-400'}`}>
                     {msg.sender === 'user' ? <User size={16} /> : <Bot size={16} />}
                   </div>
-                  <div className={`${isDraftDoc ? 'w-full max-w-3xl' : 'max-w-[85%]'} rounded-2xl px-4 py-2.5 text-sm ${msg.sender === 'user' ? 'bg-primary text-white rounded-tr-sm' : msg.isError ? 'bg-red-500/10 border border-red-500/30 text-red-300 rounded-tl-sm' : 'bg-surface border border-border text-gray-200 rounded-tl-sm'}`}>
+                  <div className={`${isWideMessage ? 'w-full max-w-3xl' : 'max-w-[85%]'} rounded-2xl px-4 py-2.5 text-sm ${msg.sender === 'user' ? 'bg-primary text-white rounded-tr-sm' : msg.isError ? 'bg-red-500/10 border border-red-500/30 text-red-300 rounded-tl-sm' : 'bg-surface border border-border text-gray-200 rounded-tl-sm'}`}>
                     {msg.isError ? (
                       <p className="whitespace-pre-wrap">{msg.text}</p>
                     ) : msg.sender === 'user' ? (
                       <p className="whitespace-pre-wrap">{msg.text}</p>
-                    ) : isDraftDoc ? (
+                    ) : msg.finalized ? null : isDraftDoc ? (
                       <DraftDocumentCard
                         content={msg.draftContent || msg.text}
                         filename={msg.downloadName}
@@ -634,7 +640,7 @@ const ChatPanel = ({ projectId, mode = 'search', reviewSession = null, initialQu
                     </div>
                   )}
                   {msg.finalized && (
-                    <div className="mt-3 pt-3 border-t border-border/50 space-y-2">
+                    <div className="space-y-2">
                       {msg.scan ? (
                         <div className="rounded-lg border border-border bg-background p-3">
                           <p className="text-xs font-semibold text-gray-200 flex items-center gap-1.5">
@@ -667,6 +673,7 @@ const ChatPanel = ({ projectId, mode = 'search', reviewSession = null, initialQu
                           content={msg.finalContent}
                           filename={msg.downloadName}
                           finalized={true}
+                          hideBody={true}
                           onDownload={msg.downloadUrl
                             ? () => handleDownload(msg.downloadUrl, msg.downloadName)
                             : undefined}

@@ -49,6 +49,7 @@ export default function DraftDocumentCard({
   onDownload = null,
   onUploadToProject = null,
   uploadedInfo = null,
+  hideBody = false,
 }) {
   const [copied, setCopied] = useState(false);
   const { documentContent, conversationalComment } = splitDraftAndComment(content);
@@ -137,13 +138,15 @@ export default function DraftDocumentCard({
         </div>
 
         {/* Document Body */}
-        <div className="p-4 sm:p-6 bg-background/60 overflow-x-auto">
-          <MarkdownMessage content={documentContent} />
-        </div>
+        {!hideBody && (
+          <div className="p-4 sm:p-6 bg-background/60 overflow-x-auto">
+            <MarkdownMessage content={documentContent} />
+          </div>
+        )}
       </div>
 
       {/* Trailing Conversational Comment */}
-      {displayComment && (
+      {!hideBody && displayComment && (
         <div className="flex items-start gap-2 px-1 text-xs text-gray-300">
           <Sparkles size={14} className="text-primary-light mt-0.5 shrink-0" />
           <p className="leading-relaxed">{displayComment}</p>

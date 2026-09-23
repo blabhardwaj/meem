@@ -1218,20 +1218,20 @@ const AuditTab = () => {
           <tr className="text-left text-gray-500 border-b border-border">
             <th className="py-2 pr-4">Time</th>
             <th className="py-2 pr-4">Action</th>
-            <th className="py-2 pr-4">Resource</th>
             <th className="py-2 pr-4">Details</th>
-            <th className="py-2 pr-4">Outcome</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-border/50">
           {entries.map((e) => (
             <tr key={e.log_id} className="text-gray-300">
-              <td className="py-2 pr-4 whitespace-nowrap text-gray-500">{new Date(e.timestamp).toLocaleString()}</td>
-              <td className="py-2 pr-4"><Badge variant="neutral">{e.action}</Badge></td>
-              <td className="py-2 pr-4">{e.resource_type}{e.resource_id ? ` · ${e.resource_id}` : ''}</td>
-              <td className="py-2 pr-4 text-gray-400">{e.details || '—'}</td>
-              <td className="py-2 pr-4">
-                {e.status ? <Badge variant={statusVariant(e.status)}>{e.status}</Badge> : <span className="text-gray-600">—</span>}
+              <td className="py-2 pr-4 whitespace-nowrap text-gray-500 align-top">{new Date(e.timestamp).toLocaleString()}</td>
+              <td className="py-2 pr-4 align-top"><Badge variant="neutral">{e.action}</Badge></td>
+              <td className="py-2 pr-4 text-gray-400 align-top">
+                {e.summary ? (
+                  <>
+                    <span className="text-gray-100 font-medium">{e.actor_name}</span>{' '}{e.summary}
+                  </>
+                ) : (e.details || '—')}
               </td>
             </tr>
           ))}

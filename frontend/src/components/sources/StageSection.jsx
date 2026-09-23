@@ -3,6 +3,7 @@ import { ChevronDown, ShieldCheck, Settings2, ListChecks } from 'lucide-react';
 import Badge from '../ui/Badge';
 import Button from '../ui/Button';
 import Modal from '../ui/Modal';
+import Tooltip from '../ui/Tooltip';
 import DocumentItem from './DocumentItem';
 import { accessRequestsApi } from '../../lib/api';
 
@@ -165,13 +166,14 @@ const StageSection = ({
         <button
           type="button"
           onClick={() => setExpanded((v) => !v)}
-          className="flex flex-1 items-center gap-3 p-4 min-w-0"
+          className="relative flex flex-1 items-center gap-3 p-4 min-w-0"
         >
           <ChevronDown
             size={18}
             className={`text-gray-400 transition-transform duration-200 shrink-0 ${expanded ? 'rotate-180' : ''}`}
           />
-          <h3 className="font-medium text-gray-100 truncate">{stage}</h3>
+          <h3 className="peer font-medium text-gray-100 truncate">{stage}</h3>
+          <Tooltip label={stage} className="left-9 bottom-full mb-2" />
           <Badge variant="neutral">{documents.length}</Badge>
           {requiresApproval && (
             <span className="inline-flex items-center gap-1 text-[11px] text-amber-400" title="Documents in this stage need approval">
