@@ -19,13 +19,15 @@ function withProjectRoles(me) {
     }
   }
   for (const pid of me.project_admin_project_ids || []) roles[pid] = 'project_admin';
-  // his TopNav / pages read user.username / user.full_name / user.role — we only
-  // have email, so alias it so his UI shows something sensible.
+  // his TopNav / pages read user.username / user.full_name / user.role — /auth/me
+  // now returns a real full_name (added alongside this fix), but fall back to
+  // email for the (rare) account that was never given one, e.g. via accept-invite
+  // with no name entered.
   return {
     ...me,
     project_roles: roles,
     username: me.email,
-    full_name: me.email,
+    full_name: me.full_name || me.email,
     role: me.is_org_admin ? 'org_admin' : (Object.values(roles)[0] || 'member'),
   };
 }

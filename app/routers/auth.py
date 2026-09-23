@@ -115,6 +115,7 @@ class TeamMembershipOut(BaseModel):
 class MeResponse(BaseModel):
     user_id: str
     email: str
+    full_name: str | None = None
     tenant_id: str
     tenant_name: str
     is_org_admin: bool
@@ -273,9 +274,11 @@ def me(
     db: Session = Depends(get_db_with_tenant),
 ):
     tenant = db.get(Tenant, identity.tenant_id)
+    user = db.get(User, identity.user_id)
     return MeResponse(
         user_id=str(identity.user_id),
         email=identity.email,
+        full_name=user.full_name if user else None,
         tenant_id=str(identity.tenant_id),
         tenant_name=tenant.name if tenant else "",
         is_org_admin=identity.is_org_admin,
