@@ -13,7 +13,16 @@ class DraftGenerationError(Exception):
 
 def _run_groq_draft_call(messages: list[dict], max_tokens: int) -> str:
     """Shared Groq call + response cleanup for both a fresh draft and a
-    revision — the two differ only in which messages they send in."""
+    revision — the two differ only in which messages they send in.
+
+    Tried splitting this onto a separate, non-reasoning model
+    (qwen/qwen3.8-27b) to cut the ~15-19s reasoning-tax latency on
+    GROQ_MODEL — genuinely faster (~10.7s), but the output quality
+    regressed on a short, unspecific prompt (fell back to bracketed
+    placeholders instead of committing to concrete values). Reverted to
+    GROQ_MODEL: quality on the demo's actual (short) prompt matters more
+    here than the latency difference.
+    """
     create_kwargs = {
         "model": GROQ_MODEL,
         "messages": messages,
