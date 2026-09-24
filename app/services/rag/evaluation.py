@@ -65,16 +65,36 @@ from app.services.rag.embedding import embed_dense  # noqa: E402
 GROQ_OPENAI_COMPAT_BASE_URL = "https://api.groq.com/openai/v1"
 
 
-def build_judge_llm():
+def build_judge_llm(model: str | None = None, max_tokens: int | None = None):
     """
     The LLM ragas uses to JUDGE answers (faithfulness/relevancy checks) —
-    a separate concern from the app's own generation LLM, though it
-    happens to be the same underlying Groq model here. Uses Groq's
+    a separate concern from the app's own generation LLM. Uses Groq's
     OpenAI-compatible endpoint (see module docstring, workaround #2) rather
     than the `groq` SDK client directly.
+
+    Defaults to GROQ_MODEL, but accepts an override: GROQ_MODEL
+    (openai/gpt-oss-20b) is a reasoning model, and ragas' structured-output
+    judge calls (via instructor) were observed reproducibly returning a
+    fully EMPTY completion ("failed_generation": "") for these prompts —
+    consistent with the model spending its entire token budget on hidden
+    <think> reasoning and leaving nothing for the actual structured JSON
+    output, not the "genuinely stochastic json_validate_failed" flakiness
+    this module's docstring originally documented for a different failure
+    shape. A non-reasoning model sidesteps that budget fight entirely.
+
+    max_tokens is also settable per-account: some alternate models on a
+    given Groq account have a much smaller output-tokens-per-minute limit
+    than instructor's ~1024-token default request (e.g. qwen/qwen3.8-27b
+    capped at 1000 OTPM on this account) — pass a value under that cap.
     """
     client = AsyncOpenAI(base_url=GROQ_OPENAI_COMPAT_BASE_URL, api_key=GROQ_API_KEY)
-    return llm_factory(GROQ_MODEL, provider="openai", client=client)
+    resolved_model = model or GROQ_MODEL
+    kwargs: dict = {}
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
+    if "gpt-oss" in resolved_model.lower():
+        kwargs["reasoning_effort"] = "low"
+    return llm_factory(resolved_model, provider="openai", client=client, **kwargs)
 
 
 class FastEmbedRagasEmbedding(BaseRagasEmbedding):
@@ -97,7 +117,7 @@ class FastEmbedRagasEmbedding(BaseRagasEmbedding):
         return self.embed_texts(texts)
 
 
-def build_metrics(reference_free: bool = True):
+def build_metrics(reference_free: bool = True, judge_model: str | None = None, judge_max_tokens: int | None = None):
     """
     Returns the standard metric set, wired to the Groq judge LLM and the
     app's own embeddings.
@@ -107,8 +127,10 @@ def build_metrics(reference_free: bool = True):
         AnswerRelevancy, ContextPrecisionWithoutReference) — the practical
         choice when you haven't built a golden answer set yet. Set False
         to also include ContextRecall, which needs `reference` per sample.
+    judge_model / judge_max_tokens: overrides for the judge LLM — see
+        build_judge_llm().
     """
-    llm = build_judge_llm()
+    llm = build_judge_llm(judge_model, judge_max_tokens)
     embeddings = FastEmbedRagasEmbedding()
 
     metrics = {
