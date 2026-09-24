@@ -30,6 +30,7 @@ from agno.run.base import RunStatus
 
 from app.agents.rag_agent import rag_agent
 from app.database import SessionLocal
+from app.services.agent_retry import run_agent_resilient
 from app.services.chat_history import append_message, resolve_chat_session
 from app.services.query_context import reset_query_context, set_query_context
 from app.services.rag_context import get_rag_context, reset_rag_context, set_rag_context
@@ -106,7 +107,8 @@ def run_rag_turn(
         telemetry = {}
         try:
             t_agent_start = time.perf_counter()
-            response = rag_agent.run(
+            response = run_agent_resilient(
+                rag_agent,
                 message or "continue",
                 session_id=_agno_session_id(canonical),
                 user_id=str(user_id),

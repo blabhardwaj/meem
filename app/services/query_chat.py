@@ -27,6 +27,7 @@ from agno.run.base import RunStatus
 
 from app.agents.query_agent import query_agent
 from app.database import SessionLocal
+from app.services.agent_retry import run_agent_resilient
 from app.services.chat_history import append_message, resolve_chat_session
 from app.services.query_context import reset_query_context, set_query_context
 
@@ -88,7 +89,8 @@ def run_query_turn(
 
         token = set_query_context(user_id=user_id, project_id=project_id)
         try:
-            response = query_agent.run(
+            response = run_agent_resilient(
+                query_agent,
                 message or "continue",
                 session_id=_agno_session_id(canonical),
                 user_id=str(user_id),

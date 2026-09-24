@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.agents.drafting_agent import drafting_agent
 from app.services import draft_workspace
+from app.services.agent_retry import run_agent_resilient
 from app.services.ai_usage import check_and_consume_ai_usage
 from app.services.draft_chat import build_context_prefix
 from app.services.document_finalize import finalize_document_revision
@@ -61,7 +62,7 @@ def run_review_turn(
 
     prefix = build_context_prefix(session_id)
     before = draft_workspace.read_working_draft(session_id)
-    response = drafting_agent.run(prefix + (message or "continue"), session_id=session_id)
+    response = run_agent_resilient(drafting_agent, prefix + (message or "continue"), session_id=session_id)
 
     # See the matching check in app/services/document_version_review.py: a
     # failed LLM call must not fall through to the confirm_draft/finalize

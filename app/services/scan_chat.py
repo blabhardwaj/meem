@@ -20,6 +20,7 @@ collide with a drafting/rag session that happens to reuse the same uuid.
 from agno.run.base import RunStatus
 
 from app.agents.scanner_agent import scanner_agent
+from app.services.agent_retry import run_agent_resilient
 
 _TOOL_NAMES = ("score_document", "reform_document", "scan_for_injection")
 
@@ -46,7 +47,7 @@ def run_scan_turn(session_id: str, message: str) -> dict:
     Raises:
         ScanTurnError — the model/agent run failed.
     """
-    response = scanner_agent.run(message or "continue", session_id=f"scan-{session_id}")
+    response = run_agent_resilient(scanner_agent, message or "continue", session_id=f"scan-{session_id}")
 
     if getattr(response, "status", None) == RunStatus.error:
         raise ScanTurnError(getattr(response, "content", "") or "agent run failed")

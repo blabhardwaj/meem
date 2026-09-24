@@ -27,6 +27,7 @@ from sqlalchemy import text
 
 from app.agents.search_agent import search_agent
 from app.database import SessionLocal
+from app.services.agent_retry import run_agent_resilient
 from app.services.ai_usage import check_and_consume_ai_usage
 from app.services.chat_history import append_message, resolve_chat_session
 from app.services.rag_context import get_rag_context, reset_rag_context, set_rag_context
@@ -38,10 +39,10 @@ try:
     # behaves exactly as if DEMO_CACHE_MODE were unset (no-op both ways).
     from app.services.demo_cache import find_cached_response, record_response
 except ModuleNotFoundError:
-    def find_cached_response(project_id, question):  # noqa: ANN001, ARG001
+    def find_cached_response(project_id, user_id, question):  # noqa: ANN001, ARG001
         return None
 
-    def record_response(project_id, question, response):  # noqa: ANN001, ARG001
+    def record_response(project_id, user_id, question, response):  # noqa: ANN001, ARG001
         pass
 
 _TOOL_NAMES = (
@@ -121,7 +122,7 @@ def run_search_turn(
         # DEMO_CACHE_MODE=replay. A hit skips the live agent call (and its AI
         # usage charge) entirely; a miss falls through to the real call below
         # exactly as if caching were off.
-        cached = find_cached_response(project_id, message or "")
+        cached = find_cached_response(project_id, user_id, message or "")
         if cached is not None:
             reply = cached.get("reply", "")
             tools = cached.get("tools_called", [])
@@ -145,7 +146,8 @@ def run_search_turn(
         telemetry = {}
         try:
             t_agent_start = time.perf_counter()
-            response = search_agent.run(
+            response = run_agent_resilient(
+                search_agent,
                 message or "continue",
                 session_id=_agno_session_id(canonical),
                 user_id=str(user_id),
@@ -176,7 +178,7 @@ def run_search_turn(
         # Demo-cache record (see app/services/demo_cache.py) — a no-op unless
         # DEMO_CACHE_MODE=record. Run during rehearsal to build up the cache
         # from real live calls before switching to replay for the live demo.
-        record_response(project_id, message or "", {"reply": reply, "tools_called": tools})
+        record_response(project_id, user_id, message or "", {"reply": reply, "tools_called": tools})
 
         return {
             "reply": reply,

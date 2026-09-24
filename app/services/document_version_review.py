@@ -24,6 +24,7 @@ from app.agents.revision_agent import revision_agent
 from app.models.document import Document, DocumentVersion
 from app.services import draft_workspace
 from app.services.access_control import can_edit_document
+from app.services.agent_retry import run_agent_resilient
 from app.services.ai_usage import check_and_consume_ai_usage
 from app.services.document_diff import diff_summary
 from app.services.document_finalize import failed_criteria, run_full_scan, scan_passed
@@ -238,7 +239,7 @@ def run_version_review_turn(
 
     prefix = _build_context_prefix(session_id)
     before = draft_workspace.read_working_draft(session_id)
-    response = revision_agent.run(prefix + (message or "continue"), session_id=session_id)
+    response = run_agent_resilient(revision_agent, prefix + (message or "continue"), session_id=session_id)
 
     # A failed LLM call (rate limit, network, etc.) must never fall through
     # to the confirm_revision/finalize check below: agno's RunResponse can

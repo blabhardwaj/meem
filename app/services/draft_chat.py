@@ -26,6 +26,7 @@ from app.agents.drafting_agent import drafting_agent
 from app.database import SessionLocal
 from app.models.chat import ChatMessage, ChatSession
 from app.services import draft_workspace
+from app.services.agent_retry import run_agent_resilient
 from app.services.ai_usage import check_and_consume_ai_usage
 from app.services.chat_history import append_message, resolve_chat_session
 
@@ -184,7 +185,7 @@ def run_draft_turn(
 
         prefix = build_context_prefix(canonical, layout=layout)
         before = draft_workspace.read_working_draft(canonical)
-        response = drafting_agent.run(prefix + (message or "continue"), session_id=canonical)
+        response = run_agent_resilient(drafting_agent, prefix + (message or "continue"), session_id=canonical)
 
         # A failed LLM call (rate limit, network, etc.) must never fall
         # through to the confirm_draft check below: agno's RunResponse can
