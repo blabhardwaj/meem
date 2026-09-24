@@ -157,7 +157,11 @@ const VersionDiffModal = ({ document, initialOutcome, onClose, onFinalized }) =>
           <div className="space-y-3">
             {messages.map((m, i) => (
               <div key={i} className={`text-sm rounded-lg p-3 ${m.role === 'user' ? 'bg-primary/10 text-gray-100 ml-8' : 'bg-background/60 text-gray-300 mr-8'}`}>
-                {m.content}
+                {m.role === 'user' ? (
+                  <p className="whitespace-pre-wrap">{m.content}</p>
+                ) : (
+                  <MarkdownMessage content={m.content} />
+                )}
               </div>
             ))}
           </div>
