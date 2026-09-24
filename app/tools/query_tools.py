@@ -207,11 +207,19 @@ def _teams_for_stage(db, stage_id: uuid.UUID) -> list[Team]:
 @tool
 def get_document_info(document_reference: str, stage_reference: str | None = None) -> dict:
     """Metadata for ONE named document: uploader, approval status, sensitivity,
-    team, stage, upload date. `document_reference` is the title/filename/ID as the
-    user said it. `stage_reference` is an optional stage name or stage UUID to
-    disambiguate when identical filenames exist in different stages. Status "not_found"
-    also covers a document the user may not see — relay it as "can't find it", don't speculate.
-    "ambiguous" -> ask which.
+    team, stage, upload date, and who can approve it. `document_reference` is
+    the title/filename/ID as the user said it. `stage_reference` is an
+    optional stage name or stage UUID to disambiguate when identical
+    filenames exist in different stages. Status "not_found" also covers a
+    document the user may not see — relay it as "can't find it", don't
+    speculate. "ambiguous" -> ask which.
+
+    Includes "approval_authorities" (the team's lead(s) plus this project's
+    Project Admin(s) and the tenant's Org Admin(s) — all of whom can approve
+    it, per approve_document's real permission check) so a question like
+    "who uploaded X and who do I contact for approval" is fully answerable
+    from this ONE tool call — you may only call one tool per message, so
+    don't rely on also calling who_can_approve in the same turn.
     """
     ctx = get_query_context()
     db = _scoped_session(ctx.user_id)
@@ -252,6 +260,16 @@ def get_document_info(document_reference: str, stage_reference: str | None = Non
                 approved_time = (current_v.approved_at if current_v else None) or (wf.approval_timestamp if wf else None)
                 approver["approved_at"] = approved_time.isoformat() if approved_time else None
 
+        approval_authorities = None
+        if doc.uploaded_as_team_id is not None:
+            user = db.get(User, ctx.user_id)
+            tenant_id = user.tenant_id if user else None
+            approval_authorities = {
+                "team_leads": _team_leads(db, doc.uploaded_as_team_id),
+                "project_admins": _project_admins(db, doc.project_id),
+                "org_admins": _org_admins(db, tenant_id) if tenant_id else [],
+            }
+
         return {
             "status": "found",
             "document": doc.original_filename,
@@ -259,6 +277,7 @@ def get_document_info(document_reference: str, stage_reference: str | None = Non
             "uploaded_by": uploader["email"] if uploader else _email(db, doc.uploaded_by),
             "approver": approver,
             "approval_status": approval_status,
+            "approval_authorities": approval_authorities,
             "sensitivity": doc.sensitivity_level.name,
             "team": _team_name(db, doc.uploaded_as_team_id),
             "stage": _stage_name(db, doc.stage_id),
