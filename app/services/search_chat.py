@@ -37,13 +37,16 @@ try:
     # app/services/demo_cache.py is gitignored (demo-rehearsal tooling, not
     # committed) — optional on purpose, so a clone without it still boots and
     # behaves exactly as if DEMO_CACHE_MODE were unset (no-op both ways).
-    from app.services.demo_cache import find_cached_response, record_response
+    from app.services.demo_cache import find_cached_response, record_response, replay_delay_seconds
 except ModuleNotFoundError:
     def find_cached_response(project_id, user_id, question):  # noqa: ANN001, ARG001
         return None
 
     def record_response(project_id, user_id, question, response):  # noqa: ANN001, ARG001
         pass
+
+    def replay_delay_seconds():
+        return 0.0
 
 _TOOL_NAMES = (
     "search_documents",
@@ -128,6 +131,13 @@ def run_search_turn(
             tools = cached.get("tools_called", [])
             append_message(db, session_id=canonical, role="assistant", content=reply)
             db.commit()
+            # An instant reply to a question that visibly took a few seconds
+            # to type would read as obviously canned to a live audience —
+            # pad it to feel like a real call. Only fires on an actual cache
+            # hit, never on a miss (which already takes real time live).
+            delay = replay_delay_seconds()
+            if delay > 0:
+                time.sleep(delay)
             t_turn_total = (time.perf_counter() - t_turn_start) * 1000
             return {
                 "reply": reply,
