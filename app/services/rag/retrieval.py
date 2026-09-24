@@ -18,8 +18,13 @@ Pipeline (retrieve()):
      blocked_by_sensitivity (for a later "request access" suggestion —
      built elsewhere, not here). not_visible is dropped with no trace.
   6. Cross-encoder rerank of the ENTIRE fully_allowed survivor set (not a
-     pre-truncated top-k) — this produces the actual final ordering.
-  7. Relevance floor applied AFTER reranking (see reranking.py).
+     pre-truncated top-k) — this produces the base ordering.
+  7. Relevance floor applied AFTER reranking (see reranking.py), plus a
+     document-level "sibling rescue": the document behind the single best
+     cross-encoder match gets up to a couple of its other coarse-ranked
+     chunks kept even if the cross-encoder individually floors them (see
+     _rerank's docstring for the real-data cross-encoder failure this
+     fixes — it badly under-scores some enumerated/tabular content).
   8. Final top TOP_K chunks.
 """
 
@@ -187,29 +192,74 @@ def _access_filter_candidates(
     return allowed, blocked_ids
 
 
+# How many of the top cross-encoder document's OTHER coarse-ranked chunks
+# to rescue even if they individually fail RELEVANCE_FLOOR — see _rerank.
+_SIBLING_RESCUE_LIMIT = 2
+
+
 def _rerank(query: str, points: list) -> list[RetrievedChunk]:
     """
     Cross-encoder rerank of the FULL candidate set passed in (never
-    pre-truncated), floor applied after, sorted descending by score.
+    pre-truncated), floor applied after, sorted descending by score — plus
+    a document-level "sibling rescue" for a real cross-encoder failure mode
+    found on live data.
+
+    A real query ("What eligibility criteria does an SME need to meet for
+    FlexCredit, and how is the credit limit decided?") showed the
+    cross-encoder can badly under-score jargon-heavy enumerated/tabular
+    content: the chunk that actually lists the eligibility criteria scored
+    deep in negative territory and was floored out entirely, while a vague
+    intro sentence from the SAME document — which merely echoes the
+    query's wording without answering it — scored highest of the whole
+    50-candidate set. Splitting the query into single-intent sub-questions
+    did not fix the cross-encoder's score for that chunk either (tested
+    directly); this is the model's actual weakness on this content style,
+    not a compound-query artifact. The coarse (dense+sparse) stage,
+    unaffected by this, had already ranked the correct chunk #4 of 50.
+
+    So: once the single best cross-encoder match is known, its source
+    document is treated as confirmed relevant, and up to
+    _SIBLING_RESCUE_LIMIT of that SAME document's other coarse-ranked
+    chunks are kept even if the cross-encoder individually floors them —
+    picked by coarse rank (points arrives in coarse RRF order), since that
+    signal is what actually found them. This only engages for chunks
+    sharing a document with the top match, so it can't inject unrelated
+    noise from a different document; the tradeoff is displacing the
+    lowest-ranked ordinary floor-passing chunks to make room within TOP_K.
     """
     if not points:
         return []
 
     texts = [p.payload["chunk_text"] for p in points]
-    scores = rerank_scores(query, texts)
+    ce_scores = rerank_scores(query, texts)
 
-    chunks = [
-        RetrievedChunk(
-            document_id=uuid.UUID(p.payload["document_id"]),
-            section_title=p.payload["section_title"],
-            chunk_text=p.payload["chunk_text"],
-            stage_id=uuid.UUID(p.payload["stage_id"]),
-            score=score,
-        )
-        for p, score in zip(points, scores)
+    if max(ce_scores) <= RELEVANCE_FLOOR:
+        return []
+
+    ce_order = sorted(range(len(points)), key=lambda i: ce_scores[i], reverse=True)
+    floor_passing = [i for i in ce_order if ce_scores[i] > RELEVANCE_FLOOR]
+
+    top_doc_id = points[ce_order[0]].payload["document_id"]
+    already_included = set(floor_passing)
+    sibling_idxs = [
+        i for i in range(len(points))
+        if i not in already_included and points[i].payload["document_id"] == top_doc_id
     ]
-    chunks.sort(key=lambda c: c.score, reverse=True)
-    return [c for c in chunks if c.score > RELEVANCE_FLOOR]
+    rescued = sibling_idxs[:_SIBLING_RESCUE_LIMIT]
+
+    budget = max(TOP_K - len(rescued), 0)
+    final_idx = floor_passing[:budget] + rescued if rescued else floor_passing
+
+    return [
+        RetrievedChunk(
+            document_id=uuid.UUID(points[i].payload["document_id"]),
+            section_title=points[i].payload["section_title"],
+            chunk_text=points[i].payload["chunk_text"],
+            stage_id=uuid.UUID(points[i].payload["stage_id"]),
+            score=ce_scores[i],
+        )
+        for i in final_idx
+    ]
 
 
 def retrieve(
