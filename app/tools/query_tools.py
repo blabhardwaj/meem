@@ -32,7 +32,7 @@ from app.models.document import Document, DocumentVersion
 from app.models.project import Project
 from app.models.required_document import RequiredDocument
 from app.models.stage import Stage, TeamStageAccess
-from app.models.team import GrantTier, Team, TeamRole, UserTeamMembership
+from app.models.team import GrantTier, ProjectAdmin, Team, TeamRole, UserTeamMembership
 from app.models.user import User
 from app.models.workflow import WorkflowState, WorkflowStatus
 from app.services.access_control import (
@@ -117,6 +117,20 @@ def _team_leads(db, team_id: uuid.UUID) -> list[str]:
         )
     ).scalars().all()
     return sorted(e for e in (_email(db, r.user_id) for r in rows) if e)
+
+
+def _project_admins(db, project_id: uuid.UUID) -> list[str]:
+    rows = db.execute(
+        select(ProjectAdmin).where(ProjectAdmin.project_id == project_id)
+    ).scalars().all()
+    return sorted(e for e in (_email(db, r.user_id) for r in rows) if e)
+
+
+def _org_admins(db, tenant_id: uuid.UUID) -> list[str]:
+    rows = db.execute(
+        select(User).where(User.tenant_id == tenant_id, User.is_org_admin.is_(True))
+    ).scalars().all()
+    return sorted(u.email for u in rows if u.email)
 
 
 def _user_profile(db, user_id: uuid.UUID | None, team_id: uuid.UUID | None = None, project_id: uuid.UUID | None = None) -> dict | None:
@@ -342,15 +356,29 @@ def get_version_history(document_reference: str, stage_reference: str | None = N
 
 @tool
 def who_can_approve(stage_or_team_reference: str) -> dict:
-    """Who can approve work for a team or stage — the team lead(s), by email.
+    """Who can approve work for a team or stage, by email.
     `stage_or_team_reference` is a team or stage name. If it's a stage that
     doesn't require approval, status is "stage_no_approval" — say so plainly
     instead of naming anyone. "not_found" if it matches no team or stage.
+
+    Every result includes "team_leads" (the team's own lead(s)) AND
+    "project_wide_approvers" (this project's Project Admin(s) plus the
+    tenant's Org Admin(s)) — approve_document's actual permission check
+    (has_permission in access_control.py) grants org_admin and project_admin
+    a full bypass regardless of team membership, so they can approve on ANY
+    team in the project, not just the one they happen to lead. Relay BOTH
+    groups as valid approvers; do not imply the team lead is the only one.
     """
     ctx = get_query_context()
     db = _scoped_session(ctx.user_id)
     try:
         ref = (stage_or_team_reference or "").strip()
+        user = db.get(User, ctx.user_id)
+        tenant_id = user.tenant_id if user else None
+        project_wide = {
+            "project_admins": _project_admins(db, ctx.project_id),
+            "org_admins": _org_admins(db, tenant_id) if tenant_id else [],
+        }
 
         team_id = resolve_team(db, ctx.project_id, ref)
         if team_id is not None:
@@ -358,7 +386,8 @@ def who_can_approve(stage_or_team_reference: str) -> dict:
                 "status": "team_leads",
                 "scope": "team",
                 "team": _team_name(db, team_id),
-                "approvers": _team_leads(db, team_id),
+                "team_leads": _team_leads(db, team_id),
+                "project_wide_approvers": project_wide,
             }
 
         stage_id = resolve_stage(db, ctx.project_id, ref)
@@ -371,9 +400,10 @@ def who_can_approve(stage_or_team_reference: str) -> dict:
                 "status": "stage_teams",
                 "stage": stage.name,
                 "teams": [
-                    {"team": t.name, "approvers": _team_leads(db, t.team_id)}
+                    {"team": t.name, "team_leads": _team_leads(db, t.team_id)}
                     for t in sorted(teams, key=lambda t: t.name)
                 ],
+                "project_wide_approvers": project_wide,
             }
 
         return {
